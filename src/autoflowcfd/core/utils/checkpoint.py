@@ -14,7 +14,12 @@
 真正决定续算的量已逐项写进 metadata 并在续算时核对）、假的跨后端转换、`h5py` 可选兜底（pyproject 必需依赖）、
 零调用的 `should_save` / `list_checkpoints` / `get_latest_checkpoint` / `cleanup_old_checkpoints` /
 `resume_from_checkpoint`；写出失败此前被吞掉只返回 None，求解照样往下跑而没有可续算的检查点，现在直接报错。
+
+写出是原子的（I-85）：先写同目录的临时文件，写完再 `os.replace` 成最终文件名。此前直接以最终文件名截断写入，
+写到一半崩溃 / 断电即留下同名的损坏 checkpoint，且已覆盖了同迭代号的旧文件。
 """
+
+import os
 
 from datetime import datetime
 from pathlib import Path
@@ -75,7 +80,8 @@ class CheckpointManager:
             checkpoint 文件路径
 
         Raises:
-            OSError 等：写出失败（不吞掉——没有可续算的检查点必须让调用方知道）
+            OSError 等：写出失败（不吞掉——没有可续算的检查点必须让调用方知道）；失败时不留下临时文件，同名旧文件
+            保持原样
         """
         from autoflowcfd.core.utils.checkpoint_load import PRISM_BASIS, SP_LAYOUT
 
@@ -83,17 +89,33 @@ class CheckpointManager:
         ckpt_path = self.checkpoint_dir / f"checkpoint_iter_{iteration:06d}.h5"
         logger.debug(f"Saving checkpoint: {ckpt_path}")
 
-        with h5py.File(ckpt_path, 'w') as f:
+        tmp_path = ckpt_path.with_name(ckpt_path.name + ".tmp")
+        try:
+            self._write(tmp_path, solution, history, iteration, metadata, extra_fields, PRISM_BASIS, SP_LAYOUT)
+            os.replace(tmp_path, ckpt_path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        if not self.quiet:
+            logger.info(f"Checkpoint saved: {ckpt_path} ({iteration} iterations)")
+        return str(ckpt_path)
+
+    @staticmethod
+    def _write(path: Path, solution, history: dict, iteration: int, metadata, extra_fields, prism_basis: str,
+               sp_layout: str) -> None:
+        """把一个 checkpoint 完整写进 `path`（`save` 先写临时文件再改名）。"""
+        with h5py.File(path, 'w') as f:
             meta_group = f.create_group("metadata")
             meta_group.attrs['iteration'] = iteration
-            meta_group.attrs['timestamp'] = np.string_(datetime.now().isoformat())
+            meta_group.attrs['timestamp'] = np.bytes_(datetime.now().isoformat())
             # 布局版本：棱柱基、解点存储宽度、四面体节点集。同一份数组在不同布局下含义不同而形状可能相同，
             # 读取端据此硬失败或精确迁移（`checkpoint_load.py`）。
-            meta_group.attrs['prism_basis'] = np.string_(PRISM_BASIS)
-            meta_group.attrs['sp_layout'] = np.string_(SP_LAYOUT)
-            meta_group.attrs['tet_node_set'] = np.string_(TET_NODE_SET)
+            meta_group.attrs['prism_basis'] = np.bytes_(prism_basis)
+            meta_group.attrs['sp_layout'] = np.bytes_(sp_layout)
+            meta_group.attrs['tet_node_set'] = np.bytes_(TET_NODE_SET)
             for key, value in (metadata or {}).items():
-                meta_group.attrs[key] = np.string_(value) if isinstance(value, str) else value
+                meta_group.attrs[key] = np.bytes_(value) if isinstance(value, str) else value
 
             sol_group = f.create_group("solution")
             sol_group.create_dataset("conserved", data=solution)
@@ -119,10 +141,6 @@ class CheckpointManager:
                         stats_group.create_dataset(stat_name, data=stat_data)
                     else:
                         stats_group.attrs[stat_name] = stat_data
-
-        if not self.quiet:
-            logger.info(f"Checkpoint saved: {ckpt_path} ({iteration} iterations)")
-        return str(ckpt_path)
 
     def load(self, checkpoint_path: Union[str, Path]) -> Tuple[np.ndarray, dict, int, dict]:
         """读取 checkpoint，返回 `(solution, history, iteration, metadata)`；见 `checkpoint_load.py::load_checkpoint`。"""

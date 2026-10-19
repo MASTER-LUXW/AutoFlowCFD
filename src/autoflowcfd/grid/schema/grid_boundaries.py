@@ -257,7 +257,7 @@ class BoundaryMap:
             # BC类型
             group.create_dataset(
                 f"{prefix}/boundary_{i}/bc_type",
-                data=np.string_(self.bc_types[name])
+                data=np.bytes_(self.bc_types[name])
             )
             
             # 属性 ID
@@ -272,7 +272,7 @@ class BoundaryMap:
             params_json = json.dumps(params)
             group.create_dataset(
                 f"{prefix}/boundary_{i}/parameters",
-                data=np.string_(params_json)
+                data=np.bytes_(params_json)
             )
     
     @classmethod
