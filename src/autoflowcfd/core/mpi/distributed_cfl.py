@@ -86,11 +86,11 @@ class _DistributedFaceConnectivityView:
     正是对所有面记录求和，所以这是自洽的）。不能改用
     `base_flat.true_area_weight`：Part1 精度修复后那个量对四边形侧面的
     两条重复记录都存"整张四边形面"的值（不再是各自的真实半面），直接
-    求和会把该面算两次。也不能走 `_extract_p0_face_geometry`：它要求
+    求和会把该面算两次。也不能走 `p0_face_geometry`：它要求
     `_KernelFaceData` 类型（`base_flat` 是 `FlatFaceGeometry`，会掉进
     只对逐面对象列表有效的慢速路径），且它取的是 fp 0 的值、只对 P0
     成立。（顺带说明：多 GPU 路径原先那份 `_compute_local_time_step_gpu`
-    正是这么调的——用 `dist_fc` 当 `fc` 传给 `_extract_p0_face_geometry`，
+    正是这么调的——用 `dist_fc` 当 `fc` 传给 `p0_face_geometry`，
     而 `dist_fc` 没有 `.normal`/`.area`，一旦被调用必定 AttributeError；
     它从未被 `step()` 调用过，所以是个潜伏 bug，本轮一并修掉。）
 

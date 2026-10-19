@@ -16,7 +16,7 @@ from tests.unit.test_gpu_solver_order_continuation import _make_solver, _patch_g
 def test_p0_inviscid_residual_is_evaluated_at_trial_state(monkeypatch):
     import autoflowcfd.core.gpu.residual.gpu_p0_inviscid as p0_mod
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, primitive_to_conserved
-    from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry, _precompute_ghost_states
+    from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry, _precompute_ghost_states
 
     solver = _make_solver(0)
     assert solver.mesh.n_points_1d == 1
@@ -47,7 +47,7 @@ def test_p0_inviscid_residual_is_evaluated_at_trial_state(monkeypatch):
     np.testing.assert_allclose(seen["Q_flat"], Q_expected, rtol=1e-14, atol=0.0)
 
     fc = solver.mesh.face_connectivity
-    normal, _ = _extract_p0_face_geometry(solver.mesh.face_flux_points, fc, fc.n_faces)
+    normal, _ = p0_face_geometry(solver.mesh.face_flux_points)
     ghost_expected = _precompute_ghost_states(solver.mesh.face_flux_points, fc, solver.boundary_ghost_provider,
                                               Q_expected, fc.n_faces, normal)
     np.testing.assert_allclose(seen["Q_ghost"], ghost_expected, rtol=1e-14, atol=0.0)

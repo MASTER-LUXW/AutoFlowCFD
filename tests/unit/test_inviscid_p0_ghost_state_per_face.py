@@ -20,7 +20,7 @@ import pytest
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid_p0 import (
-    _extract_p0_face_geometry,
+    p0_face_geometry,
     _precompute_ghost_states,
     compute_inviscid_residual_fv_p0,
 )
@@ -79,7 +79,7 @@ class TestGhostStateIndexedByFaceNotByCell:
         Q_all = np.tile(
             np.array([RHO_INF, U_INF, 0.0, 0.0, P_INF]), (n_cells, 1)
         )
-        unit_normals, _ = _extract_p0_face_geometry(ffp_list, fc, n_faces)
+        unit_normals, _ = p0_face_geometry(ffp_list)
 
         provider = _NormalEncodingGhostProvider()
         Q_ghost = _precompute_ghost_states(ffp_list, fc, provider, Q_all, n_faces, unit_normals)
@@ -123,7 +123,7 @@ class TestGhostStateIndexedByFaceNotByCell:
         Q_all = np.tile(
             np.array([RHO_INF, U_INF, 0.0, 0.0, P_INF]), (n_cells, 1)
         )
-        unit_normals, _ = _extract_p0_face_geometry(ffp_list, fc, n_faces)
+        unit_normals, _ = p0_face_geometry(ffp_list)
         provider = _NormalEncodingGhostProvider()
 
         Q_ghost_correct = _precompute_ghost_states(ffp_list, fc, provider, Q_all, n_faces, unit_normals)

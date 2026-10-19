@@ -96,13 +96,14 @@ class _KernelFaceData:
         'owner_tri_slot', 'neighbor_tri_slot',
         '_face_conn', '_sps_1d',
         '_owner_groups', '_neighbor_groups',
-        '_cache',
+        '_cache', '_p0_geometry',
     )
 
     def __init__(self, **kw):
         for k, v in kw.items():
             object.__setattr__(self, k, v)
         self._cache = {}
+        self._p0_geometry = None    # P0 面几何缓存（core/fr_residual/inviscid_p0.py::p0_face_geometry）
 
     def __len__(self):
         return self.n_faces

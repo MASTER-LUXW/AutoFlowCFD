@@ -72,11 +72,11 @@ class _GPUSolverResidualMixin:
         if cache is not None and cache["mesh"] is self.mesh:
             return cache
         cp = get_cupy()
-        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+        from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry
 
         fc = self.mesh.face_connectivity
         ffp = self.mesh.face_flux_points
-        normal, area_w = _extract_p0_face_geometry(ffp, fc, fc.n_faces)
+        normal, area_w = p0_face_geometry(ffp)
         volumes = self.mesh_data.get("cell_volumes")
         cache = {
             "mesh": self.mesh,

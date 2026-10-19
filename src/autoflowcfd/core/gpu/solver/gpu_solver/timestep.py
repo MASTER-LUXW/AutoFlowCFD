@@ -138,7 +138,7 @@ class _GPUSolverTimeStepMixin:
         换阶不变）。
 
         面积与法向取 `face_connectivity` 的物理面几何，与 CPU `cfl.py`、CPU 分布式 `distributed_cfl.py`、
-        多 GPU 同一口径。2026-10-09 以前这里取 `inviscid_p0.py::_extract_p0_face_geometry` 的"面积权重"：
+        多 GPU 同一口径。2026-10-09 以前这里取 `inviscid_p0.py::p0_face_geometry` 的"面积权重"：
         那是每面**第一个通量点**的求积权重，只在 P0（每面一个通量点）等于整面面积；P1 下各单元的面积和
         只有真实值的 1/3.35、P2 只有 1/10.3（棱柱；四面体 1/2.54、1/7.30），对流步长限制随之放大同样的
         倍数——单 GPU 的实际 CFL 是名义值的 3~10 倍，且每步都把这两个数组重新上传一次。

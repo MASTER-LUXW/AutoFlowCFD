@@ -16,7 +16,7 @@
 清零后残差不变得到确认——它纯粹是绝对压力 * 未封闭法向的伪影，与低马赫/
 CFL 刚性无关）。
 
-修复（`inviscid_p0.py::_extract_p0_face_geometry`）：对每个
+修复（`inviscid_p0.py::p0_face_geometry`）：对每个
 (owner_cell, owner_cube_face) / (neighbor_cell, neighbor_cube_face) 组里
 有 >=2 条记录的情形——全部记录共享同一个真实邻居（或 owner）时，只保留
 主记录精确的整面值，其余记录面积清零（重复、不是多源——两条都加会算两遍）。
@@ -31,7 +31,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry
 from autoflowcfd.fr.face_flux_points.data import _KernelFaceData
 
 
@@ -69,7 +69,8 @@ class TestDuplicateRecordsSameNeighborAreDeduplicated:
             is_boundary=np.array([False, False]),
         )
 
-        unit_normals, area_weights = _extract_p0_face_geometry(ffp, fc, n_faces)
+        ffp._face_conn = fc
+        unit_normals, area_weights = p0_face_geometry(ffp)
 
         assert area_weights[0] == 5.0  # 主记录保留精确的整面值
         assert area_weights[1] == 0.0  # duplicate zeroed, not double-counted
@@ -96,7 +97,8 @@ class TestDuplicateRecordsSameNeighborAreDeduplicated:
             is_boundary=np.array([True, True]),
         )
 
-        _, area_weights = _extract_p0_face_geometry(ffp, fc, n_faces)
+        ffp._face_conn = fc
+        _, area_weights = p0_face_geometry(ffp)
 
         assert area_weights[0] == 3.0
         assert area_weights[1] == 0.0
@@ -128,7 +130,8 @@ class TestGenuineMultiSourceFallsBackToTriangulatedHalfFace:
             is_boundary=np.array([False, False]),
         )
 
-        unit_normals, area_weights = _extract_p0_face_geometry(ffp, fc, n_faces)
+        ffp._face_conn = fc
+        unit_normals, area_weights = p0_face_geometry(ffp)
 
         np.testing.assert_array_equal(area_weights, old_area)
         np.testing.assert_array_equal(unit_normals, old_normal)
@@ -151,7 +154,8 @@ class TestUngroupedFacesAreUntouched:
             is_boundary=np.array([False]),
         )
 
-        unit_normals, area_weights = _extract_p0_face_geometry(ffp, fc, n_faces)
+        ffp._face_conn = fc
+        unit_normals, area_weights = p0_face_geometry(ffp)
 
         assert area_weights[0] == 7.0
         np.testing.assert_array_equal(unit_normals[0], [0.0, 0.0, 1.0])

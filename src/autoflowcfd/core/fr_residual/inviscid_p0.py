@@ -30,7 +30,7 @@ def compute_inviscid_residual_fv_p0(
        同一份）
 
     关于棱柱四边形侧面拆分的处理（2026-08-23 修复，见下方
-    `_extract_p0_face_geometry` 文档）：此前这里的说法——"按
+    `p0_face_geometry` 文档）：此前这里的说法——"按
     face_connectivity 的原始每条记录处理（不过滤 owner_is_primary），
     保证闭合单元面积/法向积分 Σ(n̂·A)=0"——只在旧的 true_normal/
     true_area_weight 实现（每条三角化子面记录各自是真实的局部半面
@@ -42,7 +42,7 @@ def compute_inviscid_residual_fv_p0(
     scatter-add 两次（真实复现：cube_demo 791k 网格 P0 阶 resume，
     单元 17790 处 Σ(n̂·A) 相对误差达 6.76%，几乎全部动量残差来自
     这个未闭合的法向量残差乘以绝对压力，与马赫数/CFL 无关）。现在
-    `_extract_p0_face_geometry` 负责按 owner_is_primary/
+    `p0_face_geometry` 负责按 owner_is_primary/
     neighbor_is_primary 去重（重复记录只保留一条），对真正 multi-source
     的拆分面（~5%，两条记录指向 2 个不同真实相邻四面体）改用旧的
     三角化真实半面 face_conn.normal/area（P0 每面只有 1 个 Flux
@@ -79,7 +79,7 @@ def compute_inviscid_residual_fv_p0(
     n_faces = fc.n_faces
 
     # --- 提取 flat 面几何数组 ---
-    unit_normals, area_weights = _extract_p0_face_geometry(ffp_list, fc, n_faces)
+    unit_normals, area_weights = p0_face_geometry(ffp_list)
 
     # --- 预计算边界幽灵态 ---
     ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fv_p0")
@@ -104,16 +104,12 @@ def compute_inviscid_residual_fv_p0(
     return residual5[:, None, :]
 
 
-def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
-    """从 face_flux_points 提取 P0 需要的 flat 数组。
+def p0_face_geometry(ffp):
+    """P0 有限体积通量用的逐面单位法向与面积权重 `(unit_normals (n_faces, 3), area_weights (n_faces,))`。
 
-    支持两种数据源：
-    - _KernelFaceData（快速路径）：直接读取 flat 数组，并去重/回退
-      三角化半面几何（见下方"棱柱四边形侧面去重"一节）
-    - list of FaceFluxPointGeometry（慢速路径）：逐面提取（不做去重——
-      仅在非 _KernelFaceData 场景使用，当前生产代码路径不会触发这个
-      分支，见 face_kernels.py::build_flat_face_geometry 对慢速路径的
-      说明）
+    只依赖网格，第一次调用时算好缓存在面通量点数据上（`_KernelFaceData._p0_geometry`），CPU 残差、GPU 残差的设备
+    缓存与测试共用这一份；返回只读数组。2026-10-19（I-8）以前 CPU 每次残差求值都重新提取（含逐组 Python 去重循环）。
+    非 `_KernelFaceData` 的逐面提取分支同时删除（生产不可达，且不做下述去重，会给出错误的面积）。
 
     棱柱四边形侧面去重（2026-08-23 修复，见 compute_inviscid_residual_
     fv_p0 文档"关于棱柱四边形侧面拆分的处理"一节的完整原理）：
@@ -136,29 +132,29 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
       混合进同一条记录，只能退回到两条记录各自真实、精确求和为整张
       面的三角化半面）。
 
+    Args:
+        ffp: 网格的面通量点数据（`mesh.face_flux_points`，`_KernelFaceData`）
+
     Returns:
-        unit_normals: (n_faces, 3) float64
-        area_weights: (n_faces,) float64
+        unit_normals: (n_faces, 3) float64，只读
+        area_weights: (n_faces,) float64，只读
     """
     from autoflowcfd.fr.face_flux_points.data import _KernelFaceData
 
-    if not isinstance(ffp_list, _KernelFaceData):
-        # 慢速路径：逐面提取（仅在非 _KernelFaceData 时，不做棱柱四边形
-        # 去重——当前生产代码路径不会触发，见上方文档）
-        unit_normals = np.empty((n_faces, 3), dtype=np.float64)
-        area_weights = np.empty(n_faces, dtype=np.float64)
-        for f in range(n_faces):
-            ffp = ffp_list[f]
-            unit_normals[f] = ffp.true_normal[0]
-            area_weights[f] = ffp.true_area_weight[0]
-        return unit_normals, area_weights
+    if not isinstance(ffp, _KernelFaceData):
+        raise TypeError(f"P0 面几何需要 _KernelFaceData，收到 {type(ffp).__name__}")
+    if ffp._p0_geometry is None:
+        ffp._p0_geometry = _build_p0_face_geometry(ffp)
+    return ffp._p0_geometry
 
-    # 快速路径：直接使用 flat 数组（P0: n_fp=1），再按上方文档去重
-    unit_normals = np.array(ffp_list.true_normal[:, 0, :], dtype=np.float64, copy=True)
-    area_weights = np.array(ffp_list.true_area_weight[:, 0], dtype=np.float64, copy=True)
 
-    owner_is_primary = ffp_list.owner_is_primary
-    neighbor_is_primary = ffp_list.neighbor_is_primary
+def _build_p0_face_geometry(ffp):
+    unit_normals = np.array(ffp.true_normal[:, 0, :], dtype=np.float64, copy=True)
+    area_weights = np.array(ffp.true_area_weight[:, 0], dtype=np.float64, copy=True)
+
+    owner_is_primary = ffp.owner_is_primary
+    neighbor_is_primary = ffp.neighbor_is_primary
+    fc = ffp._face_conn
     old_normal = fc.normal
     old_area = fc.area
     owner_cell = fc.owner_cell
@@ -182,8 +178,8 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
                     if not is_primary[f]:
                         area_weights[f] = 0.0
 
-    _dedupe_or_fallback(ffp_list._owner_groups, owner_is_primary, neighbor_cell)
-    _dedupe_or_fallback(ffp_list._neighbor_groups, neighbor_is_primary, owner_cell)
+    _dedupe_or_fallback(ffp._owner_groups, owner_is_primary, neighbor_cell)
+    _dedupe_or_fallback(ffp._neighbor_groups, neighbor_is_primary, owner_cell)
 
     # 边界面的重复记录（同一个棱柱四边形面在边界上被拆成 2 条记录）不会
     # 出现在 _owner_groups/_neighbor_groups 里（build_face_flux_points
@@ -200,12 +196,14 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
     # 的真实三角形几何（与上面 genuine multi-source 的回退同一思路）。2026-10-17 以前改为在内部记录上按面积
     # 占比混合两份通量：边界半区的通量用了内部记录上从未计算过的全零"幽灵态"（均匀来流残差 5.6e7），邻居
     # 一侧还多加了 (1-b) 倍的边界半区通量（不守恒，I-7）
-    for partner in (ffp_list.mixed_nb_partner, ffp_list.mixed_ow_partner):
+    for partner in (ffp.mixed_nb_partner, ffp.mixed_ow_partner):
         f_int = np.flatnonzero(np.asarray(partner) >= 0)
         for f in (f_int, np.asarray(partner)[f_int]):
             unit_normals[f] = old_normal[f]
             area_weights[f] = old_area[f]
 
+    unit_normals.setflags(write=False)
+    area_weights.setflags(write=False)
     return unit_normals, area_weights
 
 
@@ -216,7 +214,7 @@ def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int, 
 
     Args:
         Q_all: (n_cells, 5) 单元原始变量
-        unit_normals: (n_faces, 3)，`_extract_p0_face_geometry` 给出的面法向
+        unit_normals: (n_faces, 3)，`p0_face_geometry` 给出的面法向
 
     Returns:
         Q_ghost: (n_faces, 5)，只有需要幽灵态的面的行有意义，其余为零（kernel 不读）。

@@ -179,7 +179,7 @@ void p0_inviscid_residual(
     ausm_up_flux(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR,
                  nx, ny, nz, mach_ref, flux);
 
-    // 混合拆分面的两半在面几何里已经是两个独立的面（inviscid_p0.py::_extract_p0_face_geometry）
+    // 混合拆分面的两半在面几何里已经是两个独立的面（inviscid_p0.py::p0_face_geometry）
 
     // ── 原子累加到残差 ──
     double vol_o = cell_volumes[oc];

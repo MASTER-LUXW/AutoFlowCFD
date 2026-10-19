@@ -283,7 +283,7 @@ class TestFreeStreamPreservation:
         integration）。
 
         这是 P0 路径的通用正确性回归，*不是* 2026-08-23 棱柱四边形侧面
-        重复计数 bug（见 inviscid_p0.py::_extract_p0_face_geometry 修复
+        重复计数 bug（见 inviscid_p0.py::p0_face_geometry 修复
         文档）的可靠保护网——事后核实过，这里用的小合成网格（2 个棱柱
         共享一条侧面，理论上覆盖"重复记录、同一真实邻居"的场景）哪怕
         不做那次修复，闭合误差也巧合地接近机器精度（原因未深挖，判断

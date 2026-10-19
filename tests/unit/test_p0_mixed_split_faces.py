@@ -58,7 +58,7 @@ def test_p0_inviscid_interior_exchange_is_conservative():
     """非均匀状态：两单元的 V R 之和只剩各自边界面的通量（内部半区的通量两侧等值反号）。"""
     from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry, _precompute_ghost_states
+    from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry, _precompute_ghost_states
 
     m = _mixed_mesh(0)
     prov = _provider(m)
@@ -66,7 +66,7 @@ def test_p0_inviscid_interior_exchange_is_conservative():
     U = np.stack([primitive_to_conserved(q) for q in Qp])[:, None, :]
     R = compute_inviscid_residual_fv_p0(U, m, get_flat_face_geometry(m, m.operators), prov, mach_ref=0.1)
     fc = m.face_connectivity
-    normals, areas = _extract_p0_face_geometry(m.face_flux_points, fc, fc.n_faces)
+    normals, areas = p0_face_geometry(m.face_flux_points)
     Q_all = conserved_to_primitive(U[:, 0, :5])
     Qg = _precompute_ghost_states(m.face_flux_points, fc, prov, Q_all, fc.n_faces, normals)
     boundary_total = np.zeros(5)

@@ -22,7 +22,7 @@ class _MultiGPUTimeStepMixin:
         1. 它读 `self.mesh.face_connectivity`（**全局**面连接关系，
            owner/neighbor 是全局单元编号）去索引 `self.U_gpu`（现在只有
            local+halo 紧凑大小），是与 #1 修复同一类的索引空间不一致；
-        2. 它把 `dist_fc` 当 `fc` 传给 `_extract_p0_face_geometry`，而
+        2. 它把 `dist_fc` 当 `fc` 传给 `p0_face_geometry`，而
            `DistributedFlatFaceGeometry` 没有 `.normal`/`.area` 属性——
            一旦被调用必定 `AttributeError`（本轮在 CPU 侧实现分布式局部
            CFL 时实测触发过同一个错误）。

@@ -72,7 +72,7 @@ def _p0_inviscid_kernel(
         # AUSM+up 黎曼求解（返回单位面积通量）
         F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref)
 
-        # 混合拆分面的两半在面几何里已经是两个独立的面（inviscid_p0.py::_extract_p0_face_geometry），这里不另做处理
+        # 混合拆分面的两半在面几何里已经是两个独立的面（inviscid_p0.py::p0_face_geometry），这里不另做处理
 
         # 面积加权通量
         aw = area_weights[f]
