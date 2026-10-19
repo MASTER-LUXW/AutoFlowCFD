@@ -50,7 +50,7 @@ def world(monkeypatch):
 
     mesh = build_channel_mesh_prism(1, 6, 3, 2, 0.6, 0.1, 0.08)
     fc = mesh.face_connectivity
-    cell_part = partition_mesh(fc, N_RANKS, n_cells=mesh.n_cells)
+    cell_part = partition_mesh(fc, N_RANKS, n_cells=mesh.n_cells, method="block")   # 本机没有 pymetis
     parts = [build_distributed_partition(fc, cell_part, r, N_RANKS) for r in range(N_RANKS)]
     assert all(p.neighbor_ranks for p in parts) and max(len(p.neighbor_ranks) for p in parts) >= 2
     boxes = {(a, b): queue.Queue() for a in range(N_RANKS) for b in range(N_RANKS)}

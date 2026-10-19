@@ -1,23 +1,26 @@
-"""AutoFlowCFD V2.0 - 邻接图构造与分区
+"""AutoFlowCFD V2.0 - 邻接图构造与分区。
 
-从 `src/autoflowcfd/core/mpi/partition.py`(原 612 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
+全部按面的操作都是 numpy 向量化的（2026-10-19，I-96）：此前邻接图、halo 判定、面分类是对**全局**面数的 Python
+循环，且每个 rank 各跑一遍，千万单元级网格上分区阶段本身成为瓶颈。结果与此前逐位相同（邻接表行内顺序保持按面
+序号，METIS 输入不变）。
 """
+
+from typing import Tuple
 
 import numpy as np
 
-
-from typing import Optional
-
-from loguru import logger
-
 from .types import DistributedPartition, FaceClassification
+
+#: `partition_mesh` 的分区方法
+PARTITION_METHODS = ("metis", "block")
 
 
 def build_cell_adjacency_graph(owner_cell: np.ndarray, neighbor_cell: np.ndarray,
-                                is_boundary: np.ndarray, n_cells: int):
+                                is_boundary: np.ndarray, n_cells: int) -> Tuple[np.ndarray, np.ndarray]:
     """从面连接关系构建单元邻接图（CSR 格式）。
 
-    两个单元通过内部面（非边界面）相连。用于 METIS 分区。
+    两个单元通过内部面（非边界面）相连。用于 METIS 分区。每个单元的邻居按面序号排列（与此前逐面循环的
+    填充顺序相同）。
 
     Args:
         owner_cell: (n_faces,)
@@ -29,86 +32,58 @@ def build_cell_adjacency_graph(owner_cell: np.ndarray, neighbor_cell: np.ndarray
         (adj_indptr, adj_indices): CSR 格式的邻接表
             adj_indptr[i]:adj_indptr[i+1] 给出 cell i 的邻居在 adj_indices 中的范围
     """
-    # 统计每个 cell 的邻居数
-    degree = np.zeros(n_cells, dtype=np.int64)
-    for f in range(len(owner_cell)):
-        if is_boundary[f]:
-            continue
-        oc = owner_cell[f]
-        nc = neighbor_cell[f]
-        if nc >= 0:
-            degree[oc] += 1
-            degree[nc] += 1
-
-    # CSR 构建
+    owner_cell = np.asarray(owner_cell, dtype=np.int64)
+    neighbor_cell = np.asarray(neighbor_cell, dtype=np.int64)
+    internal = (~np.asarray(is_boundary, dtype=bool)) & (neighbor_cell >= 0)
+    oc, nc = owner_cell[internal], neighbor_cell[internal]
+    # 每个面依次贡献 (oc -> nc)、(nc -> oc)；按起点稳定排序后，各行内即按面序号排列
+    src = np.stack([oc, nc], axis=1).ravel()
+    dst = np.stack([nc, oc], axis=1).ravel()
+    order = np.argsort(src, kind="stable")
     adj_indptr = np.zeros(n_cells + 1, dtype=np.int64)
-    adj_indptr[1:] = np.cumsum(degree)
-    adj_indices = np.empty(adj_indptr[-1], dtype=np.int64)
-    pos = adj_indptr[:-1].copy()
-
-    for f in range(len(owner_cell)):
-        if is_boundary[f]:
-            continue
-        oc = owner_cell[f]
-        nc = neighbor_cell[f]
-        if nc >= 0:
-            adj_indices[pos[oc]] = nc
-            pos[oc] += 1
-            adj_indices[pos[nc]] = oc
-            pos[nc] += 1
-
-    return adj_indptr, adj_indices
+    adj_indptr[1:] = np.cumsum(np.bincount(src, minlength=n_cells))
+    return adj_indptr, dst[order]
 
 
-def partition_mesh(face_connectivity, n_parts: int, n_cells: Optional[int] = None) -> np.ndarray:
+def partition_mesh(face_connectivity, n_parts: int, n_cells: int, method: str = "metis") -> np.ndarray:
     """将网格分成 n_parts 个分区。
 
     Args:
         face_connectivity: FRFaceConnectivity 实例
         n_parts: 分区数（= MPI rank 数）
-        n_cells: 网格真实单元总数（强烈建议显式传入，通常是
-            `mesh.n_cells`）。第四次评审发现真实崩溃 bug：省略时退回的
-            `max(owner_cell)+1` 推断不可靠——owner/neighbor 角色分配依赖
-            面提取时的排序，全局编号最后一个单元完全可能从未被选为任何
-            面的 owner（只当 neighbor），此时 `max(owner_cell)` 会漏掉它，
-            n_cells 被低估 1，后续 `degree[nc] += 1` 用真实存在的 neighbor
-            单元索引访问这个偏小的数组直接 IndexError 崩溃（cube_demo
-            真实网格上复现：374352 个单元，`max(owner_cell)+1` 算出
-            374351）。仅在真的没有 mesh 对象可用时才退回这个不可靠的
-            推断（保留向后兼容，但已知有此风险）。
+        n_cells: 网格真实单元总数（`mesh.n_cells`）。2026-10-19（I-96）以前可省略、按 max(owner, neighbor)+1
+            推断，而最后一个单元可能从不出现在面上（cube_demo 真实网格上少算 1 个、随后 IndexError）。
+        method: "metis"（图分区，最小化切割面数并均衡负载，需要 pymetis）；"block"（按单元编号等分，只用于测试：
+            棱柱在前 / 四面体在后的编号下分区不连通、halo 体量失控）。
+
+    Raises:
+        ImportError: method="metis" 且 n_parts > 1 时没有 pymetis。2026-10-19（I-96）以前只打一行 warning 就退回
+            按单元编号切块。
+
     Returns:
         cell_partition: (n_cells,) int32, 每个 cell 所属的分区编号
     """
-    if n_cells is None:
-        n_cells = int(max(
-            np.max(face_connectivity.owner_cell),
-            np.max(face_connectivity.neighbor_cell),
-        )) + 1
-    adj_indptr, adj_indices = build_cell_adjacency_graph(
-        face_connectivity.owner_cell,
-        face_connectivity.neighbor_cell,
-        face_connectivity.is_boundary,
-        n_cells,
-    )
-
-    try:
-        import pymetis
-        # pymetis 使用邻接列表格式
-        adjacency = []
-        for i in range(n_cells):
-            adjacency.append(adj_indices[adj_indptr[i]:adj_indptr[i+1]].tolist())
-        _, cell_partition = pymetis.part_graph(n_parts, adjacency=adjacency)
-        cell_partition = np.array(cell_partition, dtype=np.int32)
-    except ImportError:
-        logger.warning("pymetis not available, using simple block partitioning")
+    if method not in PARTITION_METHODS:
+        raise ValueError(f"未知分区方法 {method!r}（{PARTITION_METHODS}）")
+    if n_parts == 1:
+        return np.zeros(n_cells, dtype=np.int32)
+    if method == "block":
         cell_partition = np.zeros(n_cells, dtype=np.int32)
         cells_per_part = n_cells // n_parts
         for p in range(n_parts):
             start = p * cells_per_part
-            end = start + cells_per_part if p < n_parts - 1 else n_cells
-            cell_partition[start:end] = p
-
-    return cell_partition
+            cell_partition[start:start + cells_per_part if p < n_parts - 1 else n_cells] = p
+        return cell_partition
+    try:
+        import pymetis
+    except ImportError as exc:
+        raise ImportError(
+            f"分成 {n_parts} 个分区需要 METIS 图分区（pip install pymetis）。按单元编号切块在棱柱在前 / 四面体在后的"
+            f"编号下分区不连通、halo 交换量失控，不作为替代") from exc
+    adj_indptr, adj_indices = build_cell_adjacency_graph(
+        face_connectivity.owner_cell, face_connectivity.neighbor_cell, face_connectivity.is_boundary, n_cells)
+    _, cell_partition = pymetis.part_graph(n_parts, xadj=adj_indptr, adjncy=adj_indices)
+    return np.asarray(cell_partition, dtype=np.int32)
 
 
 def build_distributed_partition(
@@ -129,7 +104,6 @@ def build_distributed_partition(
         DistributedPartition 实例
     """
     n_cells = len(cell_partition)
-    n_faces = face_connectivity.n_faces
 
     # 1. 确定 local cells
     local_cells = np.flatnonzero(cell_partition == rank).astype(np.int64)
@@ -139,32 +113,20 @@ def build_distributed_partition(
     global_to_local = np.full(n_cells, -1, dtype=np.int64)
     global_to_local[local_cells] = np.arange(n_local_cells, dtype=np.int64)
 
-    # 2. 确定 halo cells（通过分区边界面找到邻居 rank 的 cells）
-    halo_set = set()
-    halo_owner_map = {}  # global_cell → owner_rank
-
-    for f in range(n_faces):
-        if face_connectivity.is_boundary[f]:
-            continue
-        oc = face_connectivity.owner_cell[f]
-        nc = face_connectivity.neighbor_cell[f]
-        if nc < 0:
-            continue
-        oc_part = cell_partition[oc]
-        nc_part = cell_partition[nc]
-
-        # owner 是 local，neighbor 不是 → neighbor 是 halo
-        if oc_part == rank and nc_part != rank:
-            halo_set.add(int(nc))
-            halo_owner_map[int(nc)] = int(nc_part)
-        # neighbor 是 local，owner 不是 → owner 是 halo
-        if nc_part == rank and oc_part != rank:
-            halo_set.add(int(oc))
-            halo_owner_map[int(oc)] = int(oc_part)
-
-    halo_cells = np.array(sorted(halo_set), dtype=np.int64)
+    # 2. 确定 halo cells：经内部面与本 rank 单元相邻、属于其它 rank 的单元（全局 id 升序），所属 rank 即其分区号
+    owner_all = np.asarray(face_connectivity.owner_cell, dtype=np.int64)
+    neighbor_all = np.asarray(face_connectivity.neighbor_cell, dtype=np.int64)
+    is_boundary_all = np.asarray(face_connectivity.is_boundary, dtype=bool)
+    internal_mask = (~is_boundary_all) & (neighbor_all >= 0)
+    oc_int = owner_all[internal_mask]
+    nc_int = neighbor_all[internal_mask]
+    oc_part = cell_partition[oc_int]
+    nc_part = cell_partition[nc_int]
+    own_here = (oc_part == rank)
+    nbr_here = (nc_part == rank)
+    halo_cells = np.unique(np.concatenate([nc_int[own_here & ~nbr_here], oc_int[nbr_here & ~own_here]]))
     n_halo = len(halo_cells)
-    halo_owners = np.array([halo_owner_map[int(c)] for c in halo_cells], dtype=np.int32)
+    halo_owners = cell_partition[halo_cells].astype(np.int32)
 
     # halo cell 在扩展数组中的偏移（local cells 在前，halo 在后）
     halo_to_local_offset = np.arange(n_local_cells, n_local_cells + n_halo, dtype=np.int64)
@@ -187,12 +149,11 @@ def build_distributed_partition(
     recv_lists = {}
     neighbor_ranks_set = set()
 
-    for i, hc in enumerate(halo_cells):
-        owner_rank = int(halo_owners[i])
-        neighbor_ranks_set.add(owner_rank)
-        if owner_rank not in recv_lists:
-            recv_lists[owner_rank] = []
-        recv_lists[owner_rank].append(int(hc))
+    # 按在 halo_cells 中首次出现的顺序建表（与此前逐个追加相同），各表内为全局 id 升序
+    _, first = np.unique(halo_owners, return_index=True)
+    for owner_rank in halo_owners[np.sort(first)]:
+        recv_lists[int(owner_rank)] = halo_cells[halo_owners == owner_rank]
+        neighbor_ranks_set.add(int(owner_rank))
 
     # send_lists[r] = 本 rank 需要发给 rank r 的 local cell 局部索引
     # （rank r 需要这些 cell 的数据来填充它的 halo）。
@@ -229,18 +190,7 @@ def build_distributed_partition(
     # 数据静默对应到错误的单元上（不报错，只是物理结果错误）。
     # `np.unique` 返回的就是升序的**全局** id，正好满足这个约定，
     # 所以下面直接对全局 id 排序、再映射成局部索引。
-    internal_mask = (~np.asarray(face_connectivity.is_boundary)) & (
-        np.asarray(face_connectivity.neighbor_cell) >= 0)
-    oc_int = np.asarray(face_connectivity.owner_cell)[internal_mask]
-    nc_int = np.asarray(face_connectivity.neighbor_cell)[internal_mask]
-    oc_part = cell_partition[oc_int]
-    nc_part = cell_partition[nc_int]
-
-    # 本 rank 在 owner 侧 / neighbor 侧两个方向（一个面可能两侧都不是本
-    # rank，也不可能两侧都是本 rank 又跨 rank——下面按对端 rank 分组）
-    own_here = (oc_part == rank)
-    nbr_here = (nc_part == rank)
-
+    # 本 rank 在 owner 侧 / neighbor 侧两个方向（own_here / nbr_here 见第 2 步；下面按对端 rank 分组）
     for other_rank in range(n_ranks):
         if other_rank == rank:
             continue
@@ -254,10 +204,6 @@ def build_distributed_partition(
         send_global = np.unique(np.concatenate([g1, g2]))
         send_lists[other_rank] = global_to_local[send_global].astype(np.int64)
         neighbor_ranks_set.add(other_rank)
-
-    # 转换 recv_lists 为 numpy 数组
-    for r in recv_lists:
-        recv_lists[r] = np.array(recv_lists[r], dtype=np.int64)
 
     neighbor_ranks = sorted(neighbor_ranks_set)
 
@@ -291,37 +237,17 @@ def build_distributed_partition(
     # 分别处理（这批面的 owner 是 halo，只需要神经它们的
     # neighbor-primary 贡献，owner-primary 贡献留给拥有该 owner 的
     # 另一个 rank 自己算）。
-    owner_local_mask = np.isin(face_connectivity.owner_cell, local_cells)
-    neighbor_local_mask = (
-        (face_connectivity.neighbor_cell >= 0)
-        & np.isin(face_connectivity.neighbor_cell, local_cells)
-    )
+    owner_local_mask = cell_partition[owner_all] == rank
+    neighbor_local_mask = (neighbor_all >= 0) & (cell_partition[np.maximum(neighbor_all, 0)] == rank)
     local_faces = np.flatnonzero(owner_local_mask | neighbor_local_mask).astype(np.int64)
 
-    # 5. 面分类
-    interior_mask = np.zeros(len(local_faces), dtype=bool)
-    partition_boundary_mask = np.zeros(len(local_faces), dtype=bool)
-    physical_boundary_mask = np.zeros(len(local_faces), dtype=bool)
-    # halo_owner_mask：本 rank 只持有 neighbor 侧（owner 是另一个 rank
-    # 的 local cell）的这批面——模块文档"面分类"一节里一直存在、但此前
-    # 从未真正生效的第四类。
-    halo_owner_mask = np.zeros(len(local_faces), dtype=bool)
-
-    for i, f in enumerate(local_faces):
-        if not owner_local_mask[f]:
-            # owner 不是本 rank 的 local cell——本 rank 只是因为
-            # neighbor 是 local cell 才把这个面纳入（见上方修复），
-            # 不适用原有的"owner 是 local"分类体系。
-            halo_owner_mask[i] = True
-            continue
-        if face_connectivity.is_boundary[f]:
-            physical_boundary_mask[i] = True
-        else:
-            nc = face_connectivity.neighbor_cell[f]
-            if nc >= 0 and cell_partition[nc] == rank:
-                interior_mask[i] = True
-            else:
-                partition_boundary_mask[i] = True
+    # 5. 面分类。halo_owner：本 rank 只持有 neighbor 侧（owner 是另一个 rank 的 local cell）的面，不适用"owner 是
+    # local"的另三类；其余按物理边界 > 本 rank 内部 > 分区边界分类。
+    owner_local = owner_local_mask[local_faces]
+    halo_owner_mask = ~owner_local
+    physical_boundary_mask = owner_local & is_boundary_all[local_faces]
+    interior_mask = owner_local & ~is_boundary_all[local_faces] & neighbor_local_mask[local_faces]
+    partition_boundary_mask = owner_local & ~is_boundary_all[local_faces] & ~interior_mask
 
     face_classification = FaceClassification(
         interior_mask=interior_mask,
