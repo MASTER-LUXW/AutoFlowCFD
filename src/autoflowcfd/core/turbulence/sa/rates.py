@@ -41,7 +41,7 @@ def evaluate_sa_rates(model, transport, Q, grad_vel, d_wall, mu) -> TurbulenceRa
     gamma = map_cell_chunks(sa_diffusivity, (nt, rho), mu, xp, xp=xp)
     with _errstate(xp):
         conv = transport.convection(nt, model.nu_tilde_inf)
-        diff = transport.diffusion(nt, gamma)
+        diff = transport.diffusion(nt, gamma, grad=grad_nt)
         trans = (conv + diff + map_cell_chunks(_gradient_source, (nt, rho, grad_nt, grad_rho), mu, xp, xp=xp)) / rho
         src = raw / rho
     off_wall = d_wall != 0.0

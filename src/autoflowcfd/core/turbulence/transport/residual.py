@@ -92,7 +92,7 @@ def compute_turbulence_transport_residual(
     # 是对流项的上风 ghost（镜像成 -owner 强制壁面 k=0）；扩散项为梯度差形式，奇镜像对梯度对称、掩码不改变它。
     wall_mask_k = k_wall_zero_mask(transport.wall_zero, turb.wall_treatment, np)
     conv_k = transport.convection(turb.k_field, turb.k_inf, wall_zero_face=wall_mask_k)
-    diff_k = transport.diffusion(turb.k_field, gamma_k, wall_zero_face=wall_mask_k)
+    diff_k = transport.diffusion(turb.k_field, gamma_k, wall_zero_face=wall_mask_k, grad=grad_k)
     with np.errstate(over='ignore', invalid='ignore'):
         dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
 
@@ -103,7 +103,7 @@ def compute_turbulence_transport_residual(
     )
     wall_w = (log_omega(omega_wall_value_face, np), has_omega_wall)
     conv_w = transport.convection(w_log, float(np.log(turb.omega_inf)), wall_value=wall_w)
-    diff_w = transport.diffusion(w_log, gamma_w, wall_value=wall_w)
+    diff_w = transport.diffusion(w_log, gamma_w, wall_value=wall_w, grad=grad_log_omega)
     with np.errstate(over='ignore', invalid='ignore'):
         dw_dt_transport = (conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, np)) \
             / np.maximum(rho, 1e-10)

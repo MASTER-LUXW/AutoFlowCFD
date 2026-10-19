@@ -126,6 +126,7 @@ def compute_scalar_diffusion_residual(
     flat_face_override=None,
     *,
     gamma_band: float,
+    grad_phi: np.ndarray = None,
 ) -> np.ndarray:
     """标量扩散 FR 残差 `+div(Gamma*grad(phi))/det(J)`（体积项 + IIPG 内罚界面项），
     返回 `d(rho*phi)/dt` 的扩散部分（调用方再除以 rho）。
@@ -168,6 +169,8 @@ def compute_scalar_diffusion_residual(
         wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value:
             壁面 Dirichlet 掩码与目标值，与对流残差同一组参数（见上文"边界条件"）。
         flat_face_override: 见 `compute_scalar_convection_residual` 同名参数。
+        grad_phi: `scalar_field` 的单元内物理梯度 `(n_cells, n_sps, 3)`；调用方已为源项算过时传入（梯度是剖析过的
+            热点），None 时在这里算。2026-10-19（I-63）以前恒在这里重算：SST 每次残差多算 2 次、SA 多算 1 次。
     """
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -180,7 +183,8 @@ def compute_scalar_diffusion_residual(
     # 计算标量梯度（度量项一致）——grad_phi 下面界面项的逐分量外插还要
     # 复用，不能纳入分块（只能分块处理它之后、只在体积项内部一次性
     # 使用的 adj_j/G_phys/G_tilde）。
-    grad_phi = compute_physical_scalar_gradient(scalar_field, mesh, ops)  # (n_cells, n_sps, 3)
+    if grad_phi is None:
+        grad_phi = compute_physical_scalar_gradient(scalar_field, mesh, ops)  # (n_cells, n_sps, 3)
 
     # 按单元分块执行 adj_j 构造→扩散通量→逆变通量→散度 全链路（真实
     # 内存修复，2026-09-01，理由与 compute_scalar_convection_residual

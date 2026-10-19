@@ -132,17 +132,19 @@ def compute_scalar_convection_residual_gpu(
 
 def compute_scalar_diffusion_residual_gpu(
     scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, *, c_ip, gamma_band,
-    wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
+    wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None, grad_phi=None,
 ):
     """标量扩散 FR 残差（体积项 + IIPG 内罚界面项），与 CPU 版
     `compute_scalar_diffusion_residual` 逐项对应。`c_ip` 由调用方按阶数取
     `flux_kernels.resolve_viscous_ip_constant`（与平均流粘性项同一处定义）；`gamma_band` 是非解点处扩散
-    系数取用值的过渡带宽（含义与取值同 CPU 版）。"""
+    系数取用值的过渡带宽（含义与取值同 CPU 版）。`grad_phi`：调用方已为源项算过的同一份物理梯度，None 时在这里算
+    （与 CPU 版同名参数一致，I-63）。"""
     cp = get_cupy()
     det_jacs = mesh_data['det_jacs']
     adj_j = mesh_data['adj_j']
 
-    grad_phi = compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data)  # (n_cells,n_sps,3)
+    if grad_phi is None:
+        grad_phi = compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data)  # (n_cells,n_sps,3)
 
     # 去混叠，与 CPU 端 `_scalar_diffusion_volume_overintegrated` 对应
     # （含那边写明的"Gamma 自身混叠仍在"这条已量化、刻意不实施的局限）。
@@ -264,7 +266,7 @@ def compute_turbulence_transport_residual_gpu(
     c_ip = resolve_viscous_ip_constant(int(solver.mesh.order))
     diff_k = compute_scalar_diffusion_residual_gpu(
         turb.k_field, gamma_k, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_zero_face=wall_mask_k,
+        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_zero_face=wall_mask_k, grad_phi=grad_k,
     )
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
@@ -285,7 +287,7 @@ def compute_turbulence_transport_residual_gpu(
     diff_w = compute_scalar_diffusion_residual_gpu(
         w_log, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
         c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_value_face=log_wall_value_face,
-        has_wall_dirichlet_value=has_omega_wall,
+        has_wall_dirichlet_value=has_omega_wall, grad_phi=grad_log_omega,
     )
     dw_dt_transport = ((conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, cp))
                        / cp.maximum(rho, 1e-10))

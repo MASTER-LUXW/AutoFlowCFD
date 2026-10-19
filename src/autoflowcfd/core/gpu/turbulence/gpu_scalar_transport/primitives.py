@@ -47,8 +47,10 @@ class GpuScalarTransport:
             self.n_sps, self.mass_div, wall_dirichlet_zero_face=s._wall_mask_gpu,
             open_boundary_face=s._open_mask_gpu, freestream_value=float(freestream_value))
 
-    def diffusion(self, phi, gamma):
+    def diffusion(self, phi, gamma, grad=None):
+        """`grad`：`phi` 的物理梯度（`gradient(phi)` 的结果），调用方已有时传入、不重算（与 CPU 原语一致）。"""
         s = self.solver
         return compute_scalar_diffusion_residual_gpu(
             phi, gamma, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism, self.n_sps,
-            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), wall_dirichlet_zero_face=s._wall_mask_gpu)
+            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), wall_dirichlet_zero_face=s._wall_mask_gpu,
+            grad_phi=grad)

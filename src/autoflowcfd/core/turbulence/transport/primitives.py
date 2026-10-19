@@ -77,7 +77,9 @@ class CpuScalarTransport:
             flat_face_override=self.flat, conv_geom=self.conv_geom,
             open_boundary_face=self.open_face, freestream_value=float(freestream_value))
 
-    def diffusion(self, phi, gamma, wall_zero_face=None, wall_value=None):
+    def diffusion(self, phi, gamma, wall_zero_face=None, wall_value=None, grad=None):
+        """`grad`：`phi` 的物理梯度（`gradient(phi)` 的结果），调用方已有时传入、不重算。"""
         s = self.solver
         return compute_scalar_diffusion_residual(phi, gamma, s.mesh, s.ops, **self._wall(wall_zero_face, wall_value),
-                                                 flat_face_override=self.flat, gamma_band=float(s.mu_molecular))
+                                                 flat_face_override=self.flat, gamma_band=float(s.mu_molecular),
+                                                 grad_phi=grad)
