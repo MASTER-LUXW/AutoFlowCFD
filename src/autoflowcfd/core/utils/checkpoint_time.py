@@ -116,9 +116,7 @@ def restore_turbulence_previous(solver, rows) -> None:
     current = model.transported_fields()
     if rows.shape[-1] != len(current) or rows.shape[:2] != tuple(current[0].shape):
         return
-    first = current[0]
-    if type(first).__module__.startswith("cupy"):
-        import cupy as xp
-    else:
-        xp = np
+    from autoflowcfd.core.utils.array_module import array_module
+
+    xp = array_module(current[0])
     solver._dual_time_turb_prev = tuple(xp.asarray(np.ascontiguousarray(rows[..., j])) for j in range(rows.shape[-1]))

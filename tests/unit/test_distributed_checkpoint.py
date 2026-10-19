@@ -132,6 +132,8 @@ class TestGpuDistributedCheckpointRoundtrip:
         # 写入端与单机共用 core/utils/checkpoint_physics.py）。
         solver.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
         solver.wall_treatment = "resolved"
+        solver.mu_molecular, solver._turbulence_intensity, solver._viscosity_ratio = 1.8e-5, 0.01, 5.0
+        solver.artificial_viscosity_enabled, solver.artificial_viscosity_alpha = False, 1.0
         solver.low_mach_precond = True
         # 时间格式同样写进元数据（resume 默认沿用它）；多 GPU 的积分器属性名
         solver.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)

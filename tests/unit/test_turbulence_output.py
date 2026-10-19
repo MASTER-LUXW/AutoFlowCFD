@@ -83,6 +83,8 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     solver = SimpleNamespace(state=state, order=1, current_order=1, turb_model=m,
                              mesh=SimpleNamespace(n_prism_cells=2, jacobians={"det_jacs": np.ones(12)}),
                              freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, wall_treatment="resolved", low_mach_precond=True,
+                             mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
+                             artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
                              time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
                              convergence_history=ConvergenceHistory())
     init_production_ramp(solver, TimeIntegrationScheme.SSP_RK3)     # 真实求解器在构造时设置

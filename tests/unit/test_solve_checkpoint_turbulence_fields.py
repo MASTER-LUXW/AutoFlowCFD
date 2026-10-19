@@ -54,6 +54,8 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
         _turb_production_ramp_steps=50,
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
         wall_treatment="resolved", low_mach_precond=True,
+        mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
+        artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
         # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
     ))
