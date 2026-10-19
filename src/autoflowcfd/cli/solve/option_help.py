@@ -14,6 +14,8 @@ RESIDUAL_DROP_THRESHOLD_HELP = (
     "Order Continuation 非最终阶段提前升阶所需的残差下降倍数（默认 100，即 2 个数量级；湍流方程一起到位"
     "才升阶）。四个后端是同一个循环")
 
+from autoflowcfd.core.fr_solver.solver.threads import DEFAULT_N_THREADS  # noqa: E402
+
 THREADS_HELP = (
     "numba 并行 kernel 使用的线程数（CPU 残差；GPU 后端的主机侧 Jacobian 装配），"
-    "默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）")
+    f"默认 -1 = {DEFAULT_N_THREADS}（真实网格实测扩展性甜点，不是核数；超过 numba 线程池上限时按上限钳制）")

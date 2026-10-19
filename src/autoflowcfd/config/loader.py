@@ -13,18 +13,15 @@
 """
 
 import dataclasses
-import typing
 from enum import Enum
-
-import yaml
-
-from autoflowcfd.core.time_integration.base import (
-    scheme_from_name,
-    scheme_names,
-)
 from pathlib import Path
 from typing import Union, Dict, Any
+
+import yaml
 from loguru import logger
+
+from autoflowcfd.core.fr_solver.solver.threads import DEFAULT_N_THREADS
+from autoflowcfd.core.utils.order_continuation.policy import MAX_ORDER, MIN_STEADY_ORDER, MIN_TRANSIENT_ORDER
 
 from .solver_config import (
     SteadyConfig,
@@ -121,9 +118,6 @@ class ConfigLoader:
         # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_steady)
         
-        # 将枚举字符串转换为枚举值
-        merged = self._convert_enums(merged, SteadyConfig)
-        
         # 创建配置对象
         try:
             config = SteadyConfig(**merged)
@@ -145,9 +139,6 @@ class ConfigLoader:
         
         # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_transient)
-        
-        # 将枚举字符串转换为枚举值
-        merged = self._convert_enums(merged, TransientConfig)
         
         # 创建配置对象
         try:
@@ -172,31 +163,6 @@ class ConfigLoader:
             raise ValueError(f"未知的配置键 {unknown}（{type(default_config).__name__} 的字段：{names}）")
         merged.update({k: v for k, v in user_config.items() if k != "mode"})
         return merged
-
-    def _convert_enums(self, config_dict: Dict[str, Any], config_class) -> Dict[str, Any]:
-        """把字符串取值转换成字段声明的枚举类型（含继承自 SolverConfig 的 backend/turbulence）。"""
-        hints = typing.get_type_hints(config_class)
-        converted = dict(config_dict)
-        for key, value in config_dict.items():
-            field_type = hints.get(key)
-            if not isinstance(value, str):
-                continue
-            if field_type is BackendType:
-                try:
-                    converted[key] = BackendType(value.lower())
-                except ValueError:
-                    raise ValueError(f"无效的后端类型: {value}。必须是以下之一: {[b.value for b in BackendType]}")
-            elif field_type is TurbulenceModel:
-                try:
-                    converted[key] = TurbulenceModel(value.lower())
-                except ValueError:
-                    raise ValueError(f"无效的湍流模型: {value}。必须是以下之一: {[t.value for t in TurbulenceModel]}")
-            elif field_type is TimeIntegrationScheme:
-                try:
-                    converted[key] = scheme_from_name(value)
-                except ValueError:
-                    raise ValueError(f"无效的时间积分方案: {value}。必须是以下之一: {scheme_names()}")
-        return converted
 
     def save_template(self, output_path: Union[str, Path], mode: str = 'steady'):
         """保存配置模板到 YAML 文件。
@@ -300,31 +266,43 @@ class ConfigLoader:
         Returns:
             str: 帮助注释文本
         """
+        from autoflowcfd.core.time_integration.base import STEADY_SCHEMES
+        from autoflowcfd.core.time_integration.time_accurate import TIME_ACCURATE_SCHEMES
+
+        steady = mode == 'steady'
+        schemes = STEADY_SCHEMES if steady else (TimeIntegrationScheme.DUAL_TIME,) + TIME_ACCURATE_SCHEMES
+        lo = MIN_STEADY_ORDER if steady else MIN_TRANSIENT_ORDER
+        # 每个配置字段一条（`tests/unit/test_config_loader.py` 检查覆盖全部字段）；可选值从枚举/常量读（唯一来源）
         comments = {
-            # 可选值从枚举读（唯一来源）：此前手写的湍流模型表里有不存在的 `des`、漏了 none/iddes/wmles
             'backend': '计算后端: ' + ', '.join(b.value for b in BackendType) + '（auto：有可用 GPU 用 gpu）',
-            'order': 'FR 目标阶数 0~3（阶数爬坡从 P0 起步）',
+            'order': f'FR 目标阶数 {lo}~{MAX_ORDER}' + ('（>=1 时从 P0 逐阶爬坡）' if steady else ''),
             'turbulence': '湍流模型: ' + ', '.join(t.value for t in TurbulenceModel),
-            'max_iter': '最大迭代步数（仅定常）',
+            'gpu_device': 'GPU 设备号',
+            'n_threads': f'numba 线程数，-1 = {DEFAULT_N_THREADS}（实测扩展性甜点，不是核数）',
+            'output_dir': '结果输出目录',
+            'checkpoint_interval': '中间 checkpoint 保存间隔（步）',
+            'turbulence_intensity': '来流湍流强度 Tu（默认 0.01=1%）',
+            'viscosity_ratio': '来流粘性比 VR=nu_t/nu（默认 5.0）',
+            'mu_molecular': '分子动力粘度，单位 Pa*s（默认标准状态下空气 1.8e-5）',
+            'artificial_viscosity_enabled': '问题单元人工粘性（熵残差判据，P1 起有效）',
+            'artificial_viscosity_alpha': '人工粘性强度标定常数',
+            'wall_treatment': 'RANS 近壁处理: auto（平衡壁面模型）/ resolved（要求第一层 y+~1）',
+            'phase_max_iter': 'Order Continuation 非最终阶段步数上限（null：按阶段数均分，目标阶数吃满剩余步数）',
+            'residual_drop_threshold': 'Order Continuation 非最终阶段提前升阶所需的残差下降倍数',
+            'max_iter': '最大迭代步数',
+            'time_scheme': '时间格式: ' + ', '.join(sch.value for sch in schemes),
             # 留空（null）= 按时间格式取 CFL 律的默认值（显式与隐式相差两个数量级，见 build_cfl_policy）
             'cfl_init': '自适应 CFL 初值（null：按时间格式取默认）',
             'cfl_max': '自适应 CFL 上限（null：按时间格式取默认）',
             'cfl_min': '自适应 CFL 下限（null：按时间格式取默认）',
             'convergence_tol': '相对收敛容差（对应 --tol）',
-            'dt': '时间步长，单位秒（仅瞬态）',
-            'total_time': '总物理时间，单位秒（仅瞬态）',
-            # 取值表从唯一那张词汇表读，不在这里硬编码——此前这里写的是
-            # `backward_euler, rk2, rk3, ab3`，其中前两个在核心层从未实现、
-            # 后面又漏了真实存在的 dual-time。
-            'time_scheme': '时间积分方案: ' + ', '.join(scheme_names()) + '（仅瞬态）',
-            'output_dir': '结果输出目录',
-            'checkpoint_interval': '检查点保存间隔，单位步数',
+            'low_mach_precond': '低马赫数伪时间预处理（不改变定常解）',
+            'dt': '物理时间步长，单位秒',
+            'total_time': '总物理时间，单位秒',
+            'init_from_checkpoint': '以已有 checkpoint 的场为初场（null：来流均匀场）',
             'rho_inf': '自由流密度，单位 kg/m^3',
             'vel_inf': '自由流速度大小，单位 m/s',
             'p_inf': '自由流静压，单位 Pa',
-            'mu_molecular': '分子动力粘度，单位 Pa*s（默认标准状态下空气 1.8e-5）',
-            'turbulence_intensity': '来流湍流强度 Tu（默认 0.01=1%）',
-            'viscosity_ratio': '来流粘性比 VR=nu_t/nu（默认 5.0）',
         }
         return comments.get(param, '')
 

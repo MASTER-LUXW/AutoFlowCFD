@@ -52,7 +52,10 @@ def physics_from_metadata(metadata: dict) -> dict:
 
 #: `--time-scheme` 能换成的格式：两个稳态格式（稳态续算在显式与隐式之间切换）。不给时沿用
 #: checkpoint 记录的格式，包括时间精确的 dual_time。
-_RESUME_OVERRIDE_SCHEMES = ("ssp_rk3", "newton_krylov")
+def _resume_override_schemes():
+    from autoflowcfd.core.time_integration.base import STEADY_SCHEMES
+
+    return tuple(sch.value for sch in STEADY_SCHEMES)
 
 
 def resolve_resume_time_scheme(requested, metadata):
@@ -69,9 +72,9 @@ def resolve_resume_time_scheme(requested, metadata):
 
     if requested is not None:
         scheme = scheme_from_name(requested)
-        if scheme.value not in _RESUME_OVERRIDE_SCHEMES:
+        if scheme.value not in _resume_override_schemes():
             raise click.BadParameter(
-                f"--time-scheme 只用来在稳态格式 {_RESUME_OVERRIDE_SCHEMES} 之间切换，收到 {requested!r}；"
+                f"--time-scheme 只用来在稳态格式 {_resume_override_schemes()} 之间切换，收到 {requested!r}；"
                 f"瞬态续算不传它，沿用 checkpoint 记录的格式",
                 param_hint="--time-scheme")
         return scheme

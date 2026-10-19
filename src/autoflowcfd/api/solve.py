@@ -113,7 +113,7 @@ class _APISolveMixin:
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
                           "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment",
-                          "low_mach_precond"):
+                          "low_mach_precond", "time_scheme"):
                 kwargs.setdefault(field, getattr(config, field))
             # SteadyConfig.cfl_init/cfl_max/cfl_min -> FRSolver.cfl_start/cfl_max/cfl_min，只转发给出的值
             # （默认 None：由 CFL 律按时间格式取默认，见 build_cfl_policy）。

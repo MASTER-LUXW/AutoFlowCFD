@@ -71,6 +71,12 @@ STALL_FACTOR = 1.1
 #: 走 Order Continuation 的最低目标阶数（目标 P0 没有可爬的阶）。
 MIN_TARGET_ORDER = 1
 
+#: 目标阶数的取值范围（CLI `--order` 与配置字段 `order` 的唯一来源）：稳态 0~3（P0 即有限体积），瞬态 1~3
+#: （与 `solve transient --order` 的既有约定一致）。
+MAX_ORDER = 3
+MIN_STEADY_ORDER = 0
+MIN_TRANSIENT_ORDER = 1
+
 
 def uses_order_continuation(solver) -> bool:
     """该求解器的 `solve()` 是否应分派到逐阶爬坡（见模块文档）。"""

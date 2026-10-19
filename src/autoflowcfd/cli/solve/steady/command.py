@@ -5,6 +5,8 @@
 """
 
 import click
+
+from autoflowcfd.core.utils.order_continuation.policy import MAX_ORDER, MIN_STEADY_ORDER
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
@@ -22,7 +24,8 @@ from .single_node import _run_single_node
 @solve.command(name='steady')
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--backend', type=click.Choice(['cpu', 'gpu']), default='cpu', help='计算后端 (CPU/GPU)')
-@click.option('--order', type=click.IntRange(0, 3), default=2, help='FR 目标阶数（0~3；>=1 时从 P0 逐阶爬坡）')
+@click.option('--order', type=click.IntRange(MIN_STEADY_ORDER, MAX_ORDER), default=2,
+              help=f'FR 目标阶数（{MIN_STEADY_ORDER}~{MAX_ORDER}；>=1 时从 P0 逐阶爬坡）')
 @click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']),
               default='sst',
               help='湍流模型。sa 为 SA-neg（Allmaras, Johnson & Spalart 2012，为高阶离散设计的负值鲁棒 '

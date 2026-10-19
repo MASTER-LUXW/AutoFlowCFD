@@ -72,8 +72,22 @@ def test_field_without_a_matching_option_is_rejected(tmp_path):
 
 
 def test_time_scheme_unsupported_by_the_command_is_rejected(tmp_path):
-    with pytest.raises(click.BadParameter, match="time_scheme"):
+    """隐式稳态格式写进瞬态配置：配置类构造时就拒绝（`TransientConfig` 只收 dual_time 与显式格式），报成
+    `--config` 的参数错误。"""
+    with pytest.raises(click.BadParameter, match="时间格式"):
         _overrides(tmp_path, "transient", "mode: transient\ntime_scheme: newton_krylov\n")
+
+
+def test_steady_time_scheme_reaches_the_steady_option(tmp_path):
+    """稳态配置的 `time_scheme` 对应 `solve steady --time-scheme`（同名参数优先于瞬态的 `time_method` 映射）。
+    2026-10-18 以前稳态配置没有这个字段，YAML 选不了隐式格式。"""
+    got = _overrides(tmp_path, "steady", "mode: steady\ntime_scheme: newton-krylov\n")
+    assert got == {"time_scheme": "newton-krylov"}
+
+
+def test_order_zero_is_expressible_for_steady(tmp_path):
+    got = _overrides(tmp_path, "steady", "mode: steady\norder: 0\n")
+    assert got == {"order": 0}
 
 
 def test_every_config_field_has_a_command_line_counterpart():
@@ -81,10 +95,10 @@ def test_every_config_field_has_a_command_line_counterpart():
     use_wall_functions、monitor_coefficients、sample_interval、warmup_time、verbose 写了都不起作用）。"""
     import dataclasses
 
-    from autoflowcfd.cli.solve.config_file import _CLI_NAME
+    from autoflowcfd.cli.solve.config_file import _cli_name
     from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
 
     for command, cls in (("steady", SteadyConfig), ("transient", TransientConfig)):
         params = {p.name for p in cli.commands["solve"].commands[command].params}
-        missing = [f.name for f in dataclasses.fields(cls) if f.init and _CLI_NAME.get(f.name, f.name) not in params]
+        missing = [f.name for f in dataclasses.fields(cls) if f.init and _cli_name(f.name, params) not in params]
         assert not missing, f"{cls.__name__} 字段 {missing} 在 solve {command} 里没有对应选项"

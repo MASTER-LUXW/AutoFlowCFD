@@ -66,9 +66,12 @@ class TurbulenceModel(str, Enum):
 # 现在配置层直接复用核心层那个枚举，字符串解析统一走
 # `core/time_integration/base.py::scheme_from_name`（唯一那张词汇表，
 # 未知取值报错而不是静默换方案）。
-from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL  # noqa: E402
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL, STEADY_SCHEMES  # noqa: E402
 from autoflowcfd.core.time_integration.base import (  # noqa: E402
     TimeIntegrationScheme,
+)
+from autoflowcfd.core.utils.order_continuation.policy import (  # noqa: E402
+    MAX_ORDER, MIN_STEADY_ORDER, MIN_TRANSIENT_ORDER,
 )
 
 
@@ -86,7 +89,9 @@ class SolverConfig:
             解决 C-01。
         turbulence: 湍流模型
         gpu_device: GPU 设备 ID（仅 GPU 模式）
-        n_threads: CPU 线程数（仅 CPU 模式，auto=检测）
+        n_threads: numba 线程数，-1 = 运行时取 `DEFAULT_N_THREADS`（`core/fr_solver/solver/threads.py`；保持 -1
+            不在这里改写成本机核数——2026-10-18 以前改写了，`config init` 模板因此写死生成机器的核数，CLI 的 -1
+            与配置层的 -1 也不是同一个线程数）
         output_dir: 输出目录路径
         checkpoint_interval: 检查点保存间隔（步数）
         mu_molecular: 分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气）。
@@ -132,23 +137,26 @@ class SolverConfig:
     phase_max_iter: Optional[int] = None  # Order Continuation 非最终阶段最大步数上限，None=旧行为(按阶段数均分)
     residual_drop_threshold: float = 1e2  # Order Continuation 单阶段提前升阶所需的残差下降倍数
 
+    #: 本类允许的最低目标阶数（瞬态覆盖为 1），见 `order_continuation/policy.py`
+    _min_order = MIN_STEADY_ORDER
+
     def __post_init__(self):
-        """初始化后验证配置。"""
-        # 验证阶数
-        if self.order not in [1, 2, 3]:
-            raise ValueError(f"FR 阶数必须是 1, 2, 或 3，得到 {self.order}")
+        """配置的唯一校验点（YAML 加载、API、直接构造都经过这里）：枚举字段接受字符串并转换，取值范围与 CLI
+        同一组常量。2026-10-18 以前另有 `config/schema.py::ConfigSchema` 再校验一遍（口径不同、生产不调用），
+        YAML 加载器另做一遍枚举转换；直接构造 `SteadyConfig(backend="gpuu")` 不报错。"""
+        self.backend = _enum_value(BackendType, self.backend, "后端")
+        self.turbulence = _enum_value(TurbulenceModel, self.turbulence, "湍流模型")
+        if not (type(self)._min_order <= self.order <= MAX_ORDER):
+            raise ValueError(f"FR 目标阶数必须在 {type(self)._min_order}~{MAX_ORDER} 之间，得到 {self.order}")
 
         # 验证 gpu_device
         if self.gpu_device < 0:
             raise ValueError(f"GPU 设备 ID 必须为非负数，得到 {self.gpu_device}")
 
-        # 验证 n_threads
-        if self.n_threads == -1:
-            # 自动检测 CPU 核心数
-            import multiprocessing
-            self.n_threads = multiprocessing.cpu_count()
-        elif self.n_threads < 1:
-            raise ValueError(f"线程数必须为正数，得到 {self.n_threads}")
+        if self.n_threads != -1 and self.n_threads < 1:
+            raise ValueError(f"线程数必须是 -1（默认）或正数，得到 {self.n_threads}")
+        if self.checkpoint_interval < 1:
+            raise ValueError(f"checkpoint_interval 必须 >= 1，得到 {self.checkpoint_interval}")
 
         # 验证湍流参数
         if not (0 < self.turbulence_intensity <= 1.0):
@@ -197,9 +205,29 @@ class SolverConfig:
         return self.backend == BackendType.CPU
 
 
+def _enum_value(enum_cls, value, label: str):
+    """字符串（大小写不敏感）或枚举 -> 枚举成员；非法取值报错并列出合法值。"""
+    if isinstance(value, enum_cls):
+        return value
+    try:
+        return enum_cls(str(value).strip().lower())
+    except ValueError:
+        raise ValueError(f"无效的{label}: {value!r}。必须是以下之一: {[m.value for m in enum_cls]}") from None
+
+
+def _time_scheme_value(value, allowed, label: str):
+    """时间格式（字符串或枚举，经 `scheme_from_name` 唯一词汇表）-> 枚举，并检查属于本模式可用的格式。"""
+    from autoflowcfd.core.time_integration.base import scheme_from_name
+
+    scheme = scheme_from_name(value)
+    if scheme not in allowed:
+        raise ValueError(f"{label}的时间格式只能是 {[a.value for a in allowed]}，得到 {scheme.value}")
+    return scheme
+
+
 def cfl_triplet_errors(cfl_init: Optional[float], cfl_max: Optional[float],
                        cfl_min: Optional[float]) -> list:
-    """自适应 CFL 三元组的校验（`SteadyConfig` / `TransientConfig` 构造与 `ConfigSchema` 共用）。
+    """自适应 CFL 三元组的校验（`SteadyConfig` / `TransientConfig` 构造共用）。
 
     只校验给出的值（None = 由 CFL 律按时间格式取默认，见 `build_cfl_policy`）：都必须为正；给出的两两之间满足
     min <= init <= max。cfl_min > cfl_max 会让控制器的"收缩"分支把 CFL 调高并突破上限（adaptive_cfl 第 11 条），
@@ -233,6 +261,8 @@ class SteadyConfig(SolverConfig):
             --cfl-min`、`FRSolver.__init__` 同一约定。2026-10-05 以前这里写死显式那一组（0.03/0.06/0.01）：CLI
             与求解器 2026-09-25 已改为 None，配置层这份拷贝被漏掉，经 API 选隐式格式时隐式 CFL 律会被压在
             0.06 的上限下。三者给出时的序关系由 `cfl_triplet_errors` 校验。
+        time_scheme: 稳态推进格式 `ssp_rk3`（显式）/ `newton_krylov`（隐式），对应 CLI `--time-scheme`
+            （`STEADY_SCHEMES`）；2026-10-18 以前配置层没有这个字段，YAML 与配置对象选不了隐式格式
         convergence_tol: 相对收敛容差（对应 CLI `--tol`；默认取 `DEFAULT_STEADY_TOL`）
         low_mach_precond: 低马赫数伪时间预处理（对应 CLI `--low-mach-precond/--no-low-mach-precond`，
             见 `core/utils/preconditioning.py::resolve_low_mach_precond`）
@@ -251,6 +281,7 @@ class SteadyConfig(SolverConfig):
         ... )
     """
     max_iter: int = 50
+    time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3
     cfl_init: Optional[float] = None
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None
@@ -263,6 +294,7 @@ class SteadyConfig(SolverConfig):
     def __post_init__(self):
         """验证稳态配置。"""
         super().__post_init__()
+        self.time_scheme = _time_scheme_value(self.time_scheme, STEADY_SCHEMES, "稳态")
 
         # 验证迭代次数
         if self.max_iter < 1:
@@ -306,6 +338,8 @@ class TransientConfig(SolverConfig):
         ...     time_scheme="dual-time"
         ... )
     """
+    _min_order = MIN_TRANSIENT_ORDER
+
     dt: float = 1e-4
     total_time: float = 0.1
     # 瞬态默认双时间步（时间精确的隐式内迭代）；显式格式在瞬态里做全场同一物理步长的时间精确推进
@@ -324,6 +358,10 @@ class TransientConfig(SolverConfig):
     def __post_init__(self):
         """验证瞬态配置。"""
         super().__post_init__()
+        from autoflowcfd.core.time_integration.time_accurate import TIME_ACCURATE_SCHEMES
+
+        self.time_scheme = _time_scheme_value(
+            self.time_scheme, (TimeIntegrationScheme.DUAL_TIME,) + TIME_ACCURATE_SCHEMES, "瞬态")
 
         # 验证时间步长
         if self.dt <= 0:

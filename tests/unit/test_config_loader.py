@@ -77,7 +77,8 @@ class TestConfigLoaderTemplateRoundTrip:
 
 
 class TestConfigLoaderValidation:
-    """继承字段的枚举转换与未知键（2026-10-17）：`_convert_enums` 此前只看子类自己的 `__annotations__`，
+    """继承字段的枚举转换与未知键（2026-10-17；2026-10-18 起枚举转换在配置类 `__post_init__` 里，加载器不再
+    另做一遍）：加载器的 `_convert_enums` 此前只看子类自己的 `__annotations__`，
     SolverConfig 上的 backend/turbulence 从不转换——`backend: gpuu`、`turbulence: sstt` 原样作为字符串
     加载成功；未知键只记一条警告继续。"""
 

@@ -6,8 +6,7 @@
     - SolverConfig: 基础配置数据类
     - SteadyConfig: 定常模拟配置
     - TransientConfig: 瞬态模拟配置
-    - ConfigLoader: YAML 文件加载器与验证器
-    - ConfigSchema: 配置模式定义
+    - ConfigLoader: YAML 文件加载器（校验在配置类构造时完成）
 
 示例:
     >>> from autoflowcfd.config import SteadyConfig, ConfigLoader
@@ -28,7 +27,6 @@ from .solver_config import (
     TimeIntegrationScheme,
 )
 from .loader import ConfigLoader
-from .schema import ConfigSchema, validate_config
 
 __all__ = [
     "SolverConfig",
@@ -38,6 +36,4 @@ __all__ = [
     "TurbulenceModel",
     "TimeIntegrationScheme",
     "ConfigLoader",
-    "ConfigSchema",
-    "validate_config",
 ]

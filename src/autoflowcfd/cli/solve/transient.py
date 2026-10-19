@@ -6,6 +6,8 @@
 from typing import Optional
 
 import click
+
+from autoflowcfd.core.utils.order_continuation.policy import MAX_ORDER, MIN_TRANSIENT_ORDER
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
@@ -26,8 +28,8 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]),
               default="cpu", help="计算后端")
-@click.option("--order", "-p", type=click.IntRange(1, 3), default=2,
-              help="FR 离散阶数")
+@click.option("--order", "-p", type=click.IntRange(MIN_TRANSIENT_ORDER, MAX_ORDER), default=2,
+              help=f"FR 离散阶数（{MIN_TRANSIENT_ORDER}~{MAX_ORDER}）")
 @click.option("--time-method", "-t",
               type=click.Choice(["dual-time", "rk3"]),
               default="dual-time",

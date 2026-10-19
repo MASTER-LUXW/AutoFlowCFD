@@ -127,7 +127,7 @@
 1. ✅ 阅读 [README](../README.md) 了解项目
 2. ✅ 跟随 [QUICKSTART](../QUICKSTART.md) 完成首次仿真
 3. ✅ 运行 [立方体绕流算例](TUTORIALS.md#算例-1-立方体绕流验证)
-4. ✅ 学习 [配置基础](CONFIGURATION_GUIDE.md#基础配置)
+4. ✅ 学习 [配置基础](CONFIGURATION_GUIDE.md#yaml-文件格式)
 
 **目标**: 能够独立运行稳态 RANS 仿真
 
@@ -174,8 +174,8 @@
 |------|---------|
 | 如何安装？ | [QUICKSTART](../QUICKSTART.md#安装步骤) |
 | 如何运行仿真？ | [QUICKSTART](../QUICKSTART.md#首次运行) |
-| 如何配置求解器？ | [配置指南](CONFIGURATION_GUIDE.md#求解器配置) |
-| 如何选择湍流模型？ | [配置指南](CONFIGURATION_GUIDE.md#湍流模型选择) |
+| 如何配置求解器？ | [配置指南](CONFIGURATION_GUIDE.md#字段表) |
+| 如何选择湍流模型？ | [配置指南](CONFIGURATION_GUIDE.md#公共字段) |
 | 如何可视化结果？ | [后处理指南](POSTPROCESSING_GUIDE.md) |
 | 如何提高性能？ | [性能优化](PERFORMANCE_OPTIMIZATION.md) |
 | 如何添加新功能？ | [开发者指南](DEVELOPER_GUIDE.md#扩展开发) |
@@ -191,12 +191,11 @@
 #### 求解器相关
 - FR 离散格式: [核心算法](../ProjectFiles/V2.0/3_系统实现方式-core-Part1.md)
 - 湍流模型: [湍流模型说明](../src/autoflowcfd/core/README.md)
-- 收敛控制: [配置指南](CONFIGURATION_GUIDE.md#求解器配置)
+- 收敛控制: [配置指南](CONFIGURATION_GUIDE.md#稳态字段mode-steady)
 
 #### 边界条件
 - 边界类型: [边界配置指南](boundary_configuration_guide.md)
 - 壁面函数: [边界系统 v2](boundary_system_v2_upgrade.md)
-- 移动地面: [配置指南](CONFIGURATION_GUIDE.md#边界条件配置)
 
 #### 后处理
 - 气动系数: [API 参考](API.md#calculate_coefficients)

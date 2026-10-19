@@ -361,23 +361,11 @@ class TestConfigLayerCflDefaultsAreConsistent:
     ])
     def test_inconsistent_ordering_rejected(self, kw, cls_name):
         """矛盾配置要在配置层就拦下，不要等到控制器里变成"收缩把 CFL
-        调高"（第 11 条那个缺陷）。瞬态此前完全不校验（2026-10-05 起两者与
-        ConfigSchema 共用 `cfl_triplet_errors`）。"""
+        调高"（第 11 条那个缺陷）。瞬态此前完全不校验（2026-10-05 起两者共用
+        `cfl_triplet_errors`）。"""
         from autoflowcfd.config import solver_config
         with pytest.raises(ValueError, match="CFL"):
             getattr(solver_config, cls_name)(**kw)
-
-    def test_schema_reports_the_same_errors(self):
-        from autoflowcfd.config.schema import ConfigSchema
-        from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
-        assert ConfigSchema.validate_steady(SteadyConfig(cfl_min=0.01)) == []
-        # 构造后改出的矛盾值
-        bad = SteadyConfig()
-        bad.cfl_min, bad.cfl_max = 0.2, 0.1
-        assert any("cfl_min" in e for e in ConfigSchema.validate_steady(bad))
-        bad_t = TransientConfig()
-        bad_t.cfl_min, bad_t.cfl_max = 0.2, 0.1
-        assert any("cfl_min" in e for e in ConfigSchema.validate_transient(bad_t))
 
     def test_low_cfl_config_is_expressible(self):
         """真 P1 的工作点必须能通过配置层表达出来。"""

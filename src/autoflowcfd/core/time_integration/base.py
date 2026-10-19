@@ -205,6 +205,10 @@ _SCHEME_TABLE = {
 #: Newton 步，`implicit/physical_time.py`）。CFL 律、全局一致的块着色等按它判断
 IMPLICIT_SCHEMES = (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
 
+#: 稳态伪时间推进可选的格式：`solve steady --time-scheme`、`SteadyConfig.time_scheme`、`solve resume --time-scheme`
+#: 共用这一份
+STEADY_SCHEMES = (TimeIntegrationScheme.SSP_RK3, TimeIntegrationScheme.NEWTON_KRYLOV)
+
 #: 双时间步每个物理步的内迭代（带 BDF 物理时间项的 Newton 步，`implicit/physical_time.py`）次数上限的
 #: 默认值，全部后端与 CLI 的唯一来源。内迭代按收敛判据提前结束（下一个常量），通常 2~7 次
 DEFAULT_DUAL_TIME_STEPS = 20

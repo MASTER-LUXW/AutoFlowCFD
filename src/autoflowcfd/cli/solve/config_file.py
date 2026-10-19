@@ -19,7 +19,8 @@ from typing import Any, Dict, FrozenSet, Optional
 
 import click
 
-#: 配置字段 -> CLI 参数名（其余同名）
+#: 配置字段 -> CLI 参数名（其余同名）。本命令有同名参数时优先同名（`time_scheme`：稳态命令的参数就叫
+#: `time_scheme`，瞬态命令叫 `time_method`），见 `_cli_name`
 _CLI_NAME = {
     "turbulence": "turbulence_model",
     "n_threads": "threads",
@@ -45,8 +46,16 @@ def load_config_file(path: Optional[str]) -> Optional[ConfigFile]:
         return None
     from autoflowcfd.config.loader import ConfigLoader
 
-    config, keys = ConfigLoader().load_with_keys(path)
+    try:
+        config, keys = ConfigLoader().load_with_keys(path)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--config") from e
     return ConfigFile(config=config, keys=frozenset(keys))
+
+
+def _cli_name(field: str, params) -> str:
+    """配置字段在本命令里对应的参数名。"""
+    return field if field in params else _CLI_NAME.get(field, field)
 
 
 def _cli_value(param: click.Parameter, field: str, value: Any) -> Any:
@@ -83,13 +92,13 @@ def apply_config_file(ctx: click.Context, config_file: Optional[ConfigFile]) -> 
     from click.core import ParameterSource
 
     params = {p.name: p for p in ctx.command.params}
-    unknown = sorted(f for f in config_file.keys if _CLI_NAME.get(f, f) not in params)
+    unknown = sorted(f for f in config_file.keys if _cli_name(f, params) not in params)
     if unknown:
         raise click.BadParameter(
             f"配置文件里的字段 {unknown} 在 `{ctx.command.name}` 命令里没有对应参数", param_hint="--config")
     out = {}
     for field in config_file.keys:
-        name = _CLI_NAME.get(field, field)
+        name = _cli_name(field, params)
         if ctx.get_parameter_source(name) == ParameterSource.DEFAULT:
             out[name] = _cli_value(params[name], field, getattr(config_file.config, field))
     return out

@@ -145,6 +145,11 @@ class blas_threads_limited:
         return False
 
 
+#: `n_threads=-1`（CLI `--threads`、配置字段 `n_threads` 的默认值）解析成的线程数，取值依据见
+#: `configure_numba_threads` 函数体注释。CLI 帮助文字读这一个常量
+DEFAULT_N_THREADS = 8
+
+
 def configure_numba_threads(n_threads: int, mesh) -> int:
     """设置 numba 全局线程数（求解器生命周期内只设一次，必须在任何残差
     kernel 被调用之前）；返回实际生效的线程数。取值依据见函数体注释与 `FRSolver.__init__` 的 `n_threads` 文档。
@@ -176,8 +181,7 @@ def configure_numba_threads(n_threads: int, mesh) -> int:
     # 两者叠加。要真正吃满 16 核需要把 scatter 改成"逐面算通量 +
     # 逐单元 gather"的两趟无冲突结构（不需要着色、没有逐色屏障）；
     # 在现有着色结构下，8 是有实测数据支撑的最优默认值（显式 --threads 照常生效）。
-    _DEFAULT_N_THREADS = 8
-    resolved_n_threads = n_threads if n_threads > 0 else _DEFAULT_N_THREADS
+    resolved_n_threads = n_threads if n_threads > 0 else DEFAULT_N_THREADS
     # 真实健壮性 bug 修复（2026-09-14）：`numba.set_num_threads(n)` 要求
     # n <= numba 线程池上限（`NUMBA_NUM_THREADS`，默认取 cpu_count，但
     # 用户/CI/作业调度器可以把它设成更小的值），否则直接抛
