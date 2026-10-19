@@ -237,28 +237,11 @@ def build_distributed_partition(
     # 分别处理（这批面的 owner 是 halo，只需要神经它们的
     # neighbor-primary 贡献，owner-primary 贡献留给拥有该 owner 的
     # 另一个 rank 自己算）。
-    owner_local_mask = cell_partition[owner_all] == rank
-    neighbor_local_mask = (neighbor_all >= 0) & (cell_partition[np.maximum(neighbor_all, 0)] == rank)
+    owner_local_mask, neighbor_local_mask = _face_locality(face_connectivity, cell_partition, rank)
     local_faces = np.flatnonzero(owner_local_mask | neighbor_local_mask).astype(np.int64)
 
-    # 5. 面分类。halo_owner：本 rank 只持有 neighbor 侧（owner 是另一个 rank 的 local cell）的面，不适用"owner 是
-    # local"的另三类；其余按物理边界 > 本 rank 内部 > 分区边界分类。
-    owner_local = owner_local_mask[local_faces]
-    halo_owner_mask = ~owner_local
-    physical_boundary_mask = owner_local & is_boundary_all[local_faces]
-    interior_mask = owner_local & ~is_boundary_all[local_faces] & neighbor_local_mask[local_faces]
-    partition_boundary_mask = owner_local & ~is_boundary_all[local_faces] & ~interior_mask
-
-    face_classification = FaceClassification(
-        interior_mask=interior_mask,
-        partition_boundary_mask=partition_boundary_mask,
-        physical_boundary_mask=physical_boundary_mask,
-        interior_indices=np.flatnonzero(interior_mask),
-        partition_boundary_indices=np.flatnonzero(partition_boundary_mask),
-        physical_boundary_indices=np.flatnonzero(physical_boundary_mask),
-        halo_owner_mask=halo_owner_mask,
-        halo_owner_indices=np.flatnonzero(halo_owner_mask),
-    )
+    # 5. 面分类
+    face_classification = classify_local_faces(face_connectivity, cell_partition, rank, local_faces)
 
     return DistributedPartition(
         rank=rank,
@@ -278,3 +261,56 @@ def build_distributed_partition(
         face_classification=face_classification,
         local_faces=local_faces,
     )
+
+
+def _face_locality(face_connectivity, cell_partition: np.ndarray, rank: int):
+    """逐面 `(owner 是本 rank 单元, neighbor 是本 rank 单元)`，各 `(n_faces,)` bool。"""
+    owner = np.asarray(face_connectivity.owner_cell, dtype=np.int64)
+    neighbor = np.asarray(face_connectivity.neighbor_cell, dtype=np.int64)
+    return cell_partition[owner] == rank, (neighbor >= 0) & (cell_partition[np.maximum(neighbor, 0)] == rank)
+
+
+def classify_local_faces(face_connectivity, cell_partition: np.ndarray, rank: int,
+                         local_faces: np.ndarray) -> FaceClassification:
+    """本 rank 面表 `local_faces` 的分类。
+
+    halo_owner：owner 不是本 rank 的单元（本 rank 因 neighbor 是本地单元而持有该面，或混合拆分面的边界子面记录，
+    见 `include_faces`），只算 neighbor 一侧的贡献；其余按物理边界 > 本 rank 内部 > 分区边界分类。
+    """
+    owner_local_mask, neighbor_local_mask = _face_locality(face_connectivity, cell_partition, rank)
+    is_boundary = np.asarray(face_connectivity.is_boundary, dtype=bool)
+    owner_local = owner_local_mask[local_faces]
+    halo_owner_mask = ~owner_local
+    physical_boundary_mask = owner_local & is_boundary[local_faces]
+    interior_mask = owner_local & ~is_boundary[local_faces] & neighbor_local_mask[local_faces]
+    partition_boundary_mask = owner_local & ~is_boundary[local_faces] & ~interior_mask
+    return FaceClassification(
+        interior_mask=interior_mask,
+        partition_boundary_mask=partition_boundary_mask,
+        physical_boundary_mask=physical_boundary_mask,
+        interior_indices=np.flatnonzero(interior_mask),
+        partition_boundary_indices=np.flatnonzero(partition_boundary_mask),
+        physical_boundary_indices=np.flatnonzero(physical_boundary_mask),
+        halo_owner_mask=halo_owner_mask,
+        halo_owner_indices=np.flatnonzero(halo_owner_mask),
+    )
+
+
+def include_faces(partition: DistributedPartition, face_connectivity, cell_partition: np.ndarray,
+                  faces: np.ndarray) -> DistributedPartition:
+    """把 `faces`（全局面索引）并入本 rank 面表并重新分类（原地修改并返回 partition）。
+
+    用途：混合拆分面（棱柱四边形侧面一半挨内部单元、一半在边界上，`fr/face_flux_points/grouping.py`）的内部
+    子面记录在本 rank 时，它的边界子面记录（配对面，owner 为该棱柱）也必须在本 rank：P>=1 按配对面取边界半区的
+    幽灵态，P0 把两个半区当作两个独立的面（`fr_residual/inviscid_p0.py`）。分区线切过该侧面（棱柱在别的 rank、
+    挨着的四面体在本 rank）时，内部子面记录作为 halo_owner 面进入本 rank，而边界子面记录的 owner 是远端棱柱、
+    原先不会进入本 rank（I-98：此前此时分布式面几何构造报错）。并入后它是 halo_owner 面，贡献只落在 halo 单元
+    上（被丢弃），只为让配对引用可解析、两个半区的几何一致。
+    """
+    faces = np.setdiff1d(np.asarray(faces, dtype=np.int64), partition.local_faces)
+    if faces.size == 0:
+        return partition
+    partition.local_faces = np.union1d(partition.local_faces, faces).astype(np.int64)
+    partition.face_classification = classify_local_faces(
+        face_connectivity, cell_partition, partition.rank, partition.local_faces)
+    return partition

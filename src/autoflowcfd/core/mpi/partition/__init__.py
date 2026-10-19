@@ -41,6 +41,8 @@ from .types import (  # noqa: F401
 from .build import (  # noqa: F401
     build_cell_adjacency_graph,
     build_distributed_partition,
+    classify_local_faces,
+    include_faces,
     partition_mesh,
 )
 from .halo import (  # noqa: F401

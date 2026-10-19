@@ -57,6 +57,12 @@ def build_distributed_flat_face(
         extend_halo_for_flux_point_cross_references(
             partition, cell_partition, mesh.face_connectivity, extra_dep_arrays,
         )
+        # 混合拆分面的配对记录必须与本 rank 持有的那一半同在（`partition/build.py::include_faces`）
+        from autoflowcfd.core.mpi.partition import include_faces
+
+        held = partition.local_faces
+        partners = np.concatenate([global_flat.mixed_nb_partner[held], global_flat.mixed_ow_partner[held]])
+        include_faces(partition, mesh.face_connectivity, cell_partition, partners[partners >= 0])
 
     # 提取本 rank 负责的面
     local_face_indices = partition.local_faces
@@ -191,15 +197,11 @@ def build_distributed_flat_face(
         """把 mixed_{nb,ow}_partner（配对面的*全局*索引，-1 表示非混合面）
         重映射为本 rank 的局部面索引。
 
-        混合配对（B-8）的两个半区（内部界面半区 + 边界半区）是同一个
-        棱柱四边形侧面三角化拆分出的两条子面记录，共享同一个 owner
-        单元——而 partition.local_faces 正是按 owner 单元是否为本 rank
-        local cell 来筛选面的（见 core/mpi/partition.py），所以配对面
-        必然与当前面同属一个 rank，不存在跨 rank 拆分的可能。据此，
-        任何 partner>=0 但重映射失败（说明 partner 落在本 rank
-        local_face_indices 之外）都必然是分区逻辑本身出了问题，必须
-        报错，不能静默产生 -1（那会让下游把一个真实存在的混合配对
-        误判为"非混合面"，悄悄丢弃边界罚项/幽灵态耦合）。
+        混合配对（B-8）的两个半区（内部界面半区 + 边界半区）是同一个棱柱四边形侧面拆分出的两条子面记录；本 rank
+        持有其中一半时，另一半已由 `partition/build.py::include_faces` 并入本 rank 面表（分区线切过该侧面时，内部
+        子面记录以 halo_owner 面进入本 rank，2026-10-19（I-98）以前配对记录不随之进入，这里报错、分布式启动失败）。
+        因此任何 partner>=0 但重映射失败都说明分区逻辑出了问题，必须报错，不能静默产生 -1（那会让下游把一个真实
+        存在的混合配对误判为"非混合面"，悄悄丢弃边界罚项/幽灵态耦合）。
         """
         local_partner = np.full_like(global_partner_for_local_faces, -1)
         valid = global_partner_for_local_faces >= 0
