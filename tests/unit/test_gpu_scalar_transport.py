@@ -327,7 +327,8 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         stub.ops = ops
         stub.turb_model = turb_ref
         stub.mu_molecular = mu
-        stub.boundary_ghost_provider = None
+        from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+        stub.boundary_ghost_provider = DefaultGhostProvider()  # 与 GPU 替身的全 False 掩码一致：没有物理边界
         stub.wall_distance = d_wall
         stub.state = types.SimpleNamespace(Q=Q, U=U)
         return stub, turb_ref

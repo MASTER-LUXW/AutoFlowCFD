@@ -265,7 +265,8 @@ class TestNativeScalarTransportMatchesCpu:
         cpu_solver.ops = ops
         cpu_solver.turb_model = turb_ref
         cpu_solver.mu_molecular = mu
-        cpu_solver.boundary_ghost_provider = None
+        from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+        cpu_solver.boundary_ghost_provider = DefaultGhostProvider()  # 与 GPU 替身的全 False 掩码一致：没有物理边界
         cpu_solver.wall_distance = d_wall
         cpu_solver.state = types.SimpleNamespace(Q=Q, U=U)
 

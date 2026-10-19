@@ -172,25 +172,28 @@ class TestComputeWallDirichletFaceMask:
 
         np.testing.assert_array_equal(mask, [False, False, False])
 
-    def test_missing_provider_metadata_falls_back_to_all_false(self):
-        """没有 group_code/code_to_config 的 ghost provider（例如某些测试用的普通
-        可调用对象）不能抛异常——它退化为修复之前处处 Neumann 的默认值，而不是
-        一种新的失效方式。
-        """
+    def test_provider_without_groups_raises(self):
+        """没有 group_code/code_to_config 的提供者（普通可调用对象、None）报错（I-64）：此前静默返回全 False，
+        壁面 k=0、omega 壁面值与来流条件全部失效而不报错。"""
+        from autoflowcfd.core.turbulence.transport import open_boundary_code_mask
+
         mesh = SimpleNamespace(face_connectivity=SimpleNamespace(n_faces=4))
-        solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=lambda f, q, n: q)
+        for provider in (lambda f, q, n: q, None):
+            solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=provider)
+            with pytest.raises(ValueError, match="group_code"):
+                _compute_wall_dirichlet_face_mask(solver)
+            with pytest.raises(ValueError, match="group_code"):
+                open_boundary_code_mask(provider, 4)
 
-        mask = _compute_wall_dirichlet_face_mask(solver)
+    def test_explicit_zero_gradient_provider_has_no_physical_boundaries(self):
+        """显式给出的零梯度外插提供者表示"没有物理边界"：两张掩码全 False、不报错。"""
+        from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+        from autoflowcfd.core.turbulence.transport import open_boundary_code_mask
 
-        np.testing.assert_array_equal(mask, [False, False, False, False])
-
-    def test_no_ghost_provider_falls_back_to_all_false(self):
         mesh = SimpleNamespace(face_connectivity=SimpleNamespace(n_faces=2))
-        solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=None)
-
-        mask = _compute_wall_dirichlet_face_mask(solver)
-
-        np.testing.assert_array_equal(mask, [False, False])
+        solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=DefaultGhostProvider())
+        np.testing.assert_array_equal(_compute_wall_dirichlet_face_mask(solver), [False, False])
+        np.testing.assert_array_equal(open_boundary_code_mask(DefaultGhostProvider(), 2), [False, False])
 
     def test_slip_wall_excluded_only_no_slip_wall_included(self):
         """真实 bug 回归测试（2026-09-12，cube_demo 791,492 单元真实网格

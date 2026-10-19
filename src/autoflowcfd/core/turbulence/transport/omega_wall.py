@@ -1,7 +1,5 @@
 """AutoFlowCFD V2.0 - omega 壁面边界处理（Dirichlet 掩码、目标值）。
 
-从 `core/turbulence/transport.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
-
 SST 的 omega 在壁面上有解析值（Wilcox `omega_wall = 60*nu/(beta1*d1^2)`），
 它进对流的面外插 ghost 规则与扩散残差的面 Dirichlet（显式与隐式同一离散）。
 此前显式路径还在每步之后对壁面单元全部解点做一次松弛，2026-10-01 删除：隐式 NK 收敛到 R≈1e-8 的
@@ -21,63 +19,42 @@ from autoflowcfd.core.turbulence.sst.bounds import (
 
 
 
-def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
-    """算出哪些面是**真实无滑移**WALL 边界面，供 k 场的 Dirichlet-zero
-    ghost 及 omega 壁面解析式（Wilcox omega wall function）使用（见
-    extrapolate_scalar_to_faces_kernel 文档）。
+def boundary_groups(provider):
+    """边界幽灵态提供者的逐面边界组编码与组配置 `(group_code, code_to_config, default_config)`。
 
-    数据来源：`solver.boundary_ghost_provider`——真实求解路径下是
-    `boundary.fr_ghost_state.BoundaryGhostStateProvider`，持有
-    `group_code`（每个面所属边界组的整数编码，-1 表示内部面/未匹配）和
-    `code_to_config`（编码 -> {'type': 'WALL', 'is_no_slip': bool,...}）。用
-    `code_to_config` 里显式标记为 WALL 的编码集合对 `group_code` 做一次
-    向量化匹配（`np.isin`），成本是对 187 万面级别网格的一次数组比较，
-    不是逐面 Python 循环。
-
-    真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 阶段
-    omega 独立于历史、确定性地在特定单元收敛到同一个数值~984312 的排查
-    发现）：此前这里把
-    `cfg.get("type")=="WALL"` 的编码**不加区分**全部当作需要 Wilcox 近壁
-    omega 解析式（`omega_wall=60*nu/(beta1*d1^2)`，专为*真实粘性无滑移*
-    边界层设计）处理的壁面——但本项目的 WALL 类型边界组同时覆盖两种物理
-    上完全不同的情形（见 `boundary/fr_ghost_state.py::build_wall_ghost_
-    state` 的 `is_no_slip` 参数）：`is_no_slip=True`（真实固壁，如
-    cube_demo 的 "body"）与 `is_no_slip=False`（滑移壁，如 cube_demo 的
-    风洞外壁 "tunnel"，用于近似远场/对称边界，物理上零剪切、不产生真实
-    边界层）。滑移壁没有真实的近壁粘性子层，Wilcox 公式在这里没有物理
-    意义；真实复现：cube_demo 的 "tunnel" 边界组配置为
-    `is_no_slip=False`，其 owner 单元因为不属于任何 BL 棱柱加密区、`d1`
-    （该单元到最近 body 表面的距离）经常很小，代入公式得到远超合理量级
-    的值，被 `_compute_omega_wall_target` 内部的 `omega_max` 安全上限
-    钳成 1,000,000，随后当时的显式步后松弛（2026-10-01 已删除）每步把这些
-    "滑移壁"owner 单元的 omega 强行按固定 relax=0.5 拉向这个物理上荒谬
-    的目标（0.5*2267.82+0.5*1e6=501133.91，与真实观测的单步跳变值精确
-    吻合，决定性验证：手术式重置 omega 场后单步复现同一批单元同一数值），
-    与流场是否真的发展出边界层完全无关——这些单元的平均流速度全程精确
-    等于来流值（无滑移损耗），却因为这个 bug 被反复拉向 1e6 附近，最终
-    稳定在耗散项与松弛项相互竞争的一个不动点 984312.6254，与该单元是否
-    真的靠近任何真实固壁毫无关系。修复：只把 `is_no_slip` 非 False
-    （默认 True，与 `fr_ghost_state.py` 的默认值一致）的 WALL 编码计入——
-    真实无滑移壁（body）行为完全不变，滑移壁（tunnel）的 k/omega 现在
-    正确地退回默认 Neumann（零梯度）处理，与它"物理上应表现得像对称面/
-    远场"这个建模意图一致。
-
-    防御性回退：如果 `boundary_ghost_provider` 不是这个类型（例如某些
-    测试用的自定义 ghost provider 只是一个普通 callable，没有
-    group_code/code_to_config），拿不到分组信息时返回全 False——退回
-    调用方原有的 Neumann 默认，不是新的静默 bug（这是修复前唯一的行为，
-    对这些没有分组信息的场景数值结果不变）。
+    湍流量的壁面条件（k 的 Dirichlet 0、omega 壁面目标值）与来流条件都按边界组类型施加，所以提供者必须带分组
+    信息：生产求解器的 `BoundaryGhostStateProvider`（`core/fr_solver/boundary/ghost.py::build_boundary_ghost_provider`）
+    恒带。显式给出的零梯度外插 `DefaultGhostProvider` 表示"没有物理边界"（自由流守恒类测试），返回空分组。
+    其它情况报错：2026-10-19（I-64）以前拿不到分组信息时静默返回全 False 掩码，壁面 k=0、omega 壁面值与来流
+    条件全部失效而不报错（与 I-5 删除的幽灵态缺省同一类问题）。
     """
-    return wall_dirichlet_face_mask(
-        getattr(solver, "boundary_ghost_provider", None), solver.mesh.face_connectivity.n_faces)
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 
-
-def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
-    """`_compute_wall_dirichlet_face_mask` 的纯函数形式（CPU 与 GPU 共用，
-    判据见该函数文档）。"""
+    if isinstance(provider, DefaultGhostProvider):
+        return None, {}, None
     group_code = getattr(provider, "group_code", None)
     code_to_config = getattr(provider, "code_to_config", None)
     if group_code is None or code_to_config is None:
+        raise ValueError(
+            f"湍流量的边界条件需要按边界组给定条件的幽灵态提供者（带 group_code / code_to_config），"
+            f"收到 {type(provider).__name__}；零梯度外插须显式传 DefaultGhostProvider()")
+    return np.asarray(group_code), code_to_config, getattr(provider, "default_config", None)
+
+
+def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
+    """**物理无滑移**壁面边界面掩码 `(n_faces,)`，供 k 的 Dirichlet 0 与 omega 壁面目标值使用。
+
+    分组来自 `solver.boundary_ghost_provider`（要求见 `boundary_groups`）。只计入物理无滑移固壁
+    （`boundary/wall_kind.py::is_physical_no_slip_wall`）：滑移壁（如风洞外壁，`is_no_slip=False`）物理上零剪切、
+    不是边界层，k/omega 取零梯度（2026-09-12 cube_demo 真实网格上滑移壁被当成壁面、omega 被拉向上限的缺陷）。
+    """
+    return wall_dirichlet_face_mask(solver.boundary_ghost_provider, solver.mesh.face_connectivity.n_faces)
+
+
+def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
+    """`_compute_wall_dirichlet_face_mask` 的纯函数形式（CPU 与 GPU 共用）。"""
+    group_code, code_to_config, _ = boundary_groups(provider)
+    if group_code is None:
         return np.zeros(n_faces, dtype=np.bool_)
 
     # 物理无滑移固壁（`boundary/wall_kind.py`）：壁面模型（WMLES、RANS 自动壁面处理）下幽灵态的 is_no_slip 被
@@ -91,37 +68,32 @@ def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
 
 
 def _compute_open_boundary_face_mask(solver, flat) -> np.ndarray:
-    """哪些面是**开放边界**（流入/流出：FARFIELD、INLET、OUTLET 等），
-    供 k/omega 对流的来流条件使用（`compute_scalar_convection_residual` 的
-    `open_boundary_face` 参数）。
+    """**开放边界**（流入/流出：FARFIELD、INLET、OUTLET 等）面掩码，供 k/omega 对流的来流条件使用
+    （`compute_scalar_convection_residual` 的 `open_boundary_face` 参数）。
 
-    分类读的是平均流热边界条件那一份唯一来源
-    `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/
-    SYMMETRY）：它的文档写明"INLET/OUTLET/FARFIELD 是流入/流出边界"，
-    这里取其补集，不另建一张 BC 类型表。
-
-    与 `_compute_wall_dirichlet_face_mask` 同一个鸭子类型约定：provider 没有
-    `group_code/code_to_config`（测试用的普通 callable）时返回全 False，
-    保持那些场景的既有行为。
+    分类读平均流热边界条件那一份唯一来源 `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/SYMMETRY）
+    的补集，不另建 BC 类型表；分组要求见 `boundary_groups`。
     """
     is_boundary = np.asarray(flat.is_boundary, dtype=np.bool_)
-    return open_boundary_code_mask(
-        getattr(solver, "boundary_ghost_provider", None), is_boundary.shape[0]) & is_boundary
+    return open_boundary_code_mask(solver.boundary_ghost_provider, is_boundary.shape[0]) & is_boundary
 
 
 def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
-    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按
-    `default_config`）。**不含**"是否真边界面"这一条（内部面的
-    `group_code` 也是 -1）：CPU 与调用方的 `is_boundary` 求与，GPU 与
-    自己从面邻居源推出的真边界掩码求与（`gpu_scalar_transport`）。
+    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按 `default_config`）。**不含**"是否真边界面"这一条
+    （内部面的 `group_code` 也是 -1）：CPU 与调用方的 `is_boundary` 求与，GPU 与自己从面邻居源推出的真边界掩码
+    求与（`gpu_scalar_transport`）。
     """
     from autoflowcfd.boundary.fr_ghost_state import ADIABATIC_THERMAL_BC_TYPES
 
     mask = np.zeros(n_faces, dtype=np.bool_)
-    group_code = getattr(provider, "group_code", None)
-    code_to_config = getattr(provider, "code_to_config", None)
-    if group_code is None or code_to_config is None:
+    group_code, code_to_config, default_config = boundary_groups(provider)
+    if group_code is None:
         return mask
+    for code in np.unique(group_code):
+        cfg = code_to_config.get(int(code), default_config)
+        if cfg is not None and cfg.get("type") not in ADIABATIC_THERMAL_BC_TYPES:
+            mask[group_code == code] = True
+    return mask
     default_config = getattr(provider, "default_config", None)
     group_code = np.asarray(group_code)
     for code in np.unique(group_code):
@@ -193,8 +165,7 @@ def _compute_omega_wall_target(
             FlatFaceGeometry——`wall_face_idx`（来自 compact 空间的
             wall_mask）被当成全局面索引使用，语义上是错的，只是在
             现有测试里因为从未真正匹配到 WALL 边界组（wall_mask 恒为全
-            False，见 `_compute_wall_dirichlet_face_mask` 提前返回分支）
-            而没有被触发）
+            False）而没有被触发）
 
     Returns:
         (omega_wall_value_face, has_value_face)：
