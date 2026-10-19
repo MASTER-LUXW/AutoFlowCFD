@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 面通量点跨引用所需的 halo 扩展
-
-从 `src/autoflowcfd/core/mpi/partition.py`(原 612 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 面通量点跨引用所需的 halo 扩展。"""
 
 import numpy as np
 
@@ -35,8 +32,10 @@ def extend_halo_for_flux_point_cross_references(
     的 `cell_partition`/`face_connectivity`/`extra_dep_arrays`，不需要
     实际 MPI 通信就能算出一致的结果——与 `build_distributed_partition`
     本身"兼容旧接口：所有 rank 独立执行分区"的既有设计原则相同）：
-    对每个面 f，"请求方 rank" = cell_partition[face 的 owner_cell]（该面
-    的插值计算发生在这个 rank 上），若某个 extra_dep_arrays 条目在 f 处
+    对每个面 f，"请求方 rank" = 面的 owner 与 neighbor 各自所在的 rank（两者都持有该面：owner 一侧按 owner 是
+    本地单元、neighbor 一侧按 halo_owner 面，`partition/build.py`；两个 rank 都在两侧坐标系里做插值——neighbor
+    坐标系的 owner_src 依赖由 neighbor 所在 rank 实际使用。2026-10-19（I-97）以前只取 owner 所在 rank，因 src1
+    单元恰好与对侧单元共面、已在 1-ring halo 内而未暴露），若某个 extra_dep_arrays 条目在 f 处
     引用了单元 c 且 c 的 owner rank 与请求方不同，则：
     - 若本 rank 就是请求方：c 需要被加入本 rank 的 halo（若尚不是）；
     - 若本 rank 就是 c 的 owner：本 rank 需要把 c 发送给请求方 rank。
@@ -54,8 +53,9 @@ def extend_halo_for_flux_point_cross_references(
         原地扩展后的 partition（同一个对象，为了链式调用方便返回它）
     """
     rank = partition.rank
-    owner_cell_g = face_connectivity.owner_cell
-    owner_rank_of_face = cell_partition[owner_cell_g]  # (n_faces,)
+    owner_rank_of_face = cell_partition[np.asarray(face_connectivity.owner_cell, dtype=np.int64)]
+    neighbor_g = np.asarray(face_connectivity.neighbor_cell, dtype=np.int64)
+    neighbor_rank_of_face = np.where(neighbor_g >= 0, cell_partition[np.maximum(neighbor_g, 0)], -1)
 
     local_cell_set = set(int(c) for c in partition.local_cells)
     halo_set = set(int(c) for c in partition.halo_cells)
@@ -63,12 +63,13 @@ def extend_halo_for_flux_point_cross_references(
     new_halo_owner: Dict[int, int] = {}      # 新 halo cell -> owner rank
     new_send: Dict[int, set] = {}            # other_rank -> {本 rank 需要发送的 local cell}
 
-    for dep_arr in extra_dep_arrays:
-        valid = dep_arr >= 0
+    for dep_arr, requester_of_face in ((d, r) for d in extra_dep_arrays
+                                       for r in (owner_rank_of_face, neighbor_rank_of_face)):
+        valid = (dep_arr >= 0) & (requester_of_face >= 0)
         if not np.any(valid):
             continue
         dep_cells = dep_arr[valid].astype(np.int64)
-        requester_ranks = owner_rank_of_face[valid]
+        requester_ranks = requester_of_face[valid]
         owner_ranks = cell_partition[dep_cells]
         cross = requester_ranks != owner_ranks
         if not np.any(cross):
