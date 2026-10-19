@@ -27,7 +27,7 @@ from typing import Callable, NamedTuple, Optional
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 from autoflowcfd.core.fr_operators.volume_contract import (
@@ -134,13 +134,13 @@ class MeanFlowPrimitives(NamedTuple):
     Q_ghost: np.ndarray    # (n_faces, n_fp, 5)，只有边界面的行有意义
 
 
-def mean_flow_primitives(U: np.ndarray, flat, ghost_provider=None) -> MeanFlowPrimitives:
+def mean_flow_primitives(U: np.ndarray, flat, ghost_provider) -> MeanFlowPrimitives:
     """`U` 上的原始变量与边界幽灵态，各算一次供无粘、粘性两项共用
     （`FRSolver.compute_mean_flow_residual`）。两项此前各自从 `U` 重算这两样，结果逐位相同。"""
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 
     Q = conserved_to_primitive(U[..., :5])
-    provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
+    provider = require_ghost_provider(ghost_provider, "mean_flow_primitives")
     return MeanFlowPrimitives(Q, compute_boundary_ghost_states(flat, Q, provider))
 
 
@@ -188,7 +188,7 @@ def compute_inviscid_residual_fr(
     U: np.ndarray,
     mesh,
     ops,
-    boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
+    boundary_ghost_provider: Callable[[int, np.ndarray, np.ndarray], np.ndarray],
     mach_ref: float = 0.1,
     flat_face_override=None,
     primitives: Optional[MeanFlowPrimitives] = None,
@@ -201,7 +201,7 @@ def compute_inviscid_residual_fr(
             （提供 face_connectivity, face_flux_points, jacobians）
         ops: FROperators（D_3d_prism/D_3d_tet 等体积算子）
         boundary_ghost_provider: 可调用对象 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp，
-            用于给出边界面的幽灵态；None 时使用 DefaultGhostProvider（零梯度外插）
+            用于给出边界面的幽灵态，必须显式给出（`require_ghost_provider`；零梯度外插传 DefaultGhostProvider()）
         mach_ref: AUSM+up Weiss-Smith 预处理用的参考（自由来流）马赫数
             （见 kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
             保留旧硬编码值以免所有非求解器主循环调用点（CLI 工具/MPI
@@ -284,7 +284,7 @@ def compute_inviscid_residual_fr(
     # fr_residual_inviscid_kernel.py 模块文档、
     # tests/unit/test_fr_residual_inviscid_kernel_crosscheck.py 的新旧
     # 实现逐位对比验证）。
-    ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
+    ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fr")
 
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid_kernel import (

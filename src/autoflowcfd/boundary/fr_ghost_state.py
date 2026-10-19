@@ -262,6 +262,19 @@ class GhostStateProvider:
         return out
 
 
+def require_ghost_provider(provider, who: str):
+    """残差 / 梯度核心函数的边界幽灵态提供者必须由调用方显式给出，返回它本身（I-5，2026-10-19）。
+
+    此前这些函数收到 None 时静默换成 `DefaultGhostProvider`（零梯度外插）：边界条件对残差不可见，结果看不出
+    异常。单 GPU 与多 GPU 都因此出过"全部边界退化成镜像内部值"的真实缺陷（2026-08-27 / 08-28）。零梯度外插
+    是合法的选择（自由流守恒测试），但必须由调用方显式传 `DefaultGhostProvider()`。
+    """
+    if provider is None:
+        raise ValueError(f"{who}: 必须显式给出边界幽灵态提供者（生产求解器用 build_boundary_ghost_provider 构建的"
+                         f"按边界组给定条件的提供者；零梯度外插须显式传 DefaultGhostProvider()）")
+    return provider
+
+
 class DefaultGhostProvider(GhostStateProvider):
     """零梯度外插（幽灵态 = 本侧外插态）：对均匀流场恰好零跳跃。
 

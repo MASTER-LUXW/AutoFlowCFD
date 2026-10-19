@@ -9,7 +9,7 @@ AutoFlowCFD V2.0 - P0 阶专用有限体积无粘残差 (S-02)
 (inviscid_p0_kernel.py)，791K 单元 / 188 万面网格上从 ~25s 降至 ~1-2s。
 """
 
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 
@@ -18,7 +18,7 @@ def compute_inviscid_residual_fv_p0(
     U: np.ndarray,
     mesh,
     flat,
-    boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
+    boundary_ghost_provider: Callable[[int, np.ndarray, np.ndarray], np.ndarray],
     mach_ref: float = 0.1,
 ) -> np.ndarray:
     """P0（1 SP/cell，Order Continuation 最低阶）专用有限体积残差。
@@ -59,7 +59,7 @@ def compute_inviscid_residual_fv_p0(
     Returns:
         residual: 形状 (n_cells, 1, 5)
     """
-    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
     from .inviscid import conserved_to_primitive
     from .inviscid_p0_kernel import _p0_inviscid_kernel
 
@@ -82,7 +82,7 @@ def compute_inviscid_residual_fv_p0(
     unit_normals, area_weights = _extract_p0_face_geometry(ffp_list, fc, n_faces)
 
     # --- 预计算边界幽灵态 ---
-    ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
+    ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fv_p0")
     Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces, unit_normals)
 
     # --- numba 并行 kernel：按面着色逐颜色组累加 ---

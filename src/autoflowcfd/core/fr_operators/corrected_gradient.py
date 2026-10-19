@@ -105,17 +105,17 @@ def source_velocity_gradient(Q, mesh, ops, flat, ghost_provider, halo_refresh=No
     """
     import numpy as np
 
-    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     from autoflowcfd.core.turbulence.transport.faces import (
         _extrapolate_scalar_to_faces, _extrapolate_scalar_to_faces_neighbor_frame, _lift_side_jumps,
     )
 
+    provider = require_ghost_provider(ghost_provider, "source_velocity_gradient")   # 各阶数同一个约定
     vel = np.ascontiguousarray(Q[:, :, 1:4])
     grad_broken = compute_physical_gradient(vel, mesh, ops)
     if not needs_lifting(vel.shape[1]):
         return grad_broken
-    provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
     Q_ghost = compute_boundary_ghost_states(flat, np.ascontiguousarray(Q[..., :5]), provider)
 
     def extrapolate_pair(comp, frame):

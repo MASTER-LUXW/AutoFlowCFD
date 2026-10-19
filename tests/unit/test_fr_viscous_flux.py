@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
@@ -61,7 +62,7 @@ class TestViscousResidualUniformFlow:
         U_inf = primitive_to_conserved(Q_inf)
         U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-        residual = compute_viscous_residual_fr(U, mesh, mesh.operators, mu=1.8e-5, Pr=0.72)
+        residual = compute_viscous_residual_fr(U, mesh, mesh.operators, mu=1.8e-5, Pr=0.72, boundary_ghost_provider=DefaultGhostProvider())
         rel_res = np.max(np.abs(residual)) / 1e5  # 相对能量通量典型量级归一化
 
         assert rel_res < 1e-6, f"Uniform-flow viscous residual not zero at P={order}: rel={rel_res:.3e}"
@@ -73,5 +74,5 @@ class TestViscousResidualUniformFlow:
         U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
         mu_t_field = np.ones((mesh.n_cells, mesh.n_sps_per_cell)) * 1e-4
-        residual = compute_viscous_residual_fr(U, mesh, mesh.operators, mu=1.8e-5, Pr=0.72, mu_t_field=mu_t_field, Pr_t=0.9)
+        residual = compute_viscous_residual_fr(U, mesh, mesh.operators, mu=1.8e-5, Pr=0.72, mu_t_field=mu_t_field, Pr_t=0.9, boundary_ghost_provider=DefaultGhostProvider())
         assert np.all(np.isfinite(residual))

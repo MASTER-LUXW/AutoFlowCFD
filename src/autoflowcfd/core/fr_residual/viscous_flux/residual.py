@@ -41,8 +41,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             （fr_residual_inviscid.py）共用同一个实例/同一套 WALL/INLET/
             OUTLET/FARFIELD/SYMMETRY 逻辑（见 boundary/fr_ghost_state.py），
             签名 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp。
-            None 时退化为 DefaultGhostProvider（零梯度外插，Q_ghost=Q_owner，
-            BR1 跳跃恒为零）。
+            必须显式给出（`require_ghost_provider`；零梯度外插须显式传 DefaultGhostProvider()）。
 
             此前这里完全不使用该参数、边界面统一取 Q_n=Q_o（内部值原样
             镜像），导致 BR1 平均 Q_avg 恒等于 Q_o、跳跃项 jump_owner 恒为
@@ -86,9 +85,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         residual: (n_cells, n_sps, 5)
     """
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
 
-    ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
+    ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_viscous_residual_fr")
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell

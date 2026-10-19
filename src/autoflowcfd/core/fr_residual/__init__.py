@@ -7,8 +7,8 @@ FR 残差计算模块，包含无粘残差、粘性残差和粘性通量计算�
 from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     conserved_to_primitive,
-    DefaultGhostProvider,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux import viscous_physical_flux
 

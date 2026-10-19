@@ -21,8 +21,8 @@ from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     conserved_to_primitive,
     primitive_to_conserved,
-    DefaultGhostProvider,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid_kernel import (
     compute_inviscid_interface_correction_kernel,
@@ -141,7 +141,7 @@ def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
     U_inf = primitive_to_conserved(Q_inf)
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-    old_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators)
+    old_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, boundary_ghost_provider=DefaultGhostProvider())
     new_residual = _compute_residual_via_new_kernel(U, mesh, mesh.operators)
 
     max_diff = np.max(np.abs(old_residual - new_residual))
@@ -195,7 +195,7 @@ def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     Q[..., 4] *= 1.0 + rng.uniform(-frac_pert, frac_pert, size=(n_cells, n_sps))
     U = primitive_to_conserved(Q)
 
-    old_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators)
+    old_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, boundary_ghost_provider=DefaultGhostProvider())
     new_residual = _compute_residual_via_new_kernel(U, mesh, mesh.operators)
 
     max_diff = np.max(np.abs(old_residual - new_residual))

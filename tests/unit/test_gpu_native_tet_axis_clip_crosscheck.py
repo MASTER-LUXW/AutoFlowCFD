@@ -63,6 +63,7 @@ fr_gpu` 与 CPU 参考实现交叉验证到 ~1e-16/1e-17 相对精度（P1/P2 �
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
@@ -124,8 +125,8 @@ class TestNativeTetAxisClipFix:
         Q[..., 4] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
         U = primitive_to_conserved(Q)
 
-        r_cpu = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=0.2)
-        r_gpu = np.asarray(compute_inviscid_residual_fr_gpu(U, mesh, ops, mach_ref=0.2))
+        r_cpu = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=0.2, boundary_ghost_provider=DefaultGhostProvider())
+        r_gpu = np.asarray(compute_inviscid_residual_fr_gpu(U, mesh, ops, mach_ref=0.2, boundary_ghost_provider=DefaultGhostProvider()))
 
         max_diff = np.max(np.abs(r_gpu - r_cpu))
         scale = max(np.max(np.abs(r_cpu)), 1.0)
@@ -167,12 +168,12 @@ class TestNativeTetAxisClipFix:
 
         from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
         from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
-        compute_inviscid_residual_fr(U, mesh, ops, mach_ref=0.2)
-        compute_inviscid_residual_fr_gpu(U, mesh, ops, mach_ref=0.2)
+        compute_inviscid_residual_fr(U, mesh, ops, mach_ref=0.2, boundary_ghost_provider=DefaultGhostProvider())
+        compute_inviscid_residual_fr_gpu(U, mesh, ops, mach_ref=0.2, boundary_ghost_provider=DefaultGhostProvider())
 
         mu_t_field = rng.uniform(0.0, 5e-5, size=(n_cells, n_sps))
-        r_cpu = compute_viscous_residual_fr(U, mesh, ops, 1.8e-5, PRANDTL, mu_t_field=mu_t_field)
-        r_gpu = np.asarray(compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field))
+        r_cpu = compute_viscous_residual_fr(U, mesh, ops, 1.8e-5, PRANDTL, mu_t_field=mu_t_field, boundary_ghost_provider=DefaultGhostProvider())
+        r_gpu = np.asarray(compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field, boundary_ghost_provider=DefaultGhostProvider()))
 
         max_diff = np.max(np.abs(r_gpu - r_cpu))
         scale = max(np.max(np.abs(r_cpu)), 1.0)

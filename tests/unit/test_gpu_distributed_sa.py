@@ -9,6 +9,7 @@
 
 import types
 import numpy as np
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
@@ -81,7 +82,7 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
     halo_cpu = ShapeKeyedFakeHalo(U[native_ids][..., :5], np.where(d_wall == 0.0, 0.0, nu_tilde)[native_ids][..., None])
     mu_t_cpu = distributed_compute_turbulence_source_and_viscosity(
         U[partition.local_cells], partition, halo_cpu, dist_fc, mesh, ops, turb_cpu, MU, d_compact,
-        np.full((n_local, n_sps), dt), ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
+        np.full((n_local, n_sps), dt), boundary_ghost_provider=DefaultGhostProvider(), ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
         turb_model_name="SA")
 
     # ---- 多 GPU（numpy 替身）----
@@ -92,7 +93,7 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
     halo_gpu = ShapeKeyedFakeHalo(U[native_ids], np.where(d_wall == 0.0, 0.0, nu_tilde)[native_ids][..., None])
     n_faces = dist_fc.base_flat.n_faces
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mu_molecular=MU, boundary_ghost_provider=None, partition=partition, mesh=mesh,
+        rank=rank, device_id=0, mu_molecular=MU, boundary_ghost_provider=DefaultGhostProvider(), partition=partition, mesh=mesh,
         dist_flat_face=dist_fc, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, flat_face_gpu=dist_fc.base_flat,
         turb_model_gpu=turb_gpu, turb_model_name="SA", gpu_halo=halo_gpu, _perm_gpu=dist_fc.perm,
         _inv_perm_gpu=dist_fc.inv_perm, n_compact=len(compact_ids), wall_distance_gpu=d_compact,

@@ -23,6 +23,7 @@ import copy
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, primitive_to_conserved
 
 from .test_native_tet_mesh_geometry_wiring import _build_synthetic_mixed_mesh
@@ -78,7 +79,7 @@ def test_native_overintegration_runs_end_to_end_without_blowing_up(order):
     Q = _make_couette_Q(mesh)
     U = primitive_to_conserved(Q)
 
-    residual_with_overint = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=U_WALL / 340.0)
+    residual_with_overint = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=U_WALL / 340.0, boundary_ghost_provider=DefaultGhostProvider())
     assert np.all(np.isfinite(residual_with_overint))
     tet_res_with = np.max(np.abs(residual_with_overint[n_prisms:]))
 
@@ -89,4 +90,4 @@ def test_native_overintegration_runs_end_to_end_without_blowing_up(order):
     mesh_no_overint = copy.copy(mesh)
     mesh_no_overint.jacobians_fine = None
     with pytest.raises(RuntimeError, match="jacobians_fine"):
-        compute_inviscid_residual_fr(U, mesh_no_overint, mesh.operators, mach_ref=U_WALL / 340.0)
+        compute_inviscid_residual_fr(U, mesh_no_overint, mesh.operators, mach_ref=U_WALL / 340.0, boundary_ghost_provider=DefaultGhostProvider())

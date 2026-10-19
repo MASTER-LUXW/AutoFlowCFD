@@ -64,20 +64,16 @@ def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_directio
                               reynolds_stress=reynolds_stress)
 
 
-def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]]) -> Optional[BoundaryGhostStateProvider]:
+def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]]) -> BoundaryGhostStateProvider:
     """构建边界幽灵态提供者 (BD-01)。
 
-    Returns:
-        BoundaryGhostStateProvider，若网格没有面连接关系（尚未
-        load_from_volume_mesh(build_faces=True)）则返回 None
+    Raises:
+        ValueError: 网格没有面连接关系（尚未 `load_from_volume_mesh(build_faces=True)`），或边界面 / 边界组的
+            条件不全（见下）。2026-10-19 以前没有面连接关系时只打警告、返回 None，残差核心函数再把 None 静默换成
+            零梯度外插——边界条件对残差不可见（I-5）。
     """
     if solver.mesh.face_connectivity is None:
-        logger.warning(
-            "Mesh has no face_connectivity - boundary conditions will NOT be enforced "
-            "in the residual. This is only acceptable for isolated unit testing, never "
-            "for a real solve."
-        )
-        return None
+        raise ValueError("网格没有面连接关系（load_from_volume_mesh(build_faces=True)），无法施加边界条件")
 
     rho_inf, vel_inf, p_inf = solver.freestream["rho_inf"], solver.freestream["vel_inf"], solver.freestream["p_inf"]
     # 来流方向由攻角/侧滑角决定（此前这里把它硬编码成 +x，见

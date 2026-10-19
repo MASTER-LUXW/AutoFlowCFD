@@ -46,6 +46,7 @@ residual_gpu()` 调用，走到修复的确切代码路径），与 CPU 参考�
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
@@ -87,8 +88,8 @@ def _cross_check(U, mesh, mach_ref=0.2):
     from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
     from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
 
-    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=mach_ref)
-    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=mach_ref)
+    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
+    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
     gpu_residual_np = np.asarray(gpu_residual)
     return cpu_residual, gpu_residual_np
 

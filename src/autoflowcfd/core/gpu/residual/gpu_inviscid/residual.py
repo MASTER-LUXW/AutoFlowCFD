@@ -29,7 +29,7 @@ def compute_inviscid_residual_fr_gpu(
     U,
     mesh,
     ops,
-    boundary_ghost_provider=None,
+    boundary_ghost_provider,
     mesh_data=None,
     ops_data=None,
     flat_face_gpu=None,
@@ -177,8 +177,7 @@ def _compute_boundary_ghost_states_gpu(
     Args:
         Q_gpu: (n_cells, n_sps, 5) 当前原变量（GPU）
         flat_face: CPU 侧 FlatFaceGeometry（get_flat_face_geometry 返回）
-        ghost_provider: 边界幽灵态提供者，None 时退化为
-            DefaultGhostProvider（镜像 CPU 路径的默认行为）
+        ghost_provider: 边界幽灵态提供者（必须显式给出，`require_ghost_provider`）
         device_id: GPU 设备 ID
 
     Returns:
@@ -187,10 +186,10 @@ def _compute_boundary_ghost_states_gpu(
             `compute_boundary_ghost_states` 返回形状一致
     """
     cp = get_cupy()
-    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 
-    provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
+    provider = require_ghost_provider(ghost_provider, "compute_inviscid_residual_fr_gpu")
     Q_cpu = cp.asnumpy(Q_gpu)
     Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, provider)
     with cp.cuda.Device(device_id):

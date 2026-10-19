@@ -39,8 +39,9 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
     mirror_normal_component, mirror_velocity_gradient,
 )
 from autoflowcfd.core.fr_residual.inviscid import (
-    DefaultGhostProvider, primitive_to_conserved,
+    primitive_to_conserved,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual import viscous_flux as vf
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.native_prism.quadrature import build_native_prism_sp_weights

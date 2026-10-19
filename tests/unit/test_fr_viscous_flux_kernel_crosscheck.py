@@ -15,8 +15,10 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_residual.inviscid import (
-    conserved_to_primitive, primitive_to_conserved, DefaultGhostProvider,
+    conserved_to_primitive,
+    primitive_to_conserved,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
@@ -112,7 +114,7 @@ def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
     U_inf = primitive_to_conserved(Q_inf)
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-    old_residual = compute_viscous_residual_fr(U, mesh, mesh.operators, MU, PR)
+    old_residual = compute_viscous_residual_fr(U, mesh, mesh.operators, MU, PR, boundary_ghost_provider=DefaultGhostProvider())
     new_residual = _compute_residual_via_new_kernel(U, mesh, mesh.operators)
 
     max_diff = np.max(np.abs(old_residual - new_residual))
@@ -143,7 +145,7 @@ def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     U = primitive_to_conserved(Q)
     mu_t_field = rng.uniform(0.0, 5e-3, size=(n_cells, n_sps))
 
-    old_residual = compute_viscous_residual_fr(U, mesh, mesh.operators, MU, PR, mu_t_field=mu_t_field)
+    old_residual = compute_viscous_residual_fr(U, mesh, mesh.operators, MU, PR, mu_t_field=mu_t_field, boundary_ghost_provider=DefaultGhostProvider())
     new_residual = _compute_residual_via_new_kernel(U, mesh, mesh.operators, mu_t_field=mu_t_field)
 
     max_diff = np.max(np.abs(old_residual - new_residual))

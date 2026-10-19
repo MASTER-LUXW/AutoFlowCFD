@@ -28,6 +28,7 @@ turbulence.py::distributed_compute_turbulence_source_and_viscosity`，
 
 import types
 import numpy as np
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -105,6 +106,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     mu_t_compact_cpu = distributed_compute_turbulence_source_and_viscosity(
         U_local, partition, fake_halo_cpu, dist_fc, mesh, ops,
         turb_cpu, mu, d_wall_compact, dt_local_local,
+        boundary_ghost_provider=DefaultGhostProvider(),
         # 产生项渐变进行中（第 10/50 步）：两侧必须按同一个计数器渐变（多 GPU
         # 2026-09-25 以前从不推进渐变，production_factor 恒为 1）
         ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
@@ -124,7 +126,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids], k_omega_extended)  # 平均流 5 变量 + k/omega
 
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
+        rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=DefaultGhostProvider(),
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
@@ -176,7 +178,7 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
 
     # ---- CPU 单机参照：原始变量速度梯度 + 滤波宽度 (V/N_p)^(1/3) ----
     Q_cpu = conserved_to_primitive(U[..., :5])
-    grad_vel_cpu = source_velocity_gradient(Q_cpu, mesh, ops, get_flat_face_geometry(mesh, ops), None)
+    grad_vel_cpu = source_velocity_gradient(Q_cpu, mesh, ops, get_flat_face_geometry(mesh, ops), DefaultGhostProvider())
     delta_cpu = les_filter_width(mesh.cell_volumes, np.arange(mesh.n_cells) < mesh.n_prism_cells, order)
     mu_t_cpu_global = Q_cpu[..., 0] * WALEModel().compute_eddy_viscosity(grad_vel_cpu, delta_cpu)
 
@@ -201,7 +203,7 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids])
 
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mesh=mesh, boundary_ghost_provider=None,
+        rank=rank, device_id=0, mesh=mesh, boundary_ghost_provider=DefaultGhostProvider(),
         partition=partition, dist_flat_face=dist_fc, flat_face_gpu=dist_fc.base_flat,
         mesh_data=mesh_data, ops_data=mesh_data,
         turb_model_gpu=None, sgs_model_gpu=WALEModel(),

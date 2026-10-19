@@ -1,84 +1,42 @@
-"""cli/utils_commands.py::benchmark 的网格构造与残差调用接线的单元测试。
+"""`utils benchmark`：网格加载、边界条件与求解器构造与 `solve steady` 同一条路径，计时求解器自己的无粘残差。
 
-这里抓到的真实缺陷（2026-08-22 修复）：`benchmark` 调用
-`HighOrderMesh(grid_data, order=order)`——但 `HighOrderMesh.__init__` 只接受
-`order`（根本没有位置数据参数），而这里的 `grid_data` 是*面网格* GridData
-（来自 `NASParser.parse()`），本来也不是 `load_from_volume_mesh` 需要的
-VolumeMeshData。每次调用都在到达真正的基准循环之前立刻以
-`TypeError: HighOrderMesh.__init__() got multiple values for argument
-'order'` 崩溃——这条命令从未成功运行过一次。它还调用
-`compute_inviscid_residual_fr(mesh, U_init)`，参数顺序/个数都不对，该函数
-真实的签名是 `(U, mesh, ops, boundary_ghost_provider=None)`。
-
-网格生成本身（边界层挤出 + tetgen）对单元测试太重，所以这里给
-`generate_volume_mesh_from_surface` 打补丁，让它返回一个很小的合成
-VolumeMeshData，并断言*构造与调用方式*正确——同样的方式已在对
-cube_demo.nas 的真实端到端 CLI 运行里另行多次验证。
+历史缺陷：
+* 2026-08-22：`HighOrderMesh(grid_data, order=order)` 与错误的残差调用签名，命令从未跑通过；
+* 2026-10-19（I-5）：输入是面网格、命令内部先生成体网格，残差调用不传边界幽灵态提供者、由核心函数静默换成零梯度
+  外插——计时的是"边界不可见"的残差。现在输入体网格（.pkl 或 .nas + 面网格），与求解同一个加载函数与求解器工厂。
 """
 
-from unittest.mock import patch, MagicMock
-from types import SimpleNamespace
+import json
+import pickle
 
-import numpy as np
-import pytest
 from click.testing import CliRunner
 
 from autoflowcfd.cli.main import cli
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from tests.unit.test_exterior_faces_by_group import _volume_mesh
 
 
-def _tiny_volume_mesh_data():
-    """`_build_synthetic_mixed_mesh` 的节点/连接数据原样（2 个四面体 + 2 个
-    棱柱，已在本测试套件别处多次验证——见 test_fr_residual_inviscid.py、
-    test_troubled_cell.py），包成 VolumeMeshData 的替身。
-    """
-    nodes = np.array(
-        [
-            [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
-            [10, 0, 0], [11, 0, 0], [10, 1, 0], [10, 0, 1], [11, 0, 1], [10, 1, 1],
-            [9, -1, 0], [9, -1, 1],
-        ],
-        dtype=float,
-    )
-    tet_conn = np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int32)
-    prism_conn = np.array(
-        [
-            [5, 6, 7, 8, 9, 10],
-            [5, 7, 11, 8, 10, 12],
-        ],
-        dtype=np.int32,
-    )
-    return SimpleNamespace(
-        cell_count=len(tet_conn) + len(prism_conn),
-        nodes=SimpleNamespace(get_coordinates=lambda: nodes),
-        cells=SimpleNamespace(connectivity=tet_conn),
-        prism_cells=SimpleNamespace(connectivity=prism_conn),
-        boundaries=None,
-    )
+def _run(tmp_path, *args):
+    vm, _, _ = _volume_mesh()                      # 3x3x3 立方体四面体网格，6 个组（z 面 WALL，其余 SYMMETRY）
+    path = tmp_path / "cube.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(vm, f)
+    return CliRunner().invoke(cli, ["utils", "benchmark", str(path), "-n", "1", "-p", "1", "--json",
+                                    "--skip-quality-check", *args]), vm
 
 
-class TestBenchmarkMeshConstruction:
-    def test_benchmark_builds_and_solves_without_crashing(self):
-        """经 CLI 命令的端到端（网格生成用替身）——必须走到残差循环并打印结果，
-        而不是在 HighOrderMesh 构造或残差调用签名上崩溃。
-        """
-        with patch(
-            "autoflowcfd.grid.nas_io.parser_core.NASParser.parse"
-        ) as mock_parse, patch(
-            "autoflowcfd.grid.nas_io.parser_core.NASParser.generate_volume_mesh_from_surface"
-        ) as mock_gen:
-            mock_parse.return_value = MagicMock()
-            mock_gen.return_value = _tiny_volume_mesh_data()
+def test_benchmark_times_the_solver_residual_with_real_boundary_conditions(tmp_path):
+    result, vm = _run(tmp_path)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout[result.stdout.index("{"):])
+    assert payload["status"] == "success" and payload["backend"] == "cpu"
+    assert payload["n_cells"] == vm.cell_count and payload["n_sps"] == 6        # P1：sps_width(1)
+    assert payload["benchmark_time_s"] >= 0.0 and "solver_setup_time_s" in payload
 
-            runner = CliRunner()
-            # order=0（P0）让残差核对单元测试来说足够便宜。
-            result = runner.invoke(
-                cli,
-                ["utils", "benchmark", __file__, "-n", "1", "-p", "1", "--json"],
-            )
 
-        assert result.exit_code == 0, result.output
-        import json
-        payload = json.loads(result.stdout)
-        assert payload["status"] == "success"
-        assert payload["n_cells"] == 4  # 2 tet + 2 prism
+def test_benchmark_refuses_a_surface_mesh(tmp_path):
+    """面网格不再在命令里现场生成体网格：与 solve steady 相同，直接报错。"""
+    surface = tmp_path / "surface.nas"
+    surface.write_text("CEND\nBEGIN BULK\nGRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,0.,1.,0.\n"
+                       "CTRIA3,1,1,1,2,3\nENDDATA\n")
+    result = CliRunner().invoke(cli, ["utils", "benchmark", str(surface), "-n", "1", "-p", "1"])
+    assert result.exit_code != 0

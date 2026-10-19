@@ -31,6 +31,7 @@ k/omega/nu_t 更新结果与 CPU 单机路径 `compute_turbulence_source`
 
 import types
 import numpy as np
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -151,7 +152,7 @@ def _build_standins(turb_model_name):
     dt_used = 1e-3  # 见 TestDdesModelDistinctFromSst 同一处 dt 放大注释
 
     stub = types.SimpleNamespace(
-        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, device_id=0, boundary_ghost_provider=None,
+        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, device_id=0, boundary_ghost_provider=DefaultGhostProvider(),
         U_gpu=U, Q_gpu=conserved_to_primitive(U[..., :5]),
         mu_molecular=mu, turb_model_gpu=turb_gpu, sgs_model_gpu=None,
         ddes_model_gpu=_make_ddes_model_gpu(turb_model_name),
@@ -213,7 +214,7 @@ def _build_standins(turb_model_name):
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self_inner._turbulence_flat_face_override = None
-            self_inner.boundary_ghost_provider = None
+            self_inner.boundary_ghost_provider = DefaultGhostProvider()
             self_inner._turb_ramp_step = 10 ** 9
             self_inner._turb_production_ramp_steps = 0
             self_inner._turb_production_ramp_complete = True

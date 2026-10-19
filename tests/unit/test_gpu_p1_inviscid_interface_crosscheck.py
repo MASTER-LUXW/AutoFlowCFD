@@ -24,8 +24,10 @@ import pytest
 cp = pytest.importorskip("cupy")
 
 from autoflowcfd.core.fr_residual.inviscid import (
-    compute_inviscid_residual_fr, primitive_to_conserved, DefaultGhostProvider,
+    compute_inviscid_residual_fr,
+    primitive_to_conserved,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh

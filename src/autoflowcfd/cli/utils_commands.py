@@ -229,6 +229,9 @@ def doctor(json_output: bool) -> None:
 
 @utils.command()
 @click.argument("grid_file", type=click.Path(exists=True))
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
+              help="grid_file 是 .nas 体网格时必填：原始面网格（反推边界分组），与 solve steady 相同")
+@click.option("--skip-quality-check", is_flag=True, help="跳过网格质量门（与 solve steady 相同）")
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]),
               default="cpu", help="要基准测试的后端")
 @click.option("--iterations", "-n", type=int, default=100,
@@ -238,164 +241,94 @@ def doctor(json_output: bool) -> None:
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def benchmark(
     grid_file: str,
+    surface_mesh: str,
+    skip_quality_check: bool,
     backend: str,
     iterations: int,
     order: int,
     json_output: bool
 ) -> None:
-    """运行性能基准测试。
-    
-    测量指定网格和后端的计算速度和内存使用情况。
-    
+    """单机无粘残差求值的计时与内存基准。
+
+    网格加载（含质量门）、边界条件与求解器构造与 `solve steady` 是同一条路径（`load_mesh_for_solver` +
+    `build_single_node_solver`），计时的是求解器自己的无粘残差（真实边界幽灵态、自由来流初场）。
+
+    2026-10-19（I-5）改动：此前输入是面网格、命令内部先生成体网格（tetgen 耗时算进"网格加载"），残差调用不传
+    边界幽灵态提供者、由核心函数静默换成零梯度外插——计时的是"边界不可见"的残差，与真实求解不是同一个计算。
+    体网格请先用 `grid generate-volume` 生成。
+
     Args:
-        grid_file: .nas 网格文件路径
+        grid_file: 体网格（.pkl，或 GRID+CTETRA/CPENTA 的 .nas 并给出 --surface-mesh）
+        surface_mesh: .nas 体网格对应的原始面网格
+        skip_quality_check: 跳过网格质量门
         backend: 要基准测试的后端 (cpu/gpu)
         iterations: 迭代次数
         order: FR 阶数
         json_output: 以 JSON 格式输出
-    
+
     Examples:
-        # CPU 基准测试
-        $ autoflowcfd utils benchmark sedan.nas --backend cpu
-        
-        # GPU 基准测试
-        $ autoflowcfd utils benchmark sedan.nas --backend gpu -n 200
+        $ autoflowcfd utils benchmark volume_mesh.pkl --backend cpu
+        $ autoflowcfd utils benchmark volume.nas -s sedan.nas --backend gpu -n 200
     """
+    import time as _time
+
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+    from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
+
     logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
+    t_start = _time.perf_counter()
+    mesh, volume_data = load_mesh_for_solver(grid_file, order, surface_mesh=surface_mesh,
+                                             skip_quality_check=skip_quality_check)
+    t_load = _time.perf_counter() - t_start
+    # GPU 不可用时 build_single_node_solver 显式报错（不退化成 CPU 却仍打着 GPU 的标签）
+    solver = build_single_node_solver(backend, mesh, volume_data, order=order, turb_model_name="NONE")
+    t_setup = _time.perf_counter() - t_start - t_load
+    residual = solver.compute_inviscid_residual_gpu if backend == "gpu" else solver.compute_inviscid_residual
+
+    # 预热（numba JIT / 首次 GPU kernel 编译）；第一次求值失败说明基准本身跑不通，照常抛出
+    residual()
+    t_bench_start = _time.perf_counter()
+    for _ in range(iterations):
+        residual()
+    t_bench = _time.perf_counter() - t_bench_start
 
     try:
-        import time as _time
-        import numpy as np
+        import psutil
+        mem_mb = psutil.Process().memory_info().rss / 1024 / 1024
+    except ImportError:
+        mem_mb = -1.0
+    rate_per_min = iterations / (t_bench / 60.0) if t_bench > 0 else 0.0
 
-        # 加载网格：真实 bug（已修复，2026-08-21）——此前这里直接
-        # `HighOrderMesh(grid_data, order=order)`，grid_data 是
-        # NASParser.parse() 返回的*面*网格 GridData（三角面片），既不是
-        # HighOrderMesh.__init__ 接受的参数（它只有 order 一个参数，
-        # grid_data 位置传参会顶替掉 order，"got multiple values for
-        # argument 'order'" 就是这么来的——真实复现），也不是
-        # load_from_volume_mesh 需要的 VolumeMeshData（体网格，四面体/
-        # 棱柱），这条命令此前对任何输入都会立即报错崩溃，从未真正跑通
-        # 过一次基准测试。改成与 `grid generate-volume` 完全相同的管线
-        # （parser.generate_volume_mesh_from_surface，见
-        # cli/grid/volume_commands.py::generate_volume 文档）先从面网格
-        # 生成体网格，再用 HighOrderMesh(order=order).load_from_volume_mesh
-        # 加载——这是本项目里唯一真正构造出可用 HighOrderMesh 的路径。
-        t_start = _time.perf_counter()
-        from autoflowcfd.grid.nas_io.parser import NASParser
-        parser = NASParser(grid_file)
-        surface_grid = parser.parse()
-        volume_mesh = parser.generate_volume_mesh_from_surface(
-            surface_grid,
-            volume_mesh_params={
-                'growth_rate': 1.2,
-                'min_cell_size': 0.001,
-                'max_cell_size': None,
-                'bl_layers': None,
-                'bl_only': False,
-                'core_only': False,
-                'output': None,
-            },
-        )
-        t_load = _time.perf_counter() - t_start
-
-        # 构建高阶网格
-        from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        mesh = HighOrderMesh(order=order)
-        mesh.load_from_volume_mesh(volume_mesh)
-        t_mesh = _time.perf_counter() - t_start - t_load
-
-        # 初始化自由来流解向量
-        from autoflowcfd.fr.operators import generate_fr_operators
-        ops = generate_fr_operators(order)
-        n_cells = mesh.n_cells
-        n_sps = mesh.n_sps_per_cell
-        n_vars = 5
-        rho_inf, u_inf, p_inf = 1.225, 30.0, 101325.0
-        E_inf = p_inf / 0.4 + 0.5 * rho_inf * u_inf**2
-        U_init = np.zeros((n_cells, n_sps, n_vars))
-        U_init[:, :, 0] = rho_inf
-        U_init[:, :, 1] = rho_inf * u_inf
-        U_init[:, :, 4] = E_inf
-        mach_ref = u_inf / np.sqrt(1.4 * p_inf / rho_inf)
-
-        # 按 --backend 真正分派到对应实现——此前这里无论 backend 传什么
-        # 都恒定调用 CPU 专用的 compute_inviscid_residual_fr，`--backend
-        # gpu` 被静默忽略，结果 JSON/终端却仍打印 "backend": "gpu"，误导
-        # 性能对比决策（第四次评审发现3）。GPU 不可用时应与
-        # solve_steady_command.py 一致地显式 click.Abort()，不能悄悄
-        # 退化成 CPU 结果却还打着 GPU 的标签。
-        if backend == 'gpu':
-            from autoflowcfd.core.gpu import gpu_available
-            if not gpu_available:
-                raise click.ClickException(
-                    "CuPy not available - cannot run --backend gpu benchmark. "
-                    "Install with: pip install cupy-cuda12x"
-                )
-            from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
-
-            def _run_residual():
-                return compute_inviscid_residual_fr_gpu(U_init, mesh, ops, mach_ref=mach_ref)
-        else:
-            from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
-
-            def _run_residual():
-                return compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
-
-        # 预热（触发 Numba JIT 编译 / 首次 GPU kernel 编译）——第一次真实
-        # 求值失败说明基准测试本身就跑不通，不能吞掉继续假装成功，让它
-        # 正常抛出。
-        _ = _run_residual()
-
-        # 正式基准测试
-        t_bench_start = _time.perf_counter()
-        for _ in range(iterations):
-            _ = _run_residual()
-        t_bench = _time.perf_counter() - t_bench_start
-
-        # 内存使用
-        try:
-            import psutil
-            mem_mb = psutil.Process().memory_info().rss / 1024 / 1024
-        except ImportError:
-            mem_mb = -1.0
-
-        rate_per_min = iterations / (t_bench / 60.0) if t_bench > 0 else 0.0
-
-        result = {
-            "command": "utils.benchmark",
-            "status": "success",
-            "grid_file": grid_file,
-            "backend": backend,
-            "order": order,
-            "iterations": iterations,
-            "n_cells": int(n_cells),
-            "n_sps": int(n_sps),
-            "grid_load_time_s": round(t_load, 3),
-            "mesh_build_time_s": round(t_mesh, 3),
-            "benchmark_time_s": round(t_bench, 3),
-            "rate_iter_per_min": round(rate_per_min, 1),
-            "memory_mb": round(mem_mb, 1),
-        }
-
-        if json_output:
-            click.echo(json.dumps(result, indent=2))
-        else:
-            click.echo("\n性能基准测试结果")
-            click.echo(f"{'='*60}")
-            click.echo(f"网格文件:    {grid_file}")
-            click.echo(f"后端:        {backend.upper()}")
-            click.echo(f"多项式阶数:  P{order}")
-            click.echo(f"单元数:      {n_cells}")
-            click.echo(f"每单元SPs:   {n_sps}")
-            click.echo(f"迭代次数:    {iterations}")
-            click.echo(f"网格加载:    {t_load:.3f} s")
-            click.echo(f"网格构建:    {t_mesh:.3f} s")
-            click.echo(f"基准测试:    {t_bench:.3f} s")
-            click.echo(f"计算速率:    {rate_per_min:.1f} iter/min")
-            if mem_mb > 0:
-                click.echo(f"内存占用:    {mem_mb:.1f} MB")
-            click.echo(f"{'='*60}")
-    
-    except Exception as e:
-        logger.error(f"基准测试失败: {e}")
-        raise click.ClickException(f"基准测试失败: {e}")
+    result = {
+        "command": "utils.benchmark",
+        "status": "success",
+        "grid_file": grid_file,
+        "backend": backend,
+        "order": order,
+        "iterations": iterations,
+        "n_cells": int(mesh.n_cells),
+        "n_sps": int(mesh.n_sps_per_cell),
+        "grid_load_time_s": round(t_load, 3),
+        "solver_setup_time_s": round(t_setup, 3),
+        "benchmark_time_s": round(t_bench, 3),
+        "rate_iter_per_min": round(rate_per_min, 1),
+        "memory_mb": round(mem_mb, 1),
+    }
+    if json_output:
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo("\n性能基准测试结果")
+    click.echo(f"{'='*60}")
+    click.echo(f"网格文件:    {grid_file}")
+    click.echo(f"后端:        {backend.upper()}")
+    click.echo(f"多项式阶数:  P{order}")
+    click.echo(f"单元数:      {mesh.n_cells}")
+    click.echo(f"每单元SPs:   {mesh.n_sps_per_cell}")
+    click.echo(f"迭代次数:    {iterations}")
+    click.echo(f"网格加载:    {t_load:.3f} s")
+    click.echo(f"求解器构造:  {t_setup:.3f} s")
+    click.echo(f"基准测试:    {t_bench:.3f} s")
+    click.echo(f"计算速率:    {rate_per_min:.1f} iter/min")
+    if mem_mb > 0:
+        click.echo(f"内存占用:    {mem_mb:.1f} MB")
+    click.echo(f"{'='*60}")

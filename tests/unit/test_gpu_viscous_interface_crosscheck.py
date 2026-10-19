@@ -20,8 +20,10 @@ import pytest
 cp = pytest.importorskip("cupy")
 
 from autoflowcfd.core.fr_residual.inviscid import (
-    conserved_to_primitive, primitive_to_conserved, DefaultGhostProvider,
+    conserved_to_primitive,
+    primitive_to_conserved,
 )
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 

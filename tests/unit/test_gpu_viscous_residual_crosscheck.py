@@ -71,6 +71,7 @@ import pytest
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +109,7 @@ def _make_mesh(order):
     return _build_synthetic_mixed_mesh(order)
 
 
-def _cross_check(U, mesh, ops, mu_t_field=None, provider=None):
+def _cross_check(U, mesh, ops, mu_t_field=None, provider=DefaultGhostProvider()):
     from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
     from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
     from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu

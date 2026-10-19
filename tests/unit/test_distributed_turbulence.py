@@ -17,6 +17,7 @@ DDES/IDDES 扩展沿用完全相同的判据，唯一的额外复杂度是 IDDES
 """
 
 import numpy as np
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
 from autoflowcfd.core.mpi.partition import build_distributed_partition
@@ -100,7 +101,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self._turbulence_flat_face_override = None
-            self.boundary_ghost_provider = None
+            self.boundary_ghost_provider = DefaultGhostProvider()
             # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变
             self._turb_ramp_step, self._turb_production_ramp_steps = 0, 0
             self._turb_production_ramp_complete = False
@@ -157,6 +158,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
         U_local, partition, fake_halo, dist_fc, mesh, ops,
         turb_local, mu, d_wall_compact, dt_local_local,
         turb_model_name=turb_model_name, ddes_model=ddes_model_distributed,
+        boundary_ghost_provider=DefaultGhostProvider(),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
     )
 
@@ -202,7 +204,7 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
     from autoflowcfd.core.turbulence.sgs import les_filter_width
 
     Q_ref = conserved_to_primitive(U[..., :5])
-    grad_vel_ref = source_velocity_gradient(Q_ref, mesh, ops, get_flat_face_geometry(mesh, ops), None)
+    grad_vel_ref = source_velocity_gradient(Q_ref, mesh, ops, get_flat_face_geometry(mesh, ops), DefaultGhostProvider())
     delta_ref = les_filter_width(mesh.get_all_cell_volumes(), np.arange(mesh.n_cells) < mesh.n_prism_cells, order)
     nu_t_ref = WALEModel().compute_eddy_viscosity(grad_vel_ref, delta_ref)
     mu_t_ref = Q_ref[..., 0] * nu_t_ref
@@ -222,7 +224,7 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
 
     sgs_model = WALEModel()
     mu_t_compact = distributed_compute_les_viscosity(
-        U_local, partition, fake_halo, dist_fc, mesh, ops, sgs_model, None,
+        U_local, partition, fake_halo, dist_fc, mesh, ops, sgs_model, DefaultGhostProvider(),
     )
 
     mu_t_native = mu_t_compact[dist_fc.inv_perm]
@@ -276,7 +278,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self_inner._turbulence_flat_face_override = None
-            self_inner.boundary_ghost_provider = None
+            self_inner.boundary_ghost_provider = DefaultGhostProvider()
             # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变
             self_inner._turb_ramp_step, self_inner._turb_production_ramp_steps = 0, 0
             self_inner._turb_production_ramp_complete = False
@@ -347,6 +349,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 U_local, partition, fake_halo, dist_fc, mesh, ops,
                 turb, mu, d_wall_compact, dt_local_local,
                 turb_model_name=turb_model_name, ddes_model=ddes_model,
+                boundary_ghost_provider=DefaultGhostProvider(),
                 iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
             )
             results[r] = turb
@@ -418,7 +421,7 @@ class TestDdesModelDistinctFromSst:
                         U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
                     )
                     self_inner._turbulence_flat_face_override = None
-                    self_inner.boundary_ghost_provider = None
+                    self_inner.boundary_ghost_provider = DefaultGhostProvider()
                     # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变
                     self_inner._turb_ramp_step, self_inner._turb_production_ramp_steps = 0, 0
                     self_inner._turb_production_ramp_complete = False

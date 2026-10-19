@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 
 from autoflowcfd.core.fr_residual.inviscid import (
@@ -270,7 +271,7 @@ class TestFreeStreamPreservation:
         U_inf = primitive_to_conserved(Q_inf)
         U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators)
+        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, boundary_ghost_provider=DefaultGhostProvider())
         rel_res = np.max(np.abs(residual)) / p_inf
 
         assert rel_res < rel_tol, f"Free-stream preservation failed at P={order}: rel={rel_res:.3e}"
@@ -305,7 +306,7 @@ class TestFreeStreamPreservation:
 
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-        residual = compute_inviscid_residual_fv_p0(U, mesh, get_flat_face_geometry(mesh, mesh.operators))
+        residual = compute_inviscid_residual_fv_p0(U, mesh, get_flat_face_geometry(mesh, mesh.operators), boundary_ghost_provider=DefaultGhostProvider())
         rel_res = np.max(np.abs(residual)) / p_inf
 
         assert rel_res < 1e-10, f"P0 free-stream preservation failed: rel={rel_res:.3e}"
@@ -319,7 +320,7 @@ class TestFreeStreamPreservation:
         U_inf = primitive_to_conserved(Q_inf)
         U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators)
+        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, boundary_ghost_provider=DefaultGhostProvider())
         assert np.all(np.isfinite(residual))
 
 
@@ -350,7 +351,7 @@ class TestVolumeTermDealiasing:
             )
             U[c] = np.stack([primitive_to_conserved(Q[i]) for i in range(len(Q))])
 
-        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators)
+        residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, boundary_ghost_provider=DefaultGhostProvider())
         max_mass_res = np.max(np.abs(residual[..., 0]))
 
         assert max_mass_res < abs_tol, (

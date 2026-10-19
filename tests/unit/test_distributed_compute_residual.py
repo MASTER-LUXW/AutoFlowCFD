@@ -48,6 +48,7 @@ import copy
 import numpy as np
 import pytest
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
 from autoflowcfd.core.mpi.distributed_compute import (
@@ -151,7 +152,7 @@ class TestDistributedResidualMatchesSingleMachine:
         U = _uniform_freestream_U(mesh)
         mach_ref = 0.2
 
-        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref)
+        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -169,6 +170,7 @@ class TestDistributedResidualMatchesSingleMachine:
         U_local = U[partition.local_cells]
         residual_local = distributed_compute_inviscid_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mach_ref=mach_ref,
+            boundary_ghost_provider=DefaultGhostProvider(),
         )
 
         expected_local = residual_single[partition.local_cells]
@@ -183,7 +185,7 @@ class TestDistributedResidualMatchesSingleMachine:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL)
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -201,6 +203,7 @@ class TestDistributedResidualMatchesSingleMachine:
         U_local = U[partition.local_cells]
         residual_local = distributed_compute_viscous_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
+            boundary_ghost_provider=DefaultGhostProvider(),
         )
 
         expected_local = residual_single[partition.local_cells]
@@ -282,7 +285,7 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U = _uniform_freestream_U(mesh)
         mach_ref = 0.2
 
-        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref)
+        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -300,6 +303,7 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U_local = U[partition.local_cells]
         residual_local = distributed_compute_inviscid_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mach_ref=mach_ref,
+            boundary_ghost_provider=DefaultGhostProvider(),
         )
 
         expected_local = residual_single[partition.local_cells]
@@ -312,7 +316,7 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL)
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -330,6 +334,7 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U_local = U[partition.local_cells]
         residual_local = distributed_compute_viscous_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
+            boundary_ghost_provider=DefaultGhostProvider(),
         )
 
         expected_local = residual_single[partition.local_cells]
