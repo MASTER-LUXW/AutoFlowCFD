@@ -26,7 +26,7 @@
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX
+from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX, report_viscosity_cap
 from autoflowcfd.core.turbulence.transported import TransportedTurbulence
 from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
@@ -87,6 +87,8 @@ class SAModel(TransportedTurbulence):
         self._last_damping = None
         self.production_factor = 1.0
         self.wall_points = None
+        self.viscosity_cap_activations = 0      # 涡粘比上限激活的累计解点数（limits.py::report_viscosity_cap）
+        self._viscosity_cap_reported = 0
 
     # ---- TransportedTurbulence ----
     def _unknown_from_field(self, j, field, xp):
@@ -160,5 +162,6 @@ class SAModel(TransportedTurbulence):
         xp = self.xp
         nt = self.nu_tilde_field
         nt = xp.where(xp.isfinite(nt), nt, self.nu_tilde_inf)
+        report_viscosity_cap(self, int(xp.count_nonzero(nt > self.nu_tilde_max)), "SA nu_tilde")
         self.nu_tilde_field = xp.minimum(nt, self.nu_tilde_max)
         self._pin_wall_points()

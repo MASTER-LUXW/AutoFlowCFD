@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX
+from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX, report_viscosity_cap
 from autoflowcfd.core.utils.array_module import array_module
 from .kernels import compute_strain_and_vorticity_magnitude
 
@@ -95,5 +95,6 @@ class _SSTBlendingMixin:
 
         # mu_t/mu = nu_t/nu：逐解点按当地密度换算（密度变化大时不引入新的不一致）
         nu_t_max = self.TURBULENT_VISCOSITY_RATIO_MAX * mu / xp.maximum(rho, 1e-10)
+        report_viscosity_cap(self, int(xp.count_nonzero(nu_t > nu_t_max)), "SST nu_t")
         nu_t = xp.minimum(nu_t, nu_t_max)
         return xp.where(xp.isfinite(nu_t), nu_t, 0.0)

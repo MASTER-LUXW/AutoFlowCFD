@@ -80,6 +80,9 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
 
         # 更新时出现非有限增量的累计解点数（`update.py::advance_k_log_omega` 计数告警）
         self.nonfinite_increment_count: int = 0
+        # 涡粘比上限激活的累计解点数（`limits.py::report_viscosity_cap`）
+        self.viscosity_cap_activations: int = 0
+        self._viscosity_cap_reported: int = 0
 
         # SST 模型常数
         self.sigma_k1 = 0.85
