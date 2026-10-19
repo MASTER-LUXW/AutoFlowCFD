@@ -13,7 +13,7 @@ AutoFlowCFD V2.0 - MPI 通信封装
 
 import numpy as np
 
-from autoflowcfd.core.mpi import get_comm, get_mpi, mpi_available
+from autoflowcfd.core.mpi import get_comm, get_mpi, get_rank, mpi_available
 
 
 def allreduce_sum(local_value):
@@ -134,3 +134,24 @@ def bcast_from_root(obj):
     if comm.Get_size() == 1:
         return obj
     return comm.bcast(obj, root=0)
+
+def run_on_root(fn):
+    """在 root 上执行 `fn()`，执行结果（成功 / 失败）广播给全部 rank——集体操作，全部 rank 都必须调用。
+
+    root 返回 `fn()` 的结果，其余 rank 返回 None；`fn` 在 root 上抛异常时 root 重新抛出原异常、其余 rank 抛
+    RuntimeError（各 rank 一致失败）。用于 root 单独写盘这类操作（checkpoint、最终结果）：2026-10-19（I-102）
+    以前 root 在 gather 之后、barrier 之前抛异常（写盘失败、磁盘满）时其余 rank 永远卡在 barrier。
+    """
+    error = None
+    result = None
+    if get_rank() == 0:
+        try:
+            result = fn()
+        except BaseException as exc:          # noqa: B902 —— 任何失败都必须先告知其余 rank 再抛出
+            error = exc
+    message = bcast_from_root(None if error is None else f"{type(error).__name__}: {error}")
+    if error is not None:
+        raise error
+    if message is not None:
+        raise RuntimeError(f"root rank 执行失败：{message}")
+    return result

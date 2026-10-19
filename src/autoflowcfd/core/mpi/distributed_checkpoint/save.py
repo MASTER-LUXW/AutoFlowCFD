@@ -12,9 +12,9 @@ from typing import Optional
 
 
 
-from autoflowcfd.core.mpi import get_rank, get_size
+from autoflowcfd.core.mpi import get_size
 
-from autoflowcfd.core.mpi.comm import barrier
+from autoflowcfd.core.mpi.comm import run_on_root
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata, solve_path_metadata
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_metadata
@@ -64,10 +64,6 @@ def distributed_save_checkpoint(
     Returns:
         checkpoint 文件路径（仅 root rank 有值）
     """
-    from autoflowcfd.core.fr_solver.convergence_history import checkpoint_history
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager
-
-    rank = get_rank()
     n_ranks = get_size()
 
     # 1. 收集全局状态
@@ -91,11 +87,19 @@ def distributed_save_checkpoint(
     turb_prev_global = (None if turb_prev_local is None
                         else gather_global_state(turb_prev_local, local_cells, n_global))
 
-    if rank != 0:
-        barrier()
-        return None
+    # 2. Root rank 保存 checkpoint（成功 / 失败广播给全部 rank，`comm.py::run_on_root`）
+    return run_on_root(lambda: _write_checkpoint_on_root(
+        solver, output_dir, iteration, input_file, turbulence_model, order, target_order, backend, n_global,
+        n_ranks, surface_mesh, U_global, avg_global, turb_fields, prev_global, turb_prev_global))
 
-    # 2. Root rank 保存 checkpoint
+
+def _write_checkpoint_on_root(solver, output_dir, iteration, input_file, turbulence_model, order, target_order,
+                              backend, n_global, n_ranks, surface_mesh, U_global, avg_global, turb_fields,
+                              prev_global, turb_prev_global):
+    """`distributed_save_checkpoint` 在 root 上的写出部分，返回 checkpoint 路径。"""
+    from autoflowcfd.core.fr_solver.convergence_history import checkpoint_history
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+
     manager = CheckpointManager(output_dir=output_dir)
 
     solution_cell_avg = avg_global[:, 0, :]
@@ -137,8 +141,6 @@ def distributed_save_checkpoint(
         metadata=metadata,
         extra_fields=extra_fields,
     )
-
-    barrier()
     return path
 
 
@@ -155,7 +157,6 @@ def distributed_save_results(
         solver: DistributedFRSolver 实例
         output_dir: 输出目录
     """
-    rank = get_rank()
     n_ranks = get_size()
 
     # 1. 收集全局状态
@@ -164,12 +165,12 @@ def distributed_save_results(
     local_cells = solver.partition.local_cells
 
     U_global = gather_global_state(U_local, local_cells, n_global)
+    # 2. Root rank 保存结果（成功 / 失败广播给全部 rank）
+    run_on_root(lambda: _write_results_on_root(solver, output_dir, U_global, n_global, n_ranks))
 
-    if rank != 0:
-        barrier()
-        return
 
-    # 2. Root rank 保存结果
+def _write_results_on_root(solver, output_dir: str, U_global, n_global: int, n_ranks: int) -> None:
+    """`distributed_save_results` 在 root 上的写出部分。"""
     os.makedirs(output_dir, exist_ok=True)
 
     # 计算原变量
@@ -190,5 +191,3 @@ def distributed_save_results(
 
     print(f"✅ Distributed results saved to: {output_dir}")
     print(f"   - Final state: {state_path} ({n_global} global cells)")
-
-    barrier()
