@@ -16,6 +16,8 @@ DDES/IDDES 扩展沿用完全相同的判据，唯一的额外复杂度是 IDDES
 切片（纯逐单元局部量，见该函数文档，不需要新的跨 rank 几何交换）。
 """
 
+import types
+
 import numpy as np
 from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
@@ -163,6 +165,8 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
         turb_model_name=turb_model_name, ddes_model=ddes_model_distributed,
         boundary_ghost_provider=DefaultGhostProvider(),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
+        # 不渐变（渐变步数 0）：与单机参照同一个计数器状态
+        ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False),
     )
 
     # 决定性判据：分布式算出的 local cells k/omega/nu_t 更新结果，必须
@@ -356,6 +360,8 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 turb_model_name=turb_model_name, ddes_model=ddes_model,
                 boundary_ghost_provider=DefaultGhostProvider(),
                 iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
+                # 不渐变（渐变步数 0）：与单机参照同一个计数器状态
+                ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False),
             )
             results[r] = turb
 

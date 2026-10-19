@@ -115,10 +115,9 @@ class DistributedTurbulenceSolverAdapter:
     """
 
     def __init__(
-        self, mesh_adapter, ops, turb_model, wall_distance, mu_molecular, flat_face_override,
-        ramp_owner=None,
-        turb_model_name="SST", ddes_model=None, iddes_h_max=None, iddes_h_wn=None,
-        boundary_ghost_provider=None, halo_refresh=None,
+        self, mesh_adapter, ops, turb_model, wall_distance, mu_molecular, flat_face_override, *,
+        ramp_owner, turb_model_name, boundary_ghost_provider, halo_refresh,
+        ddes_model=None, iddes_h_max=None, iddes_h_wn=None,
     ):
         """`halo_refresh`（`mpi/compact_halo.py::CompactHaloRefresh`）：依赖面邻居的量
         （P0 湍流源项的提升修正速度梯度）在 halo 行上不完整，算完后经它取所属 rank 的值。
@@ -131,6 +130,9 @@ class DistributedTurbulenceSolverAdapter:
         ghost + 显式壁面松弛）、以及来流条件——在 CPU 分布式路径上全部按
         "没有边界分组"退化成零梯度，静默地与单机不一致。单机与分布式的对照
         测试此前只覆盖层流，所以一直没有暴露。
+
+        `ramp_owner`、`turb_model_name`、`boundary_ghost_provider` 是必需参数（2026-10-19，I-101）：此前默认值
+        （None -> 渐变步数为 0 的假计数器、"SST"、None）让上面那类缺陷可以再次无声出现。
         """
         self.mesh = mesh_adapter
         self.boundary_ghost_provider = boundary_ghost_provider
@@ -144,9 +146,8 @@ class DistributedTurbulenceSolverAdapter:
         self.wall_distance = wall_distance
         self.mu_molecular = mu_molecular
         self._turbulence_flat_face_override = flat_face_override
-        # 产生项渐变计数器转发到真实求解器（`ramp_owner`，见下面三个属性）；None 时不渐变
-        self._ramp_owner = ramp_owner if ramp_owner is not None else SimpleNamespace(
-            _turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False)
+        # 产生项渐变计数器转发到真实求解器（`ramp_owner`，见下面三个属性）
+        self._ramp_owner = ramp_owner
 
     # 产生项渐变计数器（`fr_solver/turbulence/init.py::advance_production_ramp` 读写）转发到真实求解器。
     # 2026-10-05 以前适配器持有计数器的副本：计数靠返回值写回，完成标记却留在每步重建的适配器上，
@@ -166,10 +167,6 @@ class DistributedTurbulenceSolverAdapter:
         n_cells, n_sps = U_compact.shape[:2]
         Q = conserved_to_primitive(U_compact[..., :5])
         self.state = SimpleNamespace(U=U_compact, Q=Q, n_cells=n_cells, n_sps=n_sps)
-
-    def _compute_gradients(self):
-        from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-        return compute_physical_gradient(self.state.U[..., :5], self.mesh, self.ops)
 
     def _get_cell_volumes(self):
         return self.mesh.cell_volumes
@@ -235,12 +232,13 @@ def distributed_compute_turbulence_source_and_viscosity(
     mu: float,
     wall_distance_compact: np.ndarray,
     dt_local: np.ndarray,
-    ramp_owner=None,
-    turb_model_name: str = "SST",
+    *,
+    ramp_owner,
+    turb_model_name: str,
+    boundary_ghost_provider,
     ddes_model=None,
     iddes_h_max_compact: Optional[np.ndarray] = None,
     iddes_h_wn_compact: Optional[np.ndarray] = None,
-    boundary_ghost_provider=None,
 ) -> np.ndarray:
     """分布式 SST/DDES/IDDES 源项+输运计算，就地更新 `turb_model`
     （local cells），返回 compact 索引空间的 `mu_t_field`（供平均流
@@ -253,20 +251,12 @@ def distributed_compute_turbulence_source_and_viscosity(
             P0 速度梯度按各自的逐单元形状经它交换）
         turb_model: 本 rank 的 SSTModelFR 实例（n_local 大小），本函数
             会就地更新它的 k_field/omega_field/nu_t
-        dt_local: (n_local, n_sps) 湍流场显式更新用的局部时间步长（与
-            平均流共用同一套 cfl.py 逻辑算出的值，调用方负责提供——
-            单机路径的对应设计见 step.py 模块文档"关键修复"一节，分布式
-            路径目前用全局固定 dt 广播成 (n_local,n_sps)，与
-            DistributedFRSolver.step() 现有的"分布式路径目前用全局固定
-            步长"简化一致，不是本次新引入的简化）
-        turb_model_name: "SST"/"DDES"/"IDDES"（2026-09-02 新增）——三者
-            在 `compute_turbulence_source` 内部走的是完全相同的 k/omega
-            梯度/输运代码路径，只有 DES 长度尺度替换那一段单独按
-            `ddes_model is not None` 触发，这个参数本身对计算结果没有
-            直接影响，只是如实传给 adapter（保持鸭子类型属性语义正确，
-            不是死参数）。
+        dt_local: (n_local, n_sps) 湍流场显式更新用的局部时间步长（与平均流同一套按物理波速的逐解点局部步长，
+            调用方提供，与单机同一规则）
+        turb_model_name: 湍流模型名（SA / SST / DDES / IDDES），求值件按它分派
         ramp_owner: 持有产生项渐变计数器的真实求解器（`init_production_ramp` 设置的三个属性），
-            本步在它上面推进一次；None 时不渐变（单元测试）。
+            本步在它上面推进一次
+        boundary_ghost_provider: compact 面空间的幽灵态提供者（湍流量的壁面与来流条件按它的边界分组取）
         ddes_model: `DDESModel`/`IDDESModel` 实例（None 时退化为纯 SST，
             与此前行为一致）——调用方（`DistributedFRSolver`）持有的
             真实对象，本函数只是每步复用它，不重新构造。
