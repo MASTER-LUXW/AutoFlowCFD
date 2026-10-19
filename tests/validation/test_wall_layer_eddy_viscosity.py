@@ -13,6 +13,7 @@ from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_dista
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.utils.wall_distance import WallDistanceSource, triangles_from_faces
 from tests.validation._channel_mesh import build_channel_mesh_prism
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 U_INF = 30.0
 NX, NY, NZ = 20, 20, 2
@@ -25,7 +26,7 @@ def test_velocity_in_the_wall_layer_stays_at_the_freestream_level():
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "SYMMETRY", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
     solver = FRSolver(mesh=mesh, order=1, turb_model_name="SA", time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV,
-                      vel_inf=U_INF, viscosity_ratio=50.0)
+                      vel_inf=U_INF, viscosity_ratio=50.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     solver.order_continuation_enabled = False
     corners = np.array([[0, 0, 0], [lx, 0, 0], [lx, 0, lz], [0, 0, lz]], dtype=float)
     apply_wall_distance_source(solver, WallDistanceSource(triangles_from_faces(corners, np.array([[0, 1, 2], [0, 2, 3]]))))

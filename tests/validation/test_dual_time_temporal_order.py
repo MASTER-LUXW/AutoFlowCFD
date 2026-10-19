@@ -18,6 +18,7 @@ from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from tests.validation import test_isentropic_vortex as V
 from tests.validation._isentropic_vortex import build_vortex_farfield_ghost_provider, build_vortex_mesh
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 T_END = 1.0e-4
 
@@ -25,7 +26,7 @@ T_END = 1.0e-4
 def _advance(dt):
     mesh = build_vortex_mesh(V.ORDER, V.NX, V.NY, V.NZ, V.LX, V.H, V.LZ)
     solver = FRSolver(mesh=mesh, order=V.ORDER, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.DUAL_TIME,
-                      rho_inf=V.RHO_INF, vel_inf=V.U_INF, p_inf=V.P_INF, dual_time_inner_iter=30)
+                      rho_inf=V.RHO_INF, vel_inf=V.U_INF, p_inf=V.P_INF, dual_time_inner_iter=30, mu_molecular=MU_MOLECULAR)
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_vortex_farfield_ghost_provider(
         mesh, V.LX, V.H, V.LZ, V.RHO_INF, V.P_INF, V.U_INF)

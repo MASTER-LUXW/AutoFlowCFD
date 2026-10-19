@@ -33,6 +33,7 @@ from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 from ._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_provider, wrap_inlet_with_profile
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 
 def _build_couette_solver(order: int = 2):
@@ -62,7 +63,7 @@ def _build_couette_solver(order: int = 2):
         mesh=mesh, order=order, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=rho_inf, vel_inf=U_wall, p_inf=p_inf,
-        bc_overrides=bc_overrides,
+        bc_overrides=bc_overrides, mu_molecular=MU_MOLECULAR,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_overrides)
@@ -336,7 +337,7 @@ def test_couette_prism_freestream_preservation():
         mesh=mesh, order=2, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=rho_inf, vel_inf=u_inf, p_inf=p_inf,
-        bc_overrides=bc_overrides,
+        bc_overrides=bc_overrides, mu_molecular=MU_MOLECULAR,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_overrides)

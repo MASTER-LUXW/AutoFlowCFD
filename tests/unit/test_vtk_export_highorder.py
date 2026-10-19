@@ -18,6 +18,7 @@ from autoflowcfd.postprocess.vtk_export_highorder import export_highorder_vtk
 from autoflowcfd.postprocess.vtk_export_highorder.node_layout import _tet_vtk_node_barycentrics, _wedge_vtk_node_layout
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh, _MockNodes, _MockCells
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 GAMMA = 1.4
 
@@ -365,7 +366,7 @@ def _sst_channel_solver():
     mesh = build_channel_mesh_prism(2, 3, 3, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
-    s = FRSolver(mesh=mesh, order=2, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=30.0)
+    s = FRSolver(mesh=mesh, order=2, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=30.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     apply_wall_distance_source(s, channel_wall_source(0.4, 0.1, 0.08))
     y = np.asarray(s.mesh.sps_coords)[..., 1]

@@ -116,7 +116,7 @@ def _cross_check(U, mesh, ops, mu_t_field=None, provider=DefaultGhostProvider())
 
     r_cpu = compute_viscous_residual_fr(U, mesh, ops, 1.8e-5, PRANDTL, mu_t_field=mu_t_field,
                                         boundary_ghost_provider=provider)
-    r_gpu = compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field,
+    r_gpu = compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, Pr=PRANDTL, mu_t_field=mu_t_field,
                                             boundary_ghost_provider=provider)
     return r_cpu, np.asarray(r_gpu)
 

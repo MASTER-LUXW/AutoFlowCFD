@@ -10,6 +10,7 @@ import pytest
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +37,7 @@ def test_checkpoint_carries_the_phase_initial_residual(mesh_and_ops, tmp_path):
         return DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=1, order=mesh.order, turb_model_name="none",
-            time_scheme=TimeIntegrationScheme.SSP_RK3)
+            time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     solver = _solver()
     solver._phase_initial_residual = 4321.5
     path = distributed_save_checkpoint(solver, str(tmp_path), 3, "dummy_input.nas", mesh.order, "none", "cpu")

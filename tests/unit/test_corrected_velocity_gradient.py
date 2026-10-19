@@ -23,6 +23,7 @@ from autoflowcfd.fr.native_padding import real_row_mask
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.validation._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_provider
 from tests.unit._numpy_as_cupy import NumpyAsCupy
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 RHO, U, P = 1.225, 30.0, 101325.0
 LX, H, LZ = 0.4, 0.1, 0.08
@@ -38,7 +39,7 @@ def _couette_solver(order):
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, 0.5 * U, 0.0, 0.0, P]}
     solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=0.5 * U, p_inf=P,
-                      mu_molecular=1.8e-5, bc_overrides=bc, wall_treatment="resolved")   # Couette 精确解：无滑移幽灵态
+                      mu_molecular=1.8e-5, bc_overrides=bc, wall_treatment="resolved", turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3)   # Couette 精确解：无滑移幽灵态
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)
     y = np.asarray(mesh.sps_coords)[..., 1]
     Q = np.asarray(solver.state.Q).copy()

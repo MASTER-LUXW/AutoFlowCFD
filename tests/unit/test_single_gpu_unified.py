@@ -22,6 +22,9 @@ import numpy as np
 import pytest
 from click.testing import CliRunner
 
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
+
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
@@ -35,8 +38,9 @@ def _gpu_solver(turb="NONE", **kw):
 
     mesh = build_channel_mesh_prism(1, 3, 3, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(_BC)
-    solver = GPUFRSolver(mesh=mesh, order=1, turb_model_name=turb, vel_inf=10.0,
-                         wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), **kw)
+    kw.setdefault("time_scheme", "ssp_rk3")
+    solver = GPUFRSolver(mesh=mesh, order=1, turb_model_name=turb, vel_inf=10.0, rho_inf=RHO_INF, p_inf=P_INF,
+                         mu_molecular=MU_MOLECULAR, wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), **kw)
     solver.order_continuation_enabled = False
     return solver
 
@@ -150,7 +154,8 @@ def test_factory_builds_a_gpu_solver_for_backend_gpu():
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
 
     mesh, volume = _mesh_and_volume()
-    solver = build_single_node_solver("gpu", mesh, volume, order=1, turb_model_name="none", vel_inf=10.0)
+    solver = build_single_node_solver("gpu", mesh, volume, order=1, turb_model_name="none", vel_inf=10.0,
+                                      time_scheme="ssp_rk3", rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     assert isinstance(solver, GPUFRSolver) and solver.turb_model_name == "NONE"
 
 
@@ -173,7 +178,9 @@ def test_factory_auto_picks_cpu_without_a_gpu(monkeypatch):
 
     patch_pkg_attr(monkeypatch, core_gpu, "gpu_available", False)
     mesh, volume = _mesh_and_volume()
-    solver = build_single_node_solver("auto", mesh, volume, order=1, turb_model_name="none", vel_inf=10.0)
+    solver = build_single_node_solver("auto", mesh, volume, order=1, turb_model_name="none", vel_inf=10.0,
+                                      time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF,
+                                      mu_molecular=MU_MOLECULAR)
     assert type(solver) is FRSolver
 
 

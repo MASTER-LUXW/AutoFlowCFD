@@ -31,6 +31,7 @@ from autoflowcfd.core.utils.flow_direction import (
     freestream_velocity,
     wind_axes,
 )
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 
 class TestDegeneratesToPlusX:
@@ -324,7 +325,7 @@ class TestEndToEndOnRealSolver:
         s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE",
                      time_scheme=TimeIntegrationScheme.SSP_RK3,
                      rho_inf=1.225, vel_inf=vel, p_inf=101325.0,
-                     aoa_deg=aoa, aos_deg=aos)
+                     aoa_deg=aoa, aos_deg=aos, mu_molecular=MU_MOLECULAR)
         s.order_continuation_enabled = False
         return s
 

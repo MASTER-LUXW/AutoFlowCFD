@@ -8,6 +8,8 @@
 
 
 
+from loguru import logger
+
 from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.core.time_integration.base import TimeIntegrator
@@ -33,7 +35,7 @@ class _SolverSetupMixin:
         if initial_state is not None:
             # 使用提供的初始状态（Order Continuation）
             self.state = initial_state
-            print("   [OK] Using provided initial state from lower order")
+            logger.info("使用调用方给出的初始状态（Order Continuation 的低阶状态）")
         else:
             # 状态只含平均流守恒变量（湍流场在模型对象上，见 state.py::N_MEAN_FLOW_VARS）
             self.state = FRState(n_cells, n_sps)
@@ -169,7 +171,7 @@ class _SolverSetupMixin:
         configure_time_stepping(self, time_scheme, time_accurate=time_accurate, adaptive_cfl=adaptive_cfl,
                                 cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
                                 low_mach_precond=low_mach_precond)
-        print("   " + describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
+        logger.info(describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
 
         # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做
         # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在
@@ -182,7 +184,7 @@ class _SolverSetupMixin:
         # 分支外，与 CFL 档无关。
         _av = ("enabled (entropy sensor, alpha=%g)" % self.artificial_viscosity_alpha
                if self.artificial_viscosity_enabled else "disabled")
-        print(f"   Artificial viscosity: {_av}")
+        logger.info(f"Artificial viscosity: {_av}")
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()

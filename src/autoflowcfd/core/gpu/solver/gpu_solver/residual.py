@@ -103,11 +103,12 @@ class _GPUSolverResidualMixin:
         Returns:
             viscous_residual: CuPy 数组 (n_cells, n_sps, 5)
         """
+        from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
         from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
         U = U_trial if U_trial is not None else self.U_gpu
         res = compute_viscous_residual_fr_gpu(
             U, self.mesh, self.ops,
-            mu=self.mu_molecular,
+            mu=self.mu_molecular, Pr=PRANDTL,
             mu_t_field=mu_t_field,
             boundary_ghost_provider=self.boundary_ghost_provider,
             mesh_data=self.mesh_data,

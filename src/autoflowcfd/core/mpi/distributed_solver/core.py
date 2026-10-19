@@ -6,7 +6,6 @@
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
-from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from loguru import logger
 from autoflowcfd.core.turbulence.wall_model.treatment import (
     DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
@@ -21,14 +20,16 @@ from autoflowcfd.core.mpi.distributed_flat_face import (
     build_distributed_flat_face,
 )
 from autoflowcfd.core.mpi.comm import barrier
-from autoflowcfd.core.time_integration.base import (
-    TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
-)
+from autoflowcfd.core.time_integration.base import TimeIntegrator, require_distributed_scheme
 from .from_package import _DistributedFromPackageMixin
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 from .step import _DistributedStepMixin
 from .support import _DistributedSupportMixin
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+
+
+#: 必需的构造参数（物理输入，与单机 FRSolver 的必需关键字参数一致）
+_REQUIRED_KWARGS = ('order', 'turb_model_name', 'time_scheme', 'rho_inf', 'vel_inf', 'p_inf', 'mu_molecular')
 
 
 class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, DistributedSolveLoopMixin,
@@ -73,7 +74,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
             NotImplementedError: 湍流模型名无法识别（支持的模型见 `core/turbulence/registry.py`，
                 与单机相同）
         """
-        turb_model_name = solver_kwargs.get('turb_model_name', 'none')
+        for name in _REQUIRED_KWARGS:
+            if name not in solver_kwargs:
+                raise TypeError(f"DistributedFRSolver 缺少必需参数 {name!r}（物理输入必须显式给出，见 FRSolver 模块文档）")
+        turb_model_name = solver_kwargs['turb_model_name']
         turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
         from autoflowcfd.core.turbulence.registry import require_supported
         if turb_model_upper != require_supported(turb_model_name):
@@ -102,10 +106,8 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # distributed_order_continuation.py 模块文档）：`self.order`/
         # `self.current_order` 与单机 FRSolver 同一约定
         # （`order`=目标阶数，`current_order`=当前实际所在阶数，两者
-        # 在阶数爬升过程中的中间阶段不相等）。默认从 `solver_kwargs`
-        # 里读取目标 order（CLI 恒显式传入），退化用 `mesh` 当前活动
-        # 阶数兜底。
-        self.order = int(solver_kwargs.get('order', getattr(mesh, 'order', 0)))
+        # 在阶数爬升过程中的中间阶段不相等）。
+        self.order = int(solver_kwargs['order'])
         self.current_order = self.order
         self.order_continuation_enabled = solver_kwargs.get('order_continuation_enabled', True)
         self._is_fully_distributed = False
@@ -164,10 +166,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 对新构造的 state 赋初值，conserved state 恒为全零。
         # 初场速度方向必须与边界 Q_free 用同一个来流方向（2026-09-17）
         from autoflowcfd.core.utils.flow_direction import freestream_velocity
-        # 来流缺省值的唯一定义在 core/freestream_defaults.py（与单机求解器构造参数同一份）
-        self.rho_inf = solver_kwargs.get('rho_inf', RHO_INF)
-        self.vel_inf = solver_kwargs.get('vel_inf', VEL_INF)
-        self.p_inf = solver_kwargs.get('p_inf', P_INF)
+        self.rho_inf = solver_kwargs['rho_inf']
+        self.vel_inf = solver_kwargs['vel_inf']
+        self.p_inf = solver_kwargs['p_inf']
         _v0 = freestream_velocity(
             self.vel_inf,
             solver_kwargs.get('aoa_deg', 0.0) or 0.0,
@@ -227,7 +228,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 决定物理解的参数同样**无条件**设置（2026-09-25）：此前只在
         # SST/DDES/IDDES/WMLES 分支里设，于是 none/les 运行的分布式 checkpoint
         # 按替身缺省值写粘度与 Tu/VR（见 core/utils/checkpoint_physics.py）。
-        self.mu_molecular = solver_kwargs.get('mu_molecular', MU_MOLECULAR)
+        self.mu_molecular = solver_kwargs['mu_molecular']
         self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
         self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
         # 问题单元人工粘性（与单机 FRSolver 同名参数、同一实现；见
@@ -285,8 +286,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # `_ssp_rk_stage_step`，即便这里读对了 scheme 也无路可走。
         # 现在真正读取 `time_scheme`/`dual_time_inner_iter`，`step()`
         # 相应按 scheme 分派（与单机 `fr_solver/step.py` 同一个设计）。
-        time_scheme = require_distributed_scheme(
-            solver_kwargs.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
+        time_scheme = require_distributed_scheme(solver_kwargs['time_scheme'])
         dual_time_steps = solver_kwargs.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
         self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,

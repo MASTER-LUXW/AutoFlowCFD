@@ -105,7 +105,7 @@ class DistributedTurbulenceSolverAdapter:
     只暴露这两个函数实际读取的属性/方法（`mesh`、`ops`、`turb_model`、
     `turb_model_name`、`ddes_model`、`wall_distance`、`mu_molecular`、
     `state.Q`/`state.n_cells`/`state.n_sps`、`state.U`、
-    `_compute_gradients()`、`_get_cell_volumes()`、
+    `_get_cell_volumes()`、
     `_turbulence_flat_face_override`），不是完整 FRSolver 接口。
 
     DDES/IDDES：`compute_turbulence_source` 对 SST/DDES/IDDES 复用同一条 k/omega 梯度/输运

@@ -23,6 +23,8 @@ from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._boundary_groups import tag_wall_cells
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 
 class _FakeFaceConnectivity:
@@ -110,7 +112,7 @@ class TestRealFRSolverWmlesConstructionOrder:
         tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
-        solver = FRSolver(mesh, order=order, turb_model_name="wmles")
+        solver = FRSolver(mesh, order=order, turb_model_name="wmles", time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
 
         assert solver.wall_model is not None
         wall_configs = [
@@ -131,7 +133,7 @@ class TestRealFRSolverWmlesConstructionOrder:
         tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
-        solver = FRSolver(mesh, order=order, turb_model_name="sst", wall_treatment="resolved")
+        solver = FRSolver(mesh, order=order, turb_model_name="sst", wall_treatment="resolved", time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
 
         assert solver.wall_model is None
         wall_configs = [

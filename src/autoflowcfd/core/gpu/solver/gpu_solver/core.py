@@ -7,7 +7,6 @@
 from contextlib import contextmanager
 
 from typing import Optional
-from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from loguru import logger
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
@@ -47,21 +46,22 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
     def __init__(
         self,
         mesh,
+        *,
+        order: int,
+        time_scheme,
+        rho_inf: float,
+        vel_inf: float,
+        p_inf: float,
+        mu_molecular: float,
+        turb_model_name: str,
         ops=None,
-        order: int = 2,
         device_id: int = 0,
-        time_scheme: str = "ssp_rk3",
-        rho_inf: float = RHO_INF,
-        vel_inf: float = VEL_INF,
-        p_inf: float = P_INF,
         # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向硬编码
         # 成 +x 的行为逐位相同。约定见 core/utils/flow_direction.py。
         aoa_deg: float = 0.0,
         aos_deg: float = 0.0,
-        mu_molecular: float = MU_MOLECULAR,
         boundary_ghost_provider=None,
         bc_overrides=None,
-        turb_model_name: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
         low_mach_precond: bool = True,

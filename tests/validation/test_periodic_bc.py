@@ -27,6 +27,7 @@ from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 from ._periodic_mesh import build_periodic_channel_mesh_x, build_periodic_symmetry_ghost_provider
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 H = 1.0
 Lz = 0.3
@@ -47,7 +48,7 @@ def _build_periodic_solver():
         mesh=mesh, order=ORDER, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
-        bc_overrides=bc_overrides,
+        bc_overrides=bc_overrides, mu_molecular=MU_MOLECULAR,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_periodic_symmetry_ghost_provider(mesh, Lx, H, Lz)

@@ -16,6 +16,7 @@ from autoflowcfd.core.time_integration.base import STEADY_DT
 from autoflowcfd.core.utils.checkpoint import CheckpointManager
 from autoflowcfd.core.utils.checkpoint_time import PREVIOUS_LEVEL_FIELD, resume_time_step
 from tests.validation._channel_mesh import build_channel_mesh_prism
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 DT = 2e-4
 _BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
@@ -28,7 +29,7 @@ def _solver():
     mesh = build_channel_mesh_prism(1, 3, 3, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(_BC)
     s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.DUAL_TIME,
-                 vel_inf=10.0, dual_time_inner_iter=40)
+                 vel_inf=10.0, dual_time_inner_iter=40, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     # BDF 方程解到 1e-10：续算与连续计算只差线性求解的舍入，远小于"少一个时间层"的差
     s.time_integrator.dual_time_tolerance = 1e-10
@@ -104,7 +105,7 @@ def test_distributed_checkpoint_carries_dt_and_previous_level(tmp_path):
     def _dist():
         return DistributedFRSolver(mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
                                    n_ranks=1, order=1, turb_model_name="none", vel_inf=10.0,
-                                   time_scheme=TimeIntegrationScheme.DUAL_TIME)
+                                   time_scheme=TimeIntegrationScheme.DUAL_TIME, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     a = _dist()
     a.order_continuation_enabled = False
     a.solve(max_iter=2, dt=DT, tol=0.0)

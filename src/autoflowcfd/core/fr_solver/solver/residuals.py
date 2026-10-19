@@ -77,14 +77,9 @@ class _SolverResidualMixin:
         """
         计算无粘残差 (S-02/S-04)。
 
-        真实的曲边/坍缩坐标 FR 离散：体积项用逆变通量 (contravariant flux)
-        散度实现（度量项一致，满足自由流场保持性/离散GCL），界面项用基于
-        真实单元-面连接关系的 AUSM+up 黎曼求解 + Radau/VCJH 校正函数投影，
-        边界面通过 boundary_ghost_provider (BD-01) 构造物理正确的幽灵态。
-
-        取代旧版本"用全场平均态+硬编码法向量冒充相邻单元"的伪校正项——
-        详见 core/fr_residual_inviscid.py 模块文档与
-        tests/unit/test_fr_residual_inviscid.py 的自由流场保持性验证。
+        原生基（棱柱 / 四面体）上的 FR 离散：体积项为逆变通量散度（度量一致，满足自由流保持 / 离散 GCL），
+        界面项为真实单元-面连接关系上的 AUSM+up 黎曼通量与 DG 提升，边界面经 boundary_ghost_provider 构造幽灵态。
+        见 `core/fr_residual/inviscid.py` 模块文档。
         """
         self._refresh_primitives()
         return self._inviscid_residual()
@@ -199,13 +194,4 @@ class _SolverResidualMixin:
         mu_av = self.state.U[..., 0] * nu_av
         return mu_av if mu_t is None else mu_t + mu_av
 
-    def _compute_gradients(self) -> np.ndarray:
-        """
-        计算守恒变量的梯度。
-
-        Returns:
-            grad_U: 梯度，形状 (n_cells, n_sps, n_vars, 3)
-        """
-        from autoflowcfd.core.fr_residual.viscous import compute_gradients
-        return compute_gradients(self.state.U, self.ops, self.mesh)
     

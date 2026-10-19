@@ -11,6 +11,7 @@ from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, needs_wall_model
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 LX, H, LZ = 0.4, 0.1, 0.08
 RHO_Y = 1.2
@@ -44,7 +45,7 @@ def _cpu(model, treatment):
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
 
     s = FRSolver(mesh=_mesh(), order=1, turb_model_name=model, time_scheme=TimeIntegrationScheme.SSP_RK3,
-                 vel_inf=30.0, wall_treatment=treatment)
+                 vel_inf=30.0, wall_treatment=treatment, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     apply_wall_distance_source(s, channel_wall_source(LX, H, LZ))
     return s
@@ -54,7 +55,7 @@ def _gpu(model, treatment):
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
 
     s = GPUFRSolver(mesh=_mesh(), order=1, turb_model_name=model, time_scheme=TimeIntegrationScheme.SSP_RK3,
-                    vel_inf=30.0, wall_treatment=treatment, wall_distance_source=channel_wall_source(LX, H, LZ))
+                    vel_inf=30.0, wall_treatment=treatment, wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     return s
 
@@ -66,7 +67,7 @@ def _dist(model, treatment):
     return DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,
                                order=1, turb_model_name=model, time_scheme=TimeIntegrationScheme.SSP_RK3,
                                vel_inf=30.0, wall_treatment=treatment,
-                               wall_distance_source=channel_wall_source(LX, H, LZ))
+                               wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
 
 
 def _wall_configs(solver):

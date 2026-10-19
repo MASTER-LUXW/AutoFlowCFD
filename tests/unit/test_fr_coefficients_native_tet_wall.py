@@ -14,6 +14,7 @@ import pytest
 
 from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr, pressure_force_coefficients
 from autoflowcfd.postprocess.wall_forces import sample_wall, wall_group_codes
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 MU, RHO, U, P = 1.8e-5, 1.225, 30.0, 101325.0
 LX, H, LZ = 0.4, 0.1, 0.08
@@ -95,7 +96,7 @@ def test_tet_owned_wall_faces_integrate(order):
     fc = mesh.face_connectivity
     assert np.any(fc.is_boundary & (fc.owner_cell >= mesh.n_prism_cells))
     mesh.boundary_bc_types = {"farfield": "WALL"}
-    solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=MU)
+    solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=MU, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3)
     Q = np.asarray(solver.state.Q).copy()
     Q[..., 1:4] = 0.0
     Q[..., 4] = P + 500.0

@@ -7,6 +7,8 @@ P2 只有 1/10.3 / 1/7.30，步长随之放大同样的倍数：单 GPU 的实�
 """
 
 import numpy as np
+
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 import pytest
 
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
@@ -26,7 +28,8 @@ def _pair(kind, order, scheme):
         m = (build_channel_mesh if kind == "tet" else build_channel_mesh_prism)(order, 3, 3, 2, LX, H, LZ)
         m.boundary_bc_types = dict(_BC)
         return m
-    kw = dict(order=order, turb_model_name="NONE", time_scheme=scheme, vel_inf=30.0)
+    kw = dict(order=order, turb_model_name="NONE", time_scheme=scheme, vel_inf=30.0, rho_inf=RHO_INF, p_inf=P_INF,
+              mu_molecular=MU_MOLECULAR)
     cpu, gpu = FRSolver(mesh=mesh(), **kw), GPUFRSolver(mesh=mesh(), **kw)
     for s in (cpu, gpu):
         s.order_continuation_enabled = False

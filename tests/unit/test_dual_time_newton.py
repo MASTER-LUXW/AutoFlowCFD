@@ -30,6 +30,7 @@ from autoflowcfd.core.utils.checkpoint_time import TURBULENCE_PREVIOUS_FIELD
 from tests.unit._implicit_jfnk_common import _N, _NV, _SCALES, _linear_system
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 DUAL = TimeIntegrationScheme.DUAL_TIME
 LX, H, LZ = 0.4, 0.1, 0.08
@@ -216,7 +217,7 @@ def _cpu(model, ny=6, vel=30.0, inner=20):
     mesh = build_channel_mesh_prism(1, ny, ny, 2, LX, H, LZ)
     mesh.boundary_bc_types = dict(_BC)
     s = FRSolver(mesh=mesh, order=1, turb_model_name=model, time_scheme=DUAL, vel_inf=vel,
-                 dual_time_inner_iter=inner)
+                 dual_time_inner_iter=inner, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     apply_wall_distance_source(s, channel_wall_source(LX, H, LZ))
     return s
@@ -351,7 +352,7 @@ def test_single_gpu_matches_cpu(model):
     mesh = build_channel_mesh_prism(1, 3, 3, 2, LX, H, LZ)
     mesh.boundary_bc_types = dict(_BC)
     gpu = GPUFRSolver(mesh=mesh, order=1, turb_model_name=model, vel_inf=10.0, time_scheme=DUAL,
-                      wall_distance_source=channel_wall_source(LX, H, LZ))
+                      wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     gpu.order_continuation_enabled = False
     for _ in range(3):
         cpu.step(2e-4)

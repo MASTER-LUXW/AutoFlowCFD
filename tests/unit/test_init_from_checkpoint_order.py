@@ -16,6 +16,7 @@ from autoflowcfd.core.utils.order_continuation.initial_field import start_from_c
 from autoflowcfd.fr.order_interp import apply_order_interp
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.unit.test_sa_neg_solver import _sa_channel
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 DUAL = TimeIntegrationScheme.DUAL_TIME
 
@@ -91,7 +92,7 @@ def test_single_gpu_init_from_lower_order_through_the_host_view():
     mesh = build_channel_mesh_prism(2, 3, 4, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(_BC)
     g = GPUFRSolver(mesh=mesh, order=2, turb_model_name="SA", time_scheme=DUAL, vel_inf=30.0,
-                    wall_distance_source=channel_wall_source(0.4, 0.1, 0.08))
+                    wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     with g.edit_host_state() as host:
         _, ckpt_order = restore_state_from_checkpoint("p1.h5", host, {"fields": fields})
     start_from_checkpoint_field(g, ckpt_order, report=False)

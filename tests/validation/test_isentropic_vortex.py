@@ -37,6 +37,7 @@ from ._isentropic_vortex import (
     build_vortex_mesh, build_vortex_farfield_ghost_provider,
     vortex_primitive_field, primitive_to_conservative,
 )
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 ORDER = 2
 NX, NY, NZ = 20, 20, 1
@@ -55,7 +56,7 @@ def _build_vortex_solver():
         # 全局物理时间步（时间精确）必须关掉低马赫伪时间预处理 Gamma：它是稳态加速手段，推进的是
         # dU/dt = -Gamma R，改变声速且逐点混合守恒分量——周期域上质量/总能每 100 步漂移 2.5e-6
         # （关闭后 5e-15），验证的就不是物理动力学（2026-10-05 查出，此前一直开着）。
-        low_mach_precond=False,
+        low_mach_precond=False, mu_molecular=MU_MOLECULAR,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_vortex_farfield_ghost_provider(mesh, LX, H, LZ, RHO_INF, P_INF, U_INF)

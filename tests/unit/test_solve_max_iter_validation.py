@@ -11,6 +11,7 @@ import pytest
 from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from tests.validation._channel_mesh import build_channel_mesh_prism
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 
 def _solver(order):
@@ -18,7 +19,7 @@ def _solver(order):
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
     return FRSolver(mesh=mesh, order=order, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3,
-                    vel_inf=10.0)
+                    vel_inf=10.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
 
 
 @pytest.mark.parametrize("max_iter", [0, -3])

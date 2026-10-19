@@ -4,7 +4,7 @@
 它是 V2.0 求解器的总控中心，负责协调各模块完成 N-S 方程的高阶离散与求解。
 
 核心功能:
-1. 支持多种湍流模型（SST/DDES/IDDES/WMLES/LES）
+1. 支持多种湍流模型（SA-neg/SST/DDES/IDDES/WMLES/LES）
 2. 自动切换RANS/LES模式
 3. 完整的时间推进循环
 4. 残差监控和收敛判断
@@ -12,13 +12,19 @@
 2026-09-25 按职责拆成同目录的 mixin（`setup` 装配阶段、`residuals` 残差与
 委托、`solve_loop` 求解循环）与 `threads`（BLAS/numba 线程）；本文件只留
 构造签名、参数文档与装配顺序。
+
+物理输入（阶数、湍流模型、时间格式、来流 rho/vel/p、分子粘度）是必需的关键字参数（2026-10-19，I-78）：此前给了
+默认值（P2、湍流模型各后端还不一样——CPU 为 SST、单 GPU 与多 GPU 为层流、显式 SSP-RK3、标准空气 33 m/s），漏传
+即静默按另一个算例计算。生产构造入口 `core/solver_factory.py` 从配置（`config/solver_config.py`，用户可见的默认值
+在那一层）传入。
 """
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Any, Dict, Optional
 
+from loguru import logger
+
 from autoflowcfd.core.fr_solver.state import FRState
-from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
@@ -41,20 +47,20 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         mesh: 高阶网格对象
         state: 求解器状态容器
         ops: 预计算的 FR 算子
-        bc_handler: 弱边界条件处理器
-        turb_model: 湍流模型处理器
+        boundary_ghost_provider: 边界幽灵态提供者（按边界组给定条件，`fr_solver/boundary/ghost.py`）
+        turb_model: 带输运方程的湍流模型（SA-neg / SST 族），没有时 None
     """
-    def __init__(self, mesh: 'HighOrderMesh', order: int = 2,
-                 turb_model_name: str = "SST",
-                 time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
+    def __init__(self, mesh: 'HighOrderMesh', *, order: int,
+                 turb_model_name: str,
+                 time_scheme: TimeIntegrationScheme,
+                 rho_inf: float, vel_inf: float, p_inf: float,
+                 mu_molecular: float,
                  initial_state: Optional[FRState] = None,
-                 rho_inf: float = RHO_INF, vel_inf: float = VEL_INF, p_inf: float = P_INF,
                  # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向
                  # 硬编码成 +x 的行为**逐位相同**，默认路径数值不变。
                  # 约定与风轴系公式见 core/utils/flow_direction.py。
                  aoa_deg: float = 0.0, aos_deg: float = 0.0,
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-                 mu_molecular: float = MU_MOLECULAR,
                  dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,
@@ -75,13 +81,13 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  time_accurate: bool = False,
                  wall_treatment: str = DEFAULT_WALL_TREATMENT):
         """
-        初始化 FRSolver。
+        初始化 FRSolver（必需参数见模块文档）。
 
         Args:
             mesh: HighOrderMesh 类型的高阶网格对象
             order: 多项式阶数
-            turb_model_name: 湍流模型名称 ("SST"/"DDES"/"IDDES"/"WMLES"/"LES"/"NONE")
-            mu_molecular: 分子动力粘度（默认 1.8e-5 Pa*s，标准状态下空气）。
+            turb_model_name: 湍流模型名称 ("SA"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"/"NONE")
+            mu_molecular: 分子动力粘度（Pa*s）。
                 此前粘性残差（fr_residual_viscous.py 默认参数）与粘性 CFL
                 步长（_compute_local_time_step）各自独立硬编码这个值，没有
                 任何受支持的方式一致地设置自定义粘度——两处必须同步改，
@@ -144,9 +150,8 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         self.wall_treatment = validate_wall_treatment(wall_treatment)
 
         self._setup_options(mesh, order, artificial_viscosity_enabled, artificial_viscosity_alpha)
-        # 安全地获取网格信息
-        n_cells = getattr(mesh, 'n_cells', 0)
-        n_sps = getattr(mesh, 'n_sps_per_cell', 8)
+        n_cells = mesh.n_cells
+        n_sps = mesh.n_sps_per_cell
         self._setup_initial_state(initial_state, n_cells, n_sps, turb_model_name,
                                   rho_inf, vel_inf, p_inf, aoa_deg, aos_deg)
         self._setup_operators(order)
@@ -157,8 +162,5 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
             n_cells, n_sps, order, time_scheme, dual_time_inner_iter, adaptive_cfl,
             cfl_start, cfl_max, cfl_min, low_mach_precond, time_accurate)
 
-        print("[OK] FRSolver Ready:")
-        print(f"   Cells: {n_cells}, Order: P{order}")
-        print(f"   Turbulence: {turb_model_name}")
-        print(f"   Time Scheme: {time_scheme.value}")
-        print(f"   Threads: {resolved_n_threads}")
+        logger.info(f"FRSolver 就绪：{n_cells} 个单元，P{order}，湍流 {turb_model_name}，时间格式 {time_scheme.value}，"
+                    f"{resolved_n_threads} 线程")

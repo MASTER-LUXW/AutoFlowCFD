@@ -281,7 +281,13 @@ def benchmark(
                                              skip_quality_check=skip_quality_check)
     t_load = _time.perf_counter() - t_start
     # GPU 不可用时 build_single_node_solver 显式报错（不退化成 CPU 却仍打着 GPU 的标签）
-    solver = build_single_node_solver(backend, mesh, volume_data, order=order, turb_model_name="NONE")
+    # 来流与时间格式取配置层默认值（与 solve steady 不给参数时同一组，`config/solver_config.py`）
+    from autoflowcfd.config.solver_config import SteadyConfig
+
+    cfg = SteadyConfig()
+    solver = build_single_node_solver(backend, mesh, volume_data, order=order, turb_model_name="NONE",
+                                      time_scheme=cfg.time_scheme, rho_inf=cfg.rho_inf, vel_inf=cfg.vel_inf,
+                                      p_inf=cfg.p_inf, mu_molecular=cfg.mu_molecular)
     t_setup = _time.perf_counter() - t_start - t_load
     residual = solver.compute_inviscid_residual_gpu if backend == "gpu" else solver.compute_inviscid_residual
 

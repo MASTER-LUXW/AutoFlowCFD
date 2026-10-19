@@ -17,6 +17,7 @@ from autoflowcfd.core.time_integration.residual_norm import turbulence_monitor_r
 from tests.unit._module_source import module_source
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 
 _BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
        "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
@@ -41,7 +42,7 @@ def _cpu(turb):
 
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
 
-    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=10.0)
+    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=10.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     if turb != "NONE":
         apply_wall_distance_source(s, channel_wall_source(0.4, 0.1, 0.08))
     return s
@@ -67,7 +68,7 @@ def test_single_gpu_matches_cpu(turb):
 
     gpu = GPUFRSolver(mesh=_mesh(), order=1, turb_model_name=turb, vel_inf=10.0,
                       time_scheme=TimeIntegrationScheme.SSP_RK3,
-                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08))
+                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     np.testing.assert_allclose(_run(gpu), _run(_cpu(turb)), rtol=1e-8)
 
 
@@ -79,7 +80,7 @@ def test_cpu_distributed_matches_cpu(turb):
     mesh = _mesh()
     dist = DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,
                                order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3,
-                               vel_inf=10.0, wall_distance_source=channel_wall_source(0.4, 0.1, 0.08))
+                               vel_inf=10.0, wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     np.testing.assert_allclose(_run(dist), _run(_cpu(turb)), rtol=1e-8)
 
 

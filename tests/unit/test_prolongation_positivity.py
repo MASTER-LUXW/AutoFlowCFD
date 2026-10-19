@@ -11,6 +11,7 @@ import numpy as np
 from autoflowcfd.core.time_integration.positivity import build_positivity_limiter
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.validation._channel_mesh import build_channel_mesh_prism
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 GAMMA = 1.4
 
@@ -43,7 +44,7 @@ def test_prolongated_state_is_admissible_on_new_point_set():
 
     mesh = build_channel_mesh_prism(2, 3, 3, 2, 0.4, 0.1, 0.08)
     s = FRSolver(mesh=mesh, order=2, turb_model_name="NONE", rho_inf=1.225, vel_inf=30.0,
-                 p_inf=101325.0, mu_molecular=1.8e-5)
+                 p_inf=101325.0, mu_molecular=1.8e-5, time_scheme=TimeIntegrationScheme.SSP_RK3)
     # 回到 P1：几何、算子、状态
     s.mesh.set_order(1)
     s.ops = generate_fr_operators(1)

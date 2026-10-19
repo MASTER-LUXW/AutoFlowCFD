@@ -22,6 +22,8 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_solver.mach_ref import MACH_REF_FLOOR
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
+from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 #: 谱测量给出的各候选下限的裕度（见模块文档那张表）。改下限前必须重跑。
 _MEASURED_MARGIN_AT_FLOOR = {0.05: 3.55, 0.04: 2.96, 0.03: 2.32}
@@ -51,7 +53,7 @@ def _solver(vel):
     from autoflowcfd.core.fr_solver import FRSolver
 
     mesh = build_channel_mesh_prism(1, 4, 3, 1, 1.0, 1.0, 0.25)
-    return FRSolver(mesh=mesh, order=1, turb_model_name="NONE", rho_inf=1.225, vel_inf=vel, p_inf=101325.0)
+    return FRSolver(mesh=mesh, order=1, turb_model_name="NONE", rho_inf=1.225, vel_inf=vel, p_inf=101325.0, time_scheme=TimeIntegrationScheme.SSP_RK3, mu_molecular=MU_MOLECULAR)
 
 
 _A = float(np.sqrt(1.4 * 101325.0 / 1.225))

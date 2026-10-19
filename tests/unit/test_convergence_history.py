@@ -9,6 +9,8 @@ import math
 from types import SimpleNamespace
 
 import numpy as np
+
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 import pytest
 
 from autoflowcfd.cli.solve.checkpoint_io.write import write_checkpoint
@@ -82,7 +84,8 @@ def _solver(time_scheme, **kw):
 
     mesh = build_channel_mesh_prism(1, 3, 3, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(_BC)
-    s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE", time_scheme=time_scheme, vel_inf=10.0, **kw)
+    s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE", time_scheme=time_scheme, vel_inf=10.0, rho_inf=RHO_INF,
+                 p_inf=P_INF, mu_molecular=MU_MOLECULAR, **kw)
     s.order_continuation_enabled = False
     rng = np.random.default_rng(7)
     s.state.U[..., 1:4] *= 1.0 + 0.05 * rng.standard_normal(s.state.U[..., 1:4].shape)

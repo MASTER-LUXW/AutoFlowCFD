@@ -121,7 +121,7 @@ class _DistributedFromPackageMixin:
         # 切好放进 package，这里只需要构造真正的 turb_model（compact
         # 索引空间外的部分，即 n_local 大小的持久状态）+ 对应的 halo
         # 交换器，不需要重新算任何几何量。
-        turb_model_name = package.get('turb_model_name', 'NONE')
+        turb_model_name = package['turb_model_name']
         # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/
         # 未知的 turb_model_name，而不是静默把 `self.turb_model_name`
         # 设成该值但 `self.turb_model`/`.wall_model`/`.sgs_model` 都

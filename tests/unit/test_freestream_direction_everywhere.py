@@ -176,7 +176,7 @@ class TestSingleGpuInitialFieldKeepsTheDirection:
             mesh=mesh, ops=generate_fr_operators(order), order=order,
             device_id=0, mu_molecular=1.8e-5,
             rho_inf=_RHO, vel_inf=_VEL, p_inf=_P, turb_model_name="none",
-            aoa_deg=10.0, aos_deg=0.0,
+            aoa_deg=10.0, aos_deg=0.0, time_scheme="ssp_rk3",
         )
         U = np.asarray(solver.U_gpu)
         mom = U[:, :, 1:4] / U[:, :, 0:1]

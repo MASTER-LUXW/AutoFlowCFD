@@ -44,6 +44,7 @@
 
 import numpy as np
 import pytest
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 
 def _channel_solver(cfl, adaptive):
@@ -64,7 +65,7 @@ def _channel_solver(cfl, adaptive):
                  rho_inf=1.225, vel_inf=30.0, p_inf=101325.0,
                  adaptive_cfl=adaptive,
                  cfl_start=cfl, cfl_max=cfl if not adaptive else 10 * cfl,
-                 cfl_min=cfl / 10.0)
+                 cfl_min=cfl / 10.0, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     return s
 

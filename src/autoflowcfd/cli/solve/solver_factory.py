@@ -57,7 +57,7 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device=None
 
     return GPUFRSolver(
         mesh=mesh, device_id=0 if gpu_device is None else gpu_device,
-        wall_distance_source=wall_distance_source_if_needed(solver_kwargs.get("turb_model_name", "NONE"),
+        wall_distance_source=wall_distance_source_if_needed(solver_kwargs["turb_model_name"],
                                                             volume_data),
         **solver_kwargs)
 

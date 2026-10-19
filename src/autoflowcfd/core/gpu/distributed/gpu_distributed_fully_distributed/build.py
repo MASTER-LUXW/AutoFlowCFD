@@ -60,7 +60,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     cp = get_cupy()
 
-    turb_model_name = package.get('turb_model_name', 'NONE')
+    turb_model_name = package['turb_model_name']
     from autoflowcfd.core.turbulence.registry import require_supported
     from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
     if turb_model_name != require_supported(turb_model_name):

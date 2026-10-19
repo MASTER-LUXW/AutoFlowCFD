@@ -8,6 +8,7 @@
 import numpy as np
 import pytest
 
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.time_accurate import advance, configure_time_stepping
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
@@ -35,7 +36,7 @@ def _cpu(order=1, **kw):
     from autoflowcfd.core.fr_solver import FRSolver
 
     s = FRSolver(mesh=_mesh(order), order=order, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3,
-                 vel_inf=30.0, **kw)
+                 vel_inf=30.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR, **kw)
     s.order_continuation_enabled = False
     return s
 
@@ -97,7 +98,7 @@ def test_single_gpu_matches_cpu():
 
     cpu = _cpu(time_accurate=True)
     gpu = GPUFRSolver(mesh=_mesh(1), order=1, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3,
-                      vel_inf=30.0, time_accurate=True)
+                      vel_inf=30.0, time_accurate=True, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     gpu.order_continuation_enabled = False
     U0 = _perturbed(cpu)
     cpu.state.U = U0.copy()
@@ -124,7 +125,7 @@ def test_residual_norm_is_rms_over_real_dofs_and_matches_across_backends():
     order = 2
     mesh = _build_synthetic_mixed_mesh(order)
     kw = dict(turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3, adaptive_cfl=False,
-              low_mach_precond=False)
+              low_mach_precond=False, rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     cpu = __import__("autoflowcfd.core.fr_solver", fromlist=["FRSolver"]).FRSolver(mesh, order=order, **kw)
     gpu = GPUFRSolver(mesh=mesh, order=order, **kw)
     dist = DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,

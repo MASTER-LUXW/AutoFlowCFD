@@ -82,10 +82,11 @@ class _MultiGPUResidualMixin:
         完全一致，见该方法文档。
         """
         U_compact = self._permute_to_compact(self.U_extended_gpu)
+        from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
         from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
         residual_compact = compute_viscous_residual_fr_gpu(
             U_compact, self.mesh, self.ops,
-            mu=self.mu_molecular,
+            mu=self.mu_molecular, Pr=PRANDTL,
             mu_t_field=mu_t_field,
             boundary_ghost_provider=self.boundary_ghost_provider,
             mesh_data=self.mesh_data,

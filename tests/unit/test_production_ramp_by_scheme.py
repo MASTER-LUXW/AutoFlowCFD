@@ -18,6 +18,7 @@ from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.unit.test_sa_neg_solver import LX, H, LZ, _sa_channel
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 
 NK = TimeIntegrationScheme.NEWTON_KRYLOV
 RK3 = TimeIntegrationScheme.SSP_RK3
@@ -61,7 +62,7 @@ def test_cpu_distributed_traditional(scheme):
     s = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
         n_ranks=1, order=1, turb_model_name="SA", time_scheme=scheme,
-        wall_distance_source=channel_wall_source(LX, H, LZ))
+        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     _assert_fresh_counters(s, scheme)
     _assert_first_step_factor(s, s.turb_model, scheme)
 
@@ -97,7 +98,7 @@ def test_cpu_distributed_explicit_ramp_completion_reaches_the_solver():
     s = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
         n_ranks=1, order=1, turb_model_name="SA", time_scheme=RK3,
-        wall_distance_source=channel_wall_source(LX, H, LZ))
+        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s._turb_production_ramp_steps = 2
     for _ in range(3):
         s.step(1e-6)
@@ -173,7 +174,7 @@ def test_distributed_checkpoint_carries_the_ramp_progress(tmp_path):
         return DistributedFRSolver(
             mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
             n_ranks=1, order=1, turb_model_name="SA", time_scheme=RK3,
-            wall_distance_source=channel_wall_source(LX, H, LZ))
+            wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     a = _dist()
     for _ in range(3):
         a.step(1e-6)

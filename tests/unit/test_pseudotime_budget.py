@@ -39,6 +39,7 @@ from autoflowcfd.core.fr_solver.pseudotime_budget import (
     format_pseudo_time_budget,
     pseudo_time_budget,
 )
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 
 class TestRatioDefinition:
@@ -218,7 +219,7 @@ class TestSolverAccumulatesTau:
                      time_scheme=TimeIntegrationScheme.SSP_RK3,
                      rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
                      adaptive_cfl=False, cfl_start=0.05, cfl_max=0.05,
-                     cfl_min=0.05)
+                     cfl_min=0.05, mu_molecular=MU_MOLECULAR)
         s.order_continuation_enabled = False
         return s
 

@@ -1,4 +1,4 @@
-"""默认来流与分子粘度只在 `core/freestream_defaults.py` 定义（I-46，2026-10-19）。
+"""默认来流与分子粘度只在 `core/freestream_defaults.py` 定义（I-46，2026-10-19），且只在配置层作为默认值（I-78）。
 
 此前这组值在配置类（两份）、四个求解器构造函数、分布式求解器的 `solver_kwargs.get(...)`、完全分布式包读取与 CLI
 各写一份；完全分布式包读取的 `.get(..., 33.33/1.225/101325)` 还会在包缺键时静默按缺省来流运行。
@@ -24,11 +24,29 @@ def _constructors():
     return (FRSolver, GPUFRSolver, MultiGPUDistributedSolver)
 
 
+_REQUIRED = {"FRSolver": ("order", "turb_model_name", "time_scheme"),
+             "GPUFRSolver": ("order", "turb_model_name", "time_scheme"),
+             "MultiGPUDistributedSolver": ("turb_model", "time_scheme")}
+
+
 @pytest.mark.parametrize("cls", _constructors(), ids=lambda c: c.__name__)
-def test_solver_constructor_defaults_are_the_shared_constants(cls):
+def test_solver_physical_inputs_are_required(cls):
+    """求解器构造的物理输入没有默认值（I-78）：用户可见的默认值只在配置层（下一条用例）。此前给了默认值、且各后端
+    的湍流模型默认值不一致（CPU SST、单 GPU 与多 GPU 层流），漏传即静默按另一个算例计算。"""
     params = inspect.signature(cls.__init__).parameters
-    for name, value in DEFAULTS.items():
-        assert params[name].default == value, (cls.__name__, name)
+    for name in tuple(DEFAULTS) + _REQUIRED[cls.__name__]:
+        assert params[name].default is inspect.Parameter.empty, (cls.__name__, name)
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, (cls.__name__, name)
+
+
+def test_cpu_distributed_solver_requires_the_physical_inputs():
+    from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+    from autoflowcfd.core.mpi.distributed_solver.core import _REQUIRED_KWARGS
+
+    assert set(_REQUIRED_KWARGS) == set(DEFAULTS) | {"order", "turb_model_name", "time_scheme"}
+    with pytest.raises(TypeError, match="rho_inf"):
+        DistributedFRSolver(mesh=None, ops=None, face_connectivity=None, n_ranks=1, order=1, turb_model_name="none",
+                            time_scheme="ssp_rk3", vel_inf=1.0, p_inf=1.0, mu_molecular=1.0)
 
 
 def test_config_defaults_are_the_shared_constants():
