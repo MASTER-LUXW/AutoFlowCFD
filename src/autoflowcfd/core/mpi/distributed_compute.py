@@ -175,6 +175,24 @@ class DistributedMeshAdapter:
             return self.local_mesh.sps_coords
         return self.local_mesh.sps_coords[self.dist_fc.compact_global_ids]
 
+def distributed_mesh_adapter(partition: DistributedPartition, dist_fc: DistributedFlatFaceGeometry, local_mesh,
+                             ops) -> DistributedMeshAdapter:
+    """本 rank 的 `DistributedMeshAdapter`，缓存在 `dist_fc` 上（同一个分区 + 面几何 + 网格状态只构造一次）。
+
+    构造时要按压缩索引空间抽取并重排全局 jacobians / 体积 / 过积分细点度量（P2 30 万单元仅 inv_jacs 就约
+    0.6 GB 的花式索引复制）。2026-10-19（I-100）以前无粘、粘性、湍流、人工粘性、隐式 J v 每次求值都新建一个。
+    缓存键持有分区、网格、算子、阶数与网格几何数组本身（按对象身份比较）：换阶时面几何重建（新的 dist_fc）或
+    网格几何数组被替换，都会重新构造。
+    """
+    key = (partition, local_mesh, ops, getattr(local_mesh, "order", None), getattr(local_mesh, "jacobians", None),
+           getattr(local_mesh, "jacobians_fine", None), getattr(local_mesh, "cell_volumes", None))
+    cached = getattr(dist_fc, "_mesh_adapter_cache", None)
+    if cached is not None and len(cached[0]) == len(key) and all(a is b for a, b in zip(cached[0], key)):
+        return cached[1]
+    adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    dist_fc._mesh_adapter_cache = (key, adapter)
+    return adapter
+
 
 def distributed_compute_inviscid_residual(
     U_local: np.ndarray,
@@ -183,8 +201,9 @@ def distributed_compute_inviscid_residual(
     dist_fc: DistributedFlatFaceGeometry,
     local_mesh,
     ops,
-    boundary_ghost_provider: Optional[Callable] = None,
-    mach_ref: float = 0.1,
+    boundary_ghost_provider: Callable,
+    *,
+    mach_ref: float,
 ) -> np.ndarray:
     """分布式无粘残差计算。
 
@@ -219,7 +238,7 @@ def distributed_compute_inviscid_residual(
 
     # 2. 创建网格适配器（#2，2026-08-28：n_cells/jacobians 现在是
     # "棱柱在前"local+halo 压缩索引空间，见 DistributedMeshAdapter 文档）
-    adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    adapter = distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
 
     # 3. 把 halo 交换协议原生排列的 U_extended 重排到 adapter 实际使用的
     # "棱柱在前"压缩索引空间（与 GPU 侧 gpu_distributed.py::
@@ -251,7 +270,7 @@ def distributed_compute_viscous_residual(
     local_mesh,
     ops,
     mu: float,
-    boundary_ghost_provider=None,
+    boundary_ghost_provider,
     mu_t_field_compact: Optional[np.ndarray] = None,
     wall_model=None,
 ) -> np.ndarray:
@@ -302,7 +321,7 @@ def distributed_compute_viscous_residual(
 
     # 2. 创建网格适配器（#2，2026-08-28：见 DistributedMeshAdapter 文档
     # "棱柱在前"压缩索引空间说明）
-    adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    adapter = distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
 
     # 3. 重排到 adapter 实际使用的"棱柱在前"压缩索引空间，与
     # distributed_compute_inviscid_residual 同一处理，见该函数文档。
@@ -329,73 +348,3 @@ def distributed_compute_viscous_residual(
     residual_local = residual_native[:partition.n_local_cells]
 
     return residual_local
-
-
-def distributed_compute_physical_gradient(
-    U_local: np.ndarray,
-    partition: DistributedPartition,
-    halo_exchange: HaloExchange,
-    dist_fc: DistributedFlatFaceGeometry,
-    local_mesh,
-    ops,
-) -> np.ndarray:
-    """分布式物理梯度计算。
-
-    真实 bug 修复（#2，2026-08-28）：此前 `DistributedMeshAdapter(partition,
-    None, local_mesh, ops)` 传 `dist_fc=None`——这个函数目前在代码库里
-    没有任何调用点（死代码），但 `DistributedMeshAdapter` 现在的构造
-    （见该类文档）需要从 `dist_fc.compact_global_ids` 取"棱柱在前"
-    local+halo 压缩索引空间的单元编号来重排 jacobians，传 None 会在
-    `None.compact_global_ids` 直接 AttributeError。补上 `dist_fc` 参数，
-    与另外两个 `distributed_compute_*_residual` 函数保持同一套接口，
-    不留這个未来调用点必现崩溃的隐患。
-
-    Args:
-        U_local: (n_local_cells, n_sps, 5) 本 rank 的 local cell 守恒变量
-        partition: 分区信息
-        halo_exchange: halo 交换管理器
-        dist_fc: 分布式面连接关系
-        local_mesh: 完整全局网格对象（见 DistributedMeshAdapter 文档）
-        ops: FR 算子
-
-    Returns:
-        grad_U: (n_local_cells, n_sps, 3, 5) local cells 的梯度
-    """
-    from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-
-    # 1. Halo 交换（原生排列）
-    U_extended = halo_exchange.exchange(U_local)
-
-    # 2. 创建网格适配器 + 重排到压缩索引空间，与其余两个
-    # distributed_compute_*_residual 函数同一处理。
-    adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
-    U_compact = U_extended[dist_fc.perm]
-
-    # 3. 调用现有梯度函数
-    grad_U_compact = compute_physical_gradient(U_compact, adapter, ops)
-
-    # 4. 换回原生排列，只返回 local cells 的梯度
-    grad_U_native = grad_U_compact[dist_fc.inv_perm]
-    grad_U_local = grad_U_native[:partition.n_local_cells]
-
-    return grad_U_local
-
-
-# 分布式湍流输运（k/omega 对流+扩散）已接入（2026-09-02，SST 模型）：
-# 见 core/mpi/distributed_turbulence.py::
-# distributed_compute_turbulence_source_and_viscosity——独立于本文件
-# （k/omega 走自己的 2-var halo 交换，不是 7-var 分布式状态；本文件的
-# `distributed_compute_viscous_residual` 新增 `mu_t_field_compact` 参数
-# 消费其产出）。
-#
-# **2026-09-18 更正**：这里原先写着"DDES/IDDES/WMLES/LES 分布式支持仍未
-# 实现"，那是**过时信息**——`distributed_turbulence.py` 的模块文档与
-# `compute_turbulence_source` 都表明 DDES/IDDES 已于 2026-09-02 补齐
-# （与 SST 复用同一条 k/omega 输运路径，按 `turb_model_name` 与
-# `ddes_model` 分派），WMLES/LES 则**不经过**本文件这条 k/omega 路径
-# （前者没有 ODE 状态、走壁面应力修正，后者是纯代数 SGS），
-# `DistributedFRSolver` 的构造护栏接受
-# 'none'/'sst'/'ddes'/'iddes'/'wmles'/'les' 全部六种。
-# 本项目已经因为"直接引用过时注释当成当前事实"出过真实误判（见
-# ProjectFiles/V2.0 的整改计划文件顶部那条"信息源更正记录"），所以这里
-# 把结论改正而不是只删掉。

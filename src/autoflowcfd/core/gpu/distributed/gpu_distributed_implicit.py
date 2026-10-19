@@ -89,7 +89,7 @@ class MultiGpuTurbulenceBackend:
         """解析单元块装配器（最近一次 `prepare_inputs` 的视图）：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
         from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_linearization_parts
-        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
         from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
@@ -97,7 +97,7 @@ class MultiGpuTurbulenceBackend:
         s, ctx, cp = self.solver, self._ctx, self.xp
         view, tr = ctx.view, ctx.transport
         dist_fc = s.dist_flat_face
-        mesh = DistributedMeshAdapter(s.partition, dist_fc, s.mesh, s.ops)
+        mesh = distributed_mesh_adapter(s.partition, dist_fc, s.mesh, s.ops)
         flat = dist_fc.base_flat
         Q_h = _host(ctx.Q)
         faces, values, pointwise, strong_rows, k_slope = gpu_linearization_parts(

@@ -17,7 +17,7 @@ class TestDistributedComputeImport:
             DistributedMeshAdapter,
             distributed_compute_inviscid_residual,
             distributed_compute_viscous_residual,
-            distributed_compute_physical_gradient,
+            distributed_mesh_adapter,
         )
         assert DistributedMeshAdapter is not None
         assert distributed_compute_inviscid_residual is not None

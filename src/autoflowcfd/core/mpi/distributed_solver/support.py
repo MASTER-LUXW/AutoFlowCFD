@@ -31,12 +31,12 @@ class _DistributedSupportMixin:
 
         adapter 的 jacobians 在"棱柱在前"紧凑排列，经 inv_perm 换回后切片。正性限制器与写盘的单元积分平均共用。
         """
-        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
 
         dist_fc = self.dist_flat_face
         n_local = int(self.partition.n_local_cells)
-        adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+        adapter = distributed_mesh_adapter(self.partition, dist_fc, self.mesh, self.ops)
         n_sps = self.state.U.shape[1]
         det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
         return det_compact[dist_fc.inv_perm][:n_local], native_cell_is_prism(dist_fc)[:n_local]

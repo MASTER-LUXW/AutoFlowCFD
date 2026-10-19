@@ -45,7 +45,7 @@ from typing import Optional
 from autoflowcfd.core.mpi.partition import DistributedPartition
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeometry
-from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
 from autoflowcfd.core.mpi.compact_halo import CompactHaloRefresh
 
 
@@ -195,7 +195,7 @@ def build_distributed_turbulence_view(
     U_extended = halo_exchange.exchange(U_local)
     U_compact = U_extended[dist_fc.perm]
 
-    mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    mesh_adapter = distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
     n_compact = mesh_adapter.n_cells
 
     # 2. compact 索引空间的临时"视图"（`TransportedTurbulence.like`）——不能直接复用真正的
@@ -373,7 +373,7 @@ def distributed_compute_les_viscosity(
     U_extended = halo_exchange.exchange(U_local)
     U_compact = U_extended[dist_fc.perm]
 
-    mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    mesh_adapter = distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
     n_sps = local_mesh.n_sps_per_cell
 
     # 与单机同一份速度梯度（`fr_solver/turbulence/source.py::turbulence_velocity_gradient`）

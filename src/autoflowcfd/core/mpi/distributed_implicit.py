@@ -94,14 +94,14 @@ def distributed_mean_flow_assembler(solver, physics, *, order: int, mu_t_compact
     `freestream`）：CPU-MPI 是其内部的 `local_solver`，多 GPU 是求解器本身。
     """
     from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
-    from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+    from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
 
     if unsupported_reason(order=order):
         return None
     dist_fc = solver.dist_flat_face
     n_local = int(solver.partition.n_local_cells)
     return MeanFlowBlockAssembler(
-        mesh=DistributedMeshAdapter(solver.partition, dist_fc, solver.mesh, solver.ops), ops=solver.ops,
+        mesh=distributed_mesh_adapter(solver.partition, dist_fc, solver.mesh, solver.ops), ops=solver.ops,
         ghost_provider=physics.boundary_ghost_provider, mu=physics.mu_molecular,
         mach_ref=physics.freestream["mach_ref"],
         low_mach=solver.low_mach_precond_enabled, mu_t=mu_t_compact, nu_av=nu_av_compact, n_sps=n_sps,

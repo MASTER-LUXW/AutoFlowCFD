@@ -48,8 +48,8 @@ class _DistributedStepMixin:
         # 几何量（jacobians/cell_volumes）复用 DistributedMeshAdapter 的
         # 抽取逻辑——它已经处理好"传统模式 vs 完全分布式加载"两种索引
         # 语义的区别（见该类文档），这里不重复那段判断。
-        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
-        adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+        from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
+        adapter = distributed_mesh_adapter(self.partition, dist_fc, self.mesh, self.ops)
 
         # 时间精确子步：全场同一步长（跨 rank 最小值），见 time_integration/time_accurate.py
         return uniform_time_step(self, compute_distributed_local_time_step(

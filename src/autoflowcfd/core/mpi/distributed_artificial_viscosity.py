@@ -14,12 +14,12 @@
 
 import numpy as np
 
-from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
 
 
 def _compact_state(U_local, partition, halo_exchange, dist_fc, local_mesh, ops):
     U_compact = halo_exchange.exchange(U_local)[dist_fc.perm]
-    return U_compact, DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
+    return U_compact, distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
 
 
 def distributed_artificial_diffusivity(U_local, partition, halo_exchange, dist_fc, local_mesh, ops,
