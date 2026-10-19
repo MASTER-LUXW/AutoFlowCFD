@@ -5,24 +5,16 @@
 对 `w` 做对流与扩散（边界取 `ln` 值），再加变换带出的 `Gamma_w |grad w|^2`。
 """
 
-import numpy as np
-from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 from typing import Tuple
 
+import numpy as np
 
-from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
-from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 
-from .faces import precompute_scalar_convection_geometry
 from ..sst.bounds import k_wall_zero_mask
 from ..sst.log_omega import log_omega, log_omega_gradient_source
-from .convection import compute_scalar_convection_residual
-from .diffusion import compute_scalar_diffusion_residual
-from .omega_wall import (
-    _compute_omega_wall_target,
-    _compute_open_boundary_face_mask,
-    _compute_wall_dirichlet_face_mask,
-)
+from .omega_wall import _compute_omega_wall_target
+from .primitives import CpuScalarTransport
 
 
 def turbulence_diffusivities(turb, rho_nu_t, mu):
@@ -41,15 +33,6 @@ def turbulence_diffusivities(turb, rho_nu_t, mu):
     sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
     sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
     return mu + sigma_k * rho_nu_t, mu + sigma_w * rho_nu_t
-
-
-def prepare_convection_geometry(solver, flat_face_override=None):
-    """标量对流的共享几何（只依赖平均流），见 `compute_turbulence_transport_residual`
-    的 `conv_geom` 参数。"""
-    Q = solver.state.Q
-    flat = (flat_face_override if flat_face_override is not None
-            else get_flat_face_geometry(solver.mesh, solver.ops))
-    return precompute_scalar_convection_geometry(Q[:, :, 0], Q[:, :, 1:4], solver.mesh, solver.ops, flat)
 
 
 def compute_turbulence_transport_residual(
@@ -87,87 +70,40 @@ def compute_turbulence_transport_residual(
         (dk_dt_transport, dw_dt_transport): 各自 (n_cells, n_sps)，
         输运项对 dk/dt 和 d(ln omega)/dt 的贡献
     """
-    if solver.turb_model is None or not hasattr(solver.turb_model, 'k_field'):
-        n_cells, n_sps = solver.state.U.shape[:2]
-        return np.zeros((n_cells, n_sps)), np.zeros((n_cells, n_sps))
+    from ..sst import SSTModelFR
 
     turb = solver.turb_model
-    Q = solver.state.Q
-    rho = Q[:, :, 0]  # (n_cells, n_sps)
-    vel = Q[:, :, 1:4]  # (n_cells, n_sps, 3)
-
+    if not isinstance(turb, SSTModelFR):
+        # 2026-10-19（I-62）以前非 SST 模型静默返回全零输运（湍流场只剩逐点源项弛豫，不报错）
+        raise TypeError(f"k/ln(omega) 输运残差只对 SST 族模型定义，收到 {type(turb).__name__}")
     mu = solver.mu_molecular
+    transport = CpuScalarTransport(solver, conv_geom=conv_geom, flat_face_override=flat_face_override)
+    rho = transport.rho
 
     w_log = log_omega(turb.omega_field, np)
     if grad_k is None:
-        grad_k = compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops)
+        grad_k = transport.gradient(turb.k_field)
     if grad_log_omega is None:
-        grad_log_omega = compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops)
+        grad_log_omega = transport.gradient(w_log)
 
     gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
 
-    # WALL 上 k=0 的 Dirichlet 掩码（真实修复，2026-08-21，见
-    # transport_kernel.py::extrapolate_scalar_to_faces_kernel 文档）。
-    # 数值作用点：对流项的上风 phi ghost（镜像成 -owner 强制壁面 k=0）；
-    # 扩散项自 2026-08-25 校正改梯度差形式后该掩码不再有数值影响（奇镜像
-    # 对梯度对称，见 compute_scalar_diffusion_residual 参数文档），仍传入
-    # 以保持接口一致。
-    wall_mask = _compute_wall_dirichlet_face_mask(solver)
-    # k：resolved 在物理无滑移壁面为 0，auto 为零通量（`sst/bounds.py::k_wall_zero_mask`）；omega 的壁面目标值
-    # 两种方式都施加
-    wall_mask_k = k_wall_zero_mask(wall_mask, turb.wall_treatment, np)
-
-    # 共享几何量（性能优化 2026-09-13，见 `ScalarConvectionGeometry` 文档）：
-    # k 与 omega 的对流调用此前各自重复算了一遍与标量无关的逆变质量通量
-    # 和面上 mass_flux，这里统一算一次传给两者。
-    _flat_conv = (flat_face_override if flat_face_override is not None
-                  else get_flat_face_geometry(solver.mesh, solver.ops))
-    if conv_geom is None:
-        conv_geom = prepare_convection_geometry(solver, flat_face_override)
-
-    # 开放边界（流入/流出）掩码：k/omega 的来流条件（见
-    # compute_scalar_convection_residual 的 open_boundary_face 参数文档）
-    open_mask = _compute_open_boundary_face_mask(solver, _flat_conv)
-
-    # 计算 k 的对流 + 扩散残差
-    conv_k = compute_scalar_convection_residual(
-        turb.k_field, rho, vel, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
-        flat_face_override=flat_face_override, conv_geom=conv_geom,
-        open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
-    )
-    diff_k = compute_scalar_diffusion_residual(
-        turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
-        flat_face_override=flat_face_override, gamma_band=float(mu),
-    )
+    # k 的壁面：resolved 在物理无滑移壁面 Dirichlet 0，auto 为零通量（`sst/bounds.py::k_wall_zero_mask`）。数值作用点
+    # 是对流项的上风 ghost（镜像成 -owner 强制壁面 k=0）；扩散项为梯度差形式，奇镜像对梯度对称、掩码不改变它。
+    wall_mask_k = k_wall_zero_mask(transport.wall_zero, turb.wall_treatment, np)
+    conv_k = transport.convection(turb.k_field, turb.k_inf, wall_zero_face=wall_mask_k)
+    diff_k = transport.diffusion(turb.k_field, gamma_k, wall_zero_face=wall_mask_k)
     with np.errstate(over='ignore', invalid='ignore'):
         dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
 
-    # WALL 上 omega 解析壁面值的 Dirichlet 目标（真实修复，V2.0 专家组
-    # 盲审发现，2026-08-28，见 _compute_omega_wall_target 文档）：此前
-    # omega 恒用 Neumann（零梯度）默认，是明确记录过的已知限制——现在
-    # 用 Wilcox 解析式 60*nu/(beta1*d1^2) 代替。d1 需要 solver.wall_
-    # distance 已经计算好（SST/DDES/WMLES 初始化时必然如此，见
-    # fr_solver/turbulence.py），否则 _compute_omega_wall_target 里的
-    # np.min(solver.wall_distance[...]) 会直接因 wall_distance 为 None
-    # 报错——这是有意的（没有壁面距离场，压根不该假装能算出解析壁面值）。
+    # omega 的壁面：解析壁面值作 Dirichlet 目标（`omega_wall.py::_compute_omega_wall_target`；需要壁距已设定，
+    # 没有壁距场时直接报错——不假装能算出解析壁面值），两种近壁处理方式都施加；w = ln(omega) 取它的对数
     omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(
-        solver, wall_mask, mu, rho, flat_face_override=flat_face_override,
+        solver, transport.wall_zero, mu, rho, flat_face_override=flat_face_override,
     )
-    # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf）
-    log_wall_value_face = log_omega(omega_wall_value_face, np)
-
-    # 计算 w 的对流 + 扩散残差，另加变换带出的 Gamma_w |grad w|^2（sst/log_omega.py）
-    conv_w = compute_scalar_convection_residual(
-        w_log, rho, vel, solver.mesh, solver.ops,
-        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        flat_face_override=flat_face_override, conv_geom=conv_geom,
-        open_boundary_face=open_mask, freestream_value=float(np.log(turb.omega_inf)),
-    )
-    diff_w = compute_scalar_diffusion_residual(
-        w_log, gamma_w, solver.mesh, solver.ops,
-        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        flat_face_override=flat_face_override, gamma_band=float(mu),
-    )
+    wall_w = (log_omega(omega_wall_value_face, np), has_omega_wall)
+    conv_w = transport.convection(w_log, float(np.log(turb.omega_inf)), wall_value=wall_w)
+    diff_w = transport.diffusion(w_log, gamma_w, wall_value=wall_w)
     with np.errstate(over='ignore', invalid='ignore'):
         dw_dt_transport = (conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, np)) \
             / np.maximum(rho, 1e-10)
