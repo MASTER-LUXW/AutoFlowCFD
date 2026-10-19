@@ -34,8 +34,8 @@ def conserved_to_primitive_gpu(U):
     w = U[..., 3] / rho
     E = U[..., 4] / rho
     ke = 0.5 * (u**2 + v**2 + w**2)
+    # 压力不设下限（与 CPU `fr_residual/inviscid.py::conserved_to_primitive` 一致；此前 GPU 另钳到 10 Pa，I-18）
     p = (GAMMA - 1.0) * rho * (E - ke)
-    p = cp.maximum(p, 10.0)
     return cp.stack([rho, u, v, w, p], axis=-1)
 
 

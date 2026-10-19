@@ -35,16 +35,17 @@ void ausm_up_flux(
     // 与 core/fr_kernels.py::compute_ausm_up_flux 逐字对应
     double gamma = AFCFD_GAMMA;   // core/thermo.py::GAMMA
 
-    double rhoL_s = fmax(rhoL, 1e-6);
-    double rhoR_s = fmax(rhoR, 1e-6);
-    double pL_s = fmax(pL, 10.0);
-    double pR_s = fmax(pR, 10.0);
+    // 两侧状态不钳制（与 CPU compute_ausm_up_flux 同一约定，I-18）
+    double rhoL_s = rhoL;
+    double rhoR_s = rhoR;
+    double pL_s = pL;
+    double pR_s = pR;
 
     double unL = uL * nx + vL * ny + wL * nz;
     double unR = uR * nx + vR * ny + wR * nz;
 
-    double aL = sqrt(fmax(gamma * pL_s / rhoL_s, 1e-10));
-    double aR = sqrt(fmax(gamma * pR_s / rhoR_s, 1e-10));
+    double aL = sqrt(gamma * pL_s / rhoL_s);
+    double aR = sqrt(gamma * pR_s / rhoR_s);
 
     double a_half = 0.5 * (aL + aR);
     double rho_half = 0.5 * (rhoL_s + rhoR_s);

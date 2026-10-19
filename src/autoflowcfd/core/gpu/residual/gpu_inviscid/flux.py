@@ -53,13 +53,14 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     cp = get_cupy()
     gamma = GAMMA
 
-    rhoL = cp.maximum(Q_L[..., 0], 1e-6)
+    # 两侧状态不钳制（与 CPU `fr_operators/kernels.py::compute_ausm_up_flux` 同一约定，I-18）
+    rhoL = Q_L[..., 0]
     uL, vL, wL = Q_L[..., 1], Q_L[..., 2], Q_L[..., 3]
-    pL = cp.maximum(Q_L[..., 4], 10.0)
+    pL = Q_L[..., 4]
 
-    rhoR = cp.maximum(Q_R[..., 0], 1e-6)
+    rhoR = Q_R[..., 0]
     uR, vR, wR = Q_R[..., 1], Q_R[..., 2], Q_R[..., 3]
-    pR = cp.maximum(Q_R[..., 4], 10.0)
+    pR = Q_R[..., 4]
 
     nx = normal[..., 0]
     ny = normal[..., 1]
@@ -68,8 +69,8 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     unL = uL * nx + vL * ny + wL * nz
     unR = uR * nx + vR * ny + wR * nz
 
-    aL = cp.sqrt(cp.maximum(gamma * pL / rhoL, 1e-10))
-    aR = cp.sqrt(cp.maximum(gamma * pR / rhoR, 1e-10))
+    aL = cp.sqrt(gamma * pL / rhoL)
+    aR = cp.sqrt(gamma * pR / rhoR)
 
     a_half = 0.5 * (aL + aR)
     rho_half = 0.5 * (rhoL + rhoR)

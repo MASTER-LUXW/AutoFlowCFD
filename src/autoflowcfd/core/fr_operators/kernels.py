@@ -48,11 +48,16 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     """
     gamma = GAMMA
 
-    # === 1. 正性保护与状态限制 ===
-    rhoL = max(qL[0], 1e-6)
-    rhoR = max(qR[0], 1e-6)
-    pL = max(qL[4], 10.0)   # 最小压力 10 Pa
-    pR = max(qR[4], 10.0)
+    # === 1. 两侧状态 ===
+    # 正性由正性限制器在解点、全部面通量点与过积分细点上保证（`time_integration/positivity/`
+    # ），幽灵态由这些合法状态按边界条件构造。2026-10-19（I-18）以前这里另把 rho 钳到 1e-6、p
+    # 钳到 10 Pa——带量纲的绝对下限：有量纲空气算例从不触发（p~1e5），无量纲 /
+    # 低压算例（p~1/GAMMA）则被静默改写通量；非正状态到达这里说明上游失效，应以 NaN
+    # 暴露给发散检测，而不是在通量里掩盖。
+    rhoL = qL[0]
+    rhoR = qR[0]
+    pL = qL[4]
+    pR = qR[4]
 
     uL, vL, wL = qL[1], qL[2], qL[3]
     uR, vR, wR = qR[1], qR[2], qR[3]
@@ -62,8 +67,8 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     unR = uR * normal[0] + vR * normal[1] + wR * normal[2]
 
     # 声速
-    aL = np.sqrt(max(gamma * pL / rhoL, 1e-10))
-    aR = np.sqrt(max(gamma * pR / rhoR, 1e-10))
+    aL = np.sqrt(gamma * pL / rhoL)
+    aR = np.sqrt(gamma * pR / rhoR)
 
     # === 2. 界面声速、低马赫数标度函数 ===
     # a_half 用简单算术平均（工程上常见的近似，非 Liou 原文的临界声速构造，

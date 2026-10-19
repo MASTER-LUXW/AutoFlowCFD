@@ -35,17 +35,23 @@ def _build_mesh():
     return build_channel_mesh_prism(order=0, nx=4, ny=3, nz=2, Lx=2.0, H=1.0, Lz=0.5)
 
 
+def _density_code(n):
+    """由面法向唯一决定的正幽灵密度（各分量取整后编码；恒为正：最小 5000 - 1110）。
+
+    2026-10-19 以前编码为 1000 + ... + round(nz)*1000，法向 (0,0,-1) 的面得到密度 0——非物理的幽灵态，当时被 AUSM+up
+    入口的 1e-6 下限静默改写；那条下限删除后（I-18）通量如实给出 NaN。
+    """
+    return 5000.0 + round(n[0]) * 10.0 + round(n[1]) * 100.0 + round(n[2]) * 1000.0
+
+
 class _NormalEncodingGhostProvider(GhostStateProvider):
-    """合成 ghost_provider：返回值只由该面自身法向唯一决定（用密度分量
-    编码 round(nx)/round(ny)/round(nz)），不同法向的两个面必然得到不同
-    的幽灵密度——足以区分"按面索引"（正确）与"按 owner 单元索引"
-    （此前的 bug，后一个面会覆盖前一个面的结果）两种实现。"""
+    """合成 ghost_provider：返回值只由该面自身法向唯一决定（用密度分量编码，`_density_code`），不同法向的两个面
+    必然得到不同的幽灵密度——足以区分"按面索引"（正确）与"按 owner 单元索引"（此前的 bug，后一个面会覆盖前一个面
+    的结果）两种实现。"""
 
     def __call__(self, face_idx, Q_owner_fp, true_normal):
-        n = true_normal[0]
-        code = 1000.0 + round(n[0]) * 10.0 + round(n[1]) * 100.0 + round(n[2]) * 1000.0
         ghost = Q_owner_fp.copy()
-        ghost[:, 0] = code
+        ghost[:, 0] = _density_code(true_normal[0])
         return ghost
 
 
@@ -89,7 +95,7 @@ class TestGhostStateIndexedByFaceNotByCell:
         expected_per_face = {}
         for f in corner_faces:
             n = unit_normals[f]
-            expected_per_face[f] = 1000.0 + round(n[0]) * 10.0 + round(n[1]) * 100.0 + round(n[2]) * 1000.0
+            expected_per_face[f] = _density_code(n)
 
         distinct_expected = set(expected_per_face.values())
         assert len(distinct_expected) >= 2, (
