@@ -68,6 +68,22 @@ def _merge_single_cell_halves(faces, mixed, pn_cell, sec_cell, mask, interp, ext
     return extra_cells[keep], np.ascontiguousarray(extra_mats[keep])
 
 
+def _require_native_face_codes(face_conn: FRFaceConnectivity) -> None:
+    """全部面记录（边界面只看 owner 侧）的面编码必须是原生面编码 [6,15)：四面体 [6,10)、棱柱 [10,15)。
+
+    numba kernel 只实现原生基的插值；面编码 0~5（坍缩立方体面）随坍缩基一并删除，若出现说明面连接关系没有经过
+    原生面编码翻译，必须报错而不是在 kernel 里静默走错分支。
+    """
+    from autoflowcfd.grid.connectivity.face_connectivity import NATIVE_PRISM_FACE_CODE_RANGE, NATIVE_TET_FACE_CODE_RANGE
+
+    lo, hi = NATIVE_TET_FACE_CODE_RANGE[0], NATIVE_PRISM_FACE_CODE_RANGE[1]
+    codes = [np.asarray(face_conn.owner_cube_face),
+             np.asarray(face_conn.neighbor_cube_face)[~np.asarray(face_conn.is_boundary, dtype=bool)]]
+    bad = sum(int(np.count_nonzero((c < lo) | (c >= hi))) for c in codes)
+    if bad:
+        raise ValueError(f"{bad} 个面记录的面编码不在原生区间 [{lo},{hi})：面连接关系没有翻译成原生面编码")
+
+
 def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFluxPointGeometry]:
     """为 face_conn 里的每个面预计算 Flux Points 几何（正确处理棱柱四边形
     侧面被拆分成 1~2 个真实相邻单元的情形，见模块文档）。"""
@@ -123,9 +139,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     )
     node_coords = np.ascontiguousarray(mesh._node_coords.astype(np.float64))
     n_sps = n1d ** 3
-    binv = build_basis_inverses(face_conn, n1d, sps_1d)
-    v_sps_inv_tet = binv.v_sps_inv_tet
-    v_sps_inv_prism = binv.v_sps_inv_prism
+    _require_native_face_codes(face_conn)
+    binv = build_basis_inverses(n1d - 1)
     v_sps_inv_native = binv.v_sps_inv_native
     native_mode_i = binv.native_mode_i
     native_mode_j = binv.native_mode_j
@@ -163,8 +178,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         node_coords,
         np.ascontiguousarray(owner_primary),
         np.ascontiguousarray(neighbor_primary),
-        v_sps_inv_tet,
-        v_sps_inv_prism,
         v_sps_inv_native,
         native_mode_i, native_mode_j, native_mode_k,
         v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
@@ -359,7 +372,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             np.ascontiguousarray(face_conn.face_translation.astype(np.float64)),
             prism_conn_flat, tet_conn_flat, node_coords,
             _nb_fc, _ow_fc,
-            v_sps_inv_tet, v_sps_inv_prism,
             v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
             v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
             _nb_interp, _ow_interp,

@@ -51,7 +51,7 @@ from typing import List, Tuple
 import numpy as np
 from numba import njit
 
-from ..collapsed_basis import jacobi_polynomial, grad_jacobi_polynomial
+from ..jacobi import jacobi_polynomial, grad_jacobi_polynomial
 
 
 def restricted_tet_modes(order: int) -> List[Tuple[int, int, int]]:

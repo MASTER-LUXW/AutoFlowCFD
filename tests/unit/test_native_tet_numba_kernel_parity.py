@@ -11,20 +11,15 @@
 locate_nb`/`_native_tet_face_points_nb`/`_native_interp_matrix_nb`）并
 独立验证数值一致——本文件直接调用核函数（构造最小合成连接数组，绕开
 完整网格加载/求解器接入，那是仍然独立、尚未做的后续工作），覆盖两类
-真实拓扑：四面体(native)-四面体(native)、四面体(native)-棱柱(collapsed)。
+真实拓扑：四面体(native)-四面体(native)、四面体(native)-棱柱(native)。
 """
 
 import numpy as np
-from scipy.linalg import lu_solve
 
 from autoflowcfd.fr.face_flux_points.kernel import build_fp_newton_parallel
-from autoflowcfd.fr.face_flux_points import (
-    _get_v_sps_lu_native,
-    build_cross_interp,
-    native_tet_face_points_physical,
-    face_ref_grid,
-)
-from autoflowcfd.fr.face_flux_points.locate import map_ref_points
+from autoflowcfd.fr.face_flux_points import build_cross_interp, native_tet_face_points_physical
+from autoflowcfd.fr.face_flux_points.basis_inverses import build_basis_inverses
+from autoflowcfd.fr.face_flux_points.native_geometry_nb import native_prism_cap_points_nb
 from autoflowcfd.fr.quadrature_points import gauss_legendre
 
 
@@ -46,23 +41,9 @@ def _run_kernel_single_face(
     n1d = order + 1
     sps_1d, _ = gauss_legendre(n1d)
     n_fp = n1d * n1d
-    n_sps = n1d ** 3
 
-    lu_native, modes_native = _get_v_sps_lu_native(order)
-    n_native = len(modes_native)
-    v_sps_inv_native = np.ascontiguousarray(lu_solve(lu_native, np.eye(n_native)).T)
-    native_mode_i = np.array([m[0] for m in modes_native], dtype=np.int32)
-    native_mode_j = np.array([m[1] for m in modes_native], dtype=np.int32)
-    native_mode_k = np.array([m[2] for m in modes_native], dtype=np.int32)
-    # 坍缩坐标 V_sps_inv 必须真算（不能用零占位）：即便本测试的 owner/
-    # neighbor 至少一侧恒为 native，另一侧（棱柱或坍缩四面体）仍然是
-    # 真实的坍缩坐标插值目标，与 face_flux_points/merge.py 生产调用处
-    # 完全一样的构造方式——这里只有真正"整个网格不含该单元类型"时才
-    # 应该用零占位（那种情况下对应分支确实永远不会被执行到）。
-    from autoflowcfd.fr.face_flux_points import _get_v_sps_lu
-    I_n = np.eye(n_sps)
-    v_sps_inv_tet = np.ascontiguousarray(lu_solve(_get_v_sps_lu("tet", n1d, sps_1d), I_n).T)
-    v_sps_inv_prism = np.ascontiguousarray(lu_solve(_get_v_sps_lu("prism", n1d, sps_1d), I_n).T)
+    # 与生产（face_flux_points/merge.py）同一个构造：原生四面体与原生棱柱的 V^{-1} 与模态索引
+    b = build_basis_inverses(order)
 
     result = build_fp_newton_parallel(
         1, n_prism, n1d, n_fp,
@@ -76,13 +57,8 @@ def _run_kernel_single_face(
         np.ascontiguousarray(tet_conn.ravel().astype(np.int32)),
         np.ascontiguousarray(node_coords.astype(np.float64)),
         np.array([True]), np.array([True]),
-        v_sps_inv_tet, v_sps_inv_prism,
-        v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
-        # 原生**棱柱**的零占位（本测试只造原生四面体面，编码 [10,15)
-        # 不出现，kernel 内对应分支永不执行 —— 与生产里
-        # `face_flux_points/merge.py` 的 `has_native_prism=False` 同一路径）
-        np.zeros((0, 0)), np.zeros(0, dtype=np.int32),
-        np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32),
+        b.v_sps_inv_native, b.native_mode_i, b.native_mode_j, b.native_mode_k,
+        b.v_sps_inv_np, b.np_mode_i, b.np_mode_j, b.np_mode_k,
         # 两侧坍缩顶点槽位 0：Python 参考实现按槽位 0 生成通量点
         np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64),
     )
@@ -139,12 +115,9 @@ def test_native_tet_tet_interface_kernel_matches_python_reference():
 
 
 def test_native_tet_prism_interface_kernel_matches_python_reference():
-    """棱柱(collapsed)三角形封盖面与相邻 native 四面体共享同一个物理
-    面——核函数的坍缩坐标分支（棱柱侧）与 native 分支（四面体侧）必须
-    分别与各自的纯 Python 参考实现一致，且互不干扰彼此的 axis/side
-    与 excluded_vertex 语义（同一个面记录里 owner 是坍缩坐标、neighbor
-    是 native，两套语义必须在同一次核函数调用里同时正确）。几何与
-    `test_native_tet_prism_cross_basis.py` 完全一致的共享三角形构造。"""
+    """原生棱柱三角形封盖面（c=-1，面编码 10）与相邻原生四面体共享同一个物理面——核函数的棱柱侧（坍缩立方体面
+    Newton 定位 + 原生棱柱模态）与四面体侧必须分别与各自的纯 Python 参考实现一致，且同一个面记录里两侧的
+    (axis,side) 与 excluded_vertex 语义在同一次核函数调用里同时正确。"""
     order = 2
     prism_nodes = np.array([
         [0, 0, 0], [1, 0, 0], [0, 1, 0],
@@ -161,12 +134,11 @@ def test_native_tet_prism_interface_kernel_matches_python_reference():
     area = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
     normal = np.array([0.0, 0.0, 1.0])
 
-    # 棱柱 owner 的 c=-1 面（code 4）；四面体 neighbor 的 excluded_vertex=3
-    # 面（code 6+3=9）——与共享三角形 (tet_nodes[0:3]==prism_nodes[0:3])
-    # 对应，见模块文档。
+    # 棱柱 owner 的 c=-1 封盖（原生面编码 10）；四面体 neighbor 的 excluded_vertex=3 面（编码 6+3=9），
+    # 与共享三角形 (tet_nodes[0:3]==prism_nodes[0:3]) 对应。
     result, n1d, sps_1d = _run_kernel_single_face(
         order, n_prism, prism_conn, tet_conn, node_coords,
-        owner_cell=0, owner_code=4, neighbor_cell=1, neighbor_code=9,
+        owner_cell=0, owner_code=10, neighbor_cell=1, neighbor_code=9,
         area=area, normal=normal,
     )
     (nb_fc, nb_resid, ow_fc, ow_resid, nb_interp, ow_interp,
@@ -176,8 +148,8 @@ def test_native_tet_prism_interface_kernel_matches_python_reference():
     assert ow_cell_id[0] == 0
 
     char_length = float(np.sqrt(max(area, 1e-300)))
-    ref_o = face_ref_grid(n1d, 2, -1.0, sps_1d)
-    phys_o = map_ref_points(True, ref_o, prism_nodes)
+    # owner（棱柱封盖）的通量点：kernel 自己的生成函数（cap 0 = c=-1 封盖，坍缩顶点槽位 0）
+    phys_o = native_prism_cap_points_nb(n1d, 0, 0, prism_nodes, sps_1d)
     interp_ref_nb, _ = build_cross_interp(
         mesh, n1d, sps_1d, target_cell=1, target_face_code=9,
         source_phys=phys_o, char_length=char_length,
@@ -186,7 +158,7 @@ def test_native_tet_prism_interface_kernel_matches_python_reference():
 
     phys_n = native_tet_face_points_physical(n1d, 3, tet_nodes, sps_1d)
     interp_ref_ow, _ = build_cross_interp(
-        mesh, n1d, sps_1d, target_cell=0, target_face_code=4,
+        mesh, n1d, sps_1d, target_cell=0, target_face_code=10,
         source_phys=phys_n, char_length=char_length,
     )
     np.testing.assert_allclose(ow_interp[0], interp_ref_ow, atol=1e-10)

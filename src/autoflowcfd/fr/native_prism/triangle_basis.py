@@ -61,7 +61,7 @@ import numpy as np
 # 怎么取"无关，是同一个数学对象；再抄一份等于多一个要同步的事实来源）。
 from numba import njit
 
-from ..collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
+from ..jacobi import grad_jacobi_polynomial, jacobi_polynomial
 from ..warp_blend_nodes import _evalshift
 
 #: `Nodes2D.m` 的 alpha 优化表（三角形专用，与三维那张表不同）。

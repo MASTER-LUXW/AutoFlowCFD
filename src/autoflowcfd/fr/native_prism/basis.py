@@ -49,7 +49,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from ..collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
+from ..jacobi import grad_jacobi_polynomial, jacobi_polynomial
 from .triangle_basis import (
     eval_tri_modes,
     restricted_tri_modes,

@@ -33,7 +33,7 @@
 import numpy as np
 from numba import njit
 
-from ..collapsed_basis import jacobi_polynomial
+from ..jacobi import jacobi_polynomial
 from .triangle_basis import simplex2d_value
 
 __all__ = ["native_prism_interp_matrix_nb"]

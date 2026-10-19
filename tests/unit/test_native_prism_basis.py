@@ -30,7 +30,6 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.collapsed_basis import build_collapsed_diff_matrices
 from autoflowcfd.fr.native_prism.basis import (
     build_native_prism_nodes,
     build_native_prism_operators,
@@ -43,18 +42,8 @@ from autoflowcfd.fr.native_prism.triangle_basis import (
     restricted_tri_modes,
     warp_blend_nodes_2d,
 )
-from autoflowcfd.fr.quadrature_points import gauss_legendre
 
 _ORDERS = [1, 2, 3, 4]
-
-
-def _collapsed_prism_D(order):
-    """同阶坍缩棱柱微分矩阵（对照组）。"""
-    n1d = order + 1
-    s1, _ = gauss_legendre(n1d)
-    xx, yy, zz = np.meshgrid(s1, s1, s1, indexing="ij")
-    cube = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-    return build_collapsed_diff_matrices("prism", order, cube)
 
 
 class TestTriangleNodes:
@@ -157,60 +146,37 @@ class TestOperatorExactness:
         assert worst < 1e-14, f"order={order}: max|D@1| = {worst:.3e}"
 
 
-class TestImprovementOverCollapsed:
-    """相对坍缩基的**定量收益** —— 这次修复的意义所在。
+class TestOperatorQuality:
+    """原生棱柱微分算子的量级与常数零化 —— 原生基取代坍缩基的依据（坍缩棱柱基已于 2026-09-23 删除，对照数据保留在
+    这里：同阶 `max|D_collapsed| / max|D_native|` 实测 P1 2.4 / P2 8.7 / P3 115 / P4 4405，坍缩基每阶增长比 > 8 即指数增长）。
+    判据改为对原生基的绝对上界，量级一旦退化（例如节点集或模态族改错）就失败。"""
 
-    判据带下界：若某天收益消失（比例掉到 1 附近），说明要么坍缩基被改好
-    了、要么原生实现退化了，两种情况都必须重新评估而不是让测试静默通过。
-    """
-
-    #: 实测 `max|D_collapsed| / max|D_native|`：P1 2.4 / P2 8.7 / P3 115 /
-    #: P4 4405。下界留足余量。
-    _MIN_GAIN = {1: 1.5, 2: 4.0, 3: 30.0, 4: 500.0}
+    #: 实测 `max|D_native|`：P1 0.866 / P2 2.582 / P3 4.860 / P4 7.702（D@1 残余 1.1e-16 ~ 8.9e-16），上界留 1.5 倍余量
+    _MAX_D = {1: 1.3, 2: 3.9, 3: 7.3, 4: 11.6}
 
     @pytest.mark.parametrize("order", _ORDERS)
-    def test_operator_magnitude_is_far_smaller(self, order):
+    def test_operator_magnitude_is_bounded(self, order):
         _, dn = build_native_prism_operators(order)
-        dc = _collapsed_prism_D(order)
-        mag_n = float(np.max(np.abs(dn)))
-        mag_c = float(np.max(np.abs(dc)))
-        gain = mag_c / mag_n
-        assert gain >= self._MIN_GAIN[order], (
-            f"order={order}: max|D| 只改善了 {gain:.1f} 倍 "
-            f"(native {mag_n:.3f} vs collapsed {mag_c:.3f})，"
-            f"低于已记录的收益")
+        mag = float(np.max(np.abs(dn)))
+        assert mag <= self._MAX_D[order], f"order={order}: max|D| = {mag:.3f} 超过上界 {self._MAX_D[order]}"
 
-    def test_native_magnitude_grows_linearly_not_exponentially(self):
-        """native 的 `max|D|` 随阶数线性增长；坍缩的是指数增长。
-
-        这条是"为什么高阶尤其受益"的依据：P4 上收益已经是 4405 倍。
-        """
-        mags_n = [float(np.max(np.abs(build_native_prism_operators(p)[1])))
-                  for p in _ORDERS]
-        mags_c = [float(np.max(np.abs(_collapsed_prism_D(p)))) for p in _ORDERS]
-        ratio_n = [mags_n[i + 1] / mags_n[i] for i in range(len(mags_n) - 1)]
-        ratio_c = [mags_c[i + 1] / mags_c[i] for i in range(len(mags_c) - 1)]
-        assert max(ratio_n) < 4.0, f"native 每阶增长比 {ratio_n} 不像线性"
-        assert max(ratio_c) > 8.0, f"collapsed 每阶增长比 {ratio_c} 不像指数"
+    def test_magnitude_grows_linearly_not_exponentially(self):
+        mags = [float(np.max(np.abs(build_native_prism_operators(p)[1]))) for p in _ORDERS]
+        ratios = [mags[i + 1] / mags[i] for i in range(len(mags) - 1)]
+        assert max(ratios) < 4.0, f"原生基每阶增长比 {ratios} 不像线性"
 
     @pytest.mark.parametrize("order", [2, 3, 4])
     def test_fewer_degrees_of_freedom(self, order):
         """自由度少 33~40% —— 顺带缓解 P2 的内存天花板。"""
         n_native = native_prism_n_sps(order)
-        n_collapsed = (order + 1) ** 3
-        assert n_native < n_collapsed
-        saving = 1.0 - n_native / n_collapsed
+        n_tensor = (order + 1) ** 3          # 坍缩基 / 张量积宽度
+        assert n_native < n_tensor
+        saving = 1.0 - n_native / n_tensor
         assert saving > 0.3, f"order={order}: 只省了 {100 * saving:.1f}%"
 
     @pytest.mark.parametrize("order", _ORDERS)
-    def test_constant_annihilation_residual_is_no_worse(self, order):
-        """原生基的 `D@1` 残余不得比坍缩基差。"""
+    def test_constant_annihilation_residual_is_roundoff(self, order):
         _, dn = build_native_prism_operators(order)
-        dc = _collapsed_prism_D(order)
-        one_n = np.ones(dn.shape[0])
-        one_c = np.ones(dc.shape[0])
-        rn = max(float(np.max(np.abs(dn[:, :, m] @ one_n))) for m in range(3))
-        rc = max(float(np.max(np.abs(dc[:, :, m] @ one_c))) for m in range(3))
-        assert rn <= max(rc, 1e-15), (
-            f"order={order}: native 的 D@1 残余 {rn:.3e} 比 collapsed 的 "
-            f"{rc:.3e} 还差")
+        one = np.ones(dn.shape[0])
+        r = max(float(np.max(np.abs(dn[:, :, m] @ one))) for m in range(3))
+        assert r <= 1e-13, f"order={order}: D@1 残余 {r:.3e}"

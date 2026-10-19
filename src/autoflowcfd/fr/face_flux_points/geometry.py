@@ -2,8 +2,7 @@
 AutoFlowCFD - FR 单元-面 Flux Points 几何预计算：核心数值原语 (V2.0 Tier-0)
 
 本模块提供 Flux Points 几何构建所需的底层数值原语：
-1. 1D 边界外插权重、SPs->FP 张量外插（原生网格对齐场景）。
-2. **精确点位定位**：对 owner 的每个 FP 物理坐标，在 neighbor 的对应局部
+1. **精确点位定位**：对 owner 的每个 FP 物理坐标，在 neighbor 的对应局部
    面上用 Newton 迭代反解出 neighbor 的精确切向坐标，使曲边映射恰好给出
    该物理点；再用通用 Lagrange 插值算出 neighbor 解在该精确坐标处的取值。
    不假设两侧网格对齐（第一版"最近邻置换"假设在真实网格上被证伪：owner/
@@ -25,8 +24,6 @@ from typing import Dict, List
 
 import numpy as np
 
-from autoflowcfd.fr.matrix_operators import compute_interpolation_matrix
-from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad, prism_modal_basis_and_grad
 from .locate import newton_locate_on_face
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
@@ -83,52 +80,9 @@ CUBE_FACE_AXIS_SIDE = {
 
 ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，供 face_flux_points/merge.py 判断是否需要记录容忍案例
 
-# 模态 Vandermonde 矩阵 V_sps 的 LU 分解缓存，键为 (cell_type, n1d)：
-# ref_cube_sps（sps_1d 的张量积）与模态基函数定义只依赖单元类型和阶数，
-# 与具体是哪个物理单元无关，全网格所有同类型同阶数单元共享同一份分解，
-# 缓存避免对每一个面都重新分解一次 n_sps x n_sps 矩阵（真实网格上有
-# 数十万个面）。用 LU 分解 + lu_solve，而不是显式求逆
-# （V_target @ np.linalg.inv(V_sps)）：V_sps 的条件数随阶数快速增长
-# （collapsed_basis.py 文档实测 N=2 时 ~1e5，N=3 时 ~2e9），显式求逆会把
-# 这个条件数直接乘进舍入误差——受控数值实验验证：用显式逆重构常数场
-# （V_sps^{-1}@ones 应恒为 e0）在 N=3 时残差达 2.8e-8，改用 lu_solve 精确
-# 到 0.0（机器精度意义上的恰好相等）。真实网格上曾因此导致均匀自由
-# 流场保持性测试在 P=2/P=3 均略微超出容差（P=2: 2.2e-7 vs 容差 1e-7），
-# 换成 lu_solve 后消除。
+# 原生四面体体积 Vandermonde 的 LU 分解缓存（键为阶数）：用 LU 分解 + lu_solve 而不是显式求逆——显式求逆会把
+# Vandermonde 的条件数直接乘进舍入误差（实测用显式逆重构常数场在 P3 残差 2.8e-8，lu_solve 精确到 0.0）。
 _V_SPS_LU_CACHE: Dict[tuple, tuple] = {}
-
-
-def _get_v_sps_lu(cell_type: str, n1d: int, sps_1d: np.ndarray):
-    key = (cell_type, n1d)
-    cached = _V_SPS_LU_CACHE.get(key)
-    if cached is not None:
-        return cached
-    ga, gb, gc = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    a_sps, b_sps, c_sps = ga.ravel(), gb.ravel(), gc.ravel()
-    order = n1d - 1
-    if cell_type == "tet":
-        V_sps, _, _, _ = tet_modal_basis_and_grad(a_sps, b_sps, c_sps, order)
-    else:
-        V_sps, _, _, _ = prism_modal_basis_and_grad(a_sps, b_sps, c_sps, order)
-    from scipy.linalg import lu_factor
-    lu_piv = lu_factor(V_sps.T)  # 转置：下面按 V_sps.T @ X = V_target.T 求解
-    _V_SPS_LU_CACHE[key] = lu_piv
-    return lu_piv
-
-
-def compute_1d_boundary_weights(sps_1d: np.ndarray) -> Dict[float, np.ndarray]:
-    """计算把 1D SPs 上的值外插到边界 x=-1 和 x=+1 的 Lagrange 权重向量。"""
-    L = compute_interpolation_matrix(sps_1d, np.array([-1.0, 1.0]))
-    return {-1.0: L[0], 1.0: L[1]}
-
-
-def extrapolate_to_face(data: np.ndarray, n1d: int, axis: int, weights: np.ndarray) -> np.ndarray:
-    """把 (n1d^3, ...) 的 SPs 数据沿指定计算方向外插到该方向边界，得到 (n1d^2, ...) 的 FP 数据。"""
-    trailing_shape = data.shape[1:]
-    reshaped = data.reshape((n1d, n1d, n1d) + trailing_shape)
-    moved = np.moveaxis(reshaped, axis, 0)
-    fp = np.tensordot(weights, moved, axes=([0], [0]))
-    return fp.reshape((n1d * n1d,) + trailing_shape)
 
 
 @dataclass
@@ -289,8 +243,7 @@ def build_cross_interp(
         < NATIVE_TET_FACE_CODE_RANGE[1])
     # 原生棱柱目标面（编码 [10,15)）：**定位**走坍缩的 Newton（两条基的
     # 几何映射逐位恒等，见 fr/native_prism/__init__.py），只有最后求
-    # Vandermonde 时换成原生的 —— 与 numba 侧
-    # `interp_matrix_from_cube_coords_nb` 完全同一条逻辑。
+    # Vandermonde 时换成原生的 —— 与 numba kernel 同一条逻辑。
     is_prism_native = is_prism and (
         NATIVE_PRISM_FACE_CODE_RANGE[0] <= target_face_code
         < NATIVE_PRISM_FACE_CODE_RANGE[1])
@@ -328,14 +281,6 @@ def build_cross_interp(
         is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
     )
 
-    # 用与 fr/collapsed_basis.py::build_collapsed_boundary_extrap（owner
-    # 侧自身外插用的同一套算子）一致的坍缩坐标模态基插值，而不是朴素 1D
-    # 张量积 Lagrange——此前两侧用不同插值空间，在同一组物理点上最大
-    # 相差达 2070（tet c=-1 面，P=2），对光滑场造成约 5% 的伪界面跳跃，
-    # 被当作真实间断喂进黎曼求解器，破坏守恒性且凭空注入数值耗散
-    # （G-04 数值审计发现）。现在两侧统一用同一个模态 Vandermonde
-    # 插值算子 V_target @ V_sps^{-1}，在共形界面上对同一份 SPs 数据
-    # 精确给出一致的取值。
     other_axes = [a for a in range(3) if a != target_axis]
     n_pts = source_phys.shape[0]
     n_sps = n1d**3
@@ -380,16 +325,6 @@ def build_cross_interp(
                 f"({n_pts}, {n_sps})")
         return interp, final_resid
 
-    cell_type = "prism" if is_prism else "tet"
-    if cell_type == "tet":
-        V_target, _, _, _ = tet_modal_basis_and_grad(abc[:, 0], abc[:, 1], abc[:, 2], order)
-    else:
-        V_target, _, _, _ = prism_modal_basis_and_grad(abc[:, 0], abc[:, 1], abc[:, 2], order)
-
-    from scipy.linalg import lu_solve
-    lu_piv = _get_v_sps_lu(cell_type, n1d, sps_1d)
-    # interp = V_target @ V_sps^{-1}  <=>  interp.T = V_sps^{-T} @ V_target.T
-    #        <=>  solve V_sps.T @ X = V_target.T for X = interp.T
-    interp = lu_solve(lu_piv, V_target.T).T
-    assert interp.shape == (n_pts, n_sps)
-    return interp, final_resid
+    raise ValueError(
+        f"目标面编码 {target_face_code} 不是原生面编码（四面体 [6,10)、棱柱 [10,15)）：坍缩立方体面编码 0~5 随坍缩基"
+        f"一并删除，面连接关系必须先翻译成原生面编码")

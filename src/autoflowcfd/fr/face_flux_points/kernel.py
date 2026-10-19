@@ -18,9 +18,10 @@ from .face_code_tables import (
 from .ref_geometry_nb import (
     _face_ref_grid_nb, _map_ref_nb, _newton_locate_nb,
 )
+from autoflowcfd.fr.native_prism.interp_numba import native_prism_interp_matrix_nb
 from .native_geometry_nb import (
     _native_tet_face_points_nb, _tet_native_locate_nb,
-    _native_interp_matrix_nb, interp_matrix_from_cube_coords_nb,
+    _native_interp_matrix_nb,
     native_prism_cap_points_nb,
 )
 
@@ -50,7 +51,6 @@ def build_fp_newton_parallel(
     area, normal, face_translation,
     prism_conn, tet_conn, node_coords,
     owner_primary, neighbor_primary,
-    v_sps_inv_tet, v_sps_inv_prism,
     v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
     v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
     owner_slot, neighbor_slot,
@@ -139,14 +139,13 @@ def build_fp_newton_parallel(
         # 原生面"，而两者要分派到**不同**的算子组；按 `code - 6` 去取四面体
         # 的表会拿到 4~8 行，而那些数组只有 4 行（numba 不做边界检查）。
         o_is_nat_tet = _NATIVE_TET_LO <= oc_code < _NATIVE_TET_HI
-        o_is_nat_prism = oc_code >= _NATIVE_PRISM_LO
         if o_is_nat_tet:
             # 四面体原生面没有 (axis,side) 语义（axis 槽位复用成
             # excluded_vertex），这里给占位值；真正的分派在下面各分支里。
             o_axis = 0
             o_side = -1.0
         else:
-            # 坍缩面与**原生棱柱面**都用真实 (axis,side)：原生棱柱面的通量点
+            # 原生棱柱面用真实 (axis,side)：原生棱柱面的通量点
             # 与坍缩立方体面的通量点已验证是同一批物理点、同一顺序（三项
             # 实测机器精度，见 fr/native_prism/__init__.py 模块文档），所以
             # 面点生成与 Newton 定位继续走坍缩那条，只有插值矩阵换成原生。
@@ -171,7 +170,6 @@ def build_fp_newton_parallel(
         nc = neighbor_cell[f]
         nc_code = neighbor_cube_face[f]
         n_is_nat_tet = _NATIVE_TET_LO <= nc_code < _NATIVE_TET_HI
-        n_is_nat_prism = nc_code >= _NATIVE_PRISM_LO
         if n_is_nat_tet:
             n_axis = 0
             n_side = -1.0
@@ -260,7 +258,7 @@ def build_fp_newton_parallel(
                 fc, rst_nb, rs = _tet_native_locate_nb(
                     n_nd, nc_code - _NATIVE_TET_LO, search)
             else:
-                # 坍缩面与原生棱柱面共用这条（几何映射逐位恒等）。
+                # 原生棱柱面：坍缩立方体面的 Newton 定位（几何映射逐位恒等）。
                 fc, rs = _newton_locate_nb(n_is_prism, n_nd, n_axis, n_side, search, cl)
             for p in range(n_fp):
                 nb_fc[f, p, 0] = fc[p, 0]
@@ -286,12 +284,8 @@ def build_fp_newton_parallel(
                     )
                     nb_interp[f] = interp_native
                 else:
-                    # 坍缩面与**原生棱柱面**共用一条：两者的目标点都由坍缩
-                    # Newton 给出（几何映射逐位恒等），唯一差别是求哪个
-                    # Vandermonde —— 由 `interp_matrix_from_cube_coords_nb`
-                    # 内部按 `is_native_prism` 分派，见那边文档（它同时替掉了
-                    # 本文件与 ms kernel 里原先 6 处逐字重复的"构造 V_t + 手写
-                    # 矩阵乘"）。
+                    # 原生棱柱面：目标点由坍缩立方体面的 Newton 给出（两条基的几何映射逐位恒等，
+                    # 见 fr/native_prism/__init__.py），在 (a,b,c) 上直接求原生棱柱模态
                     abc = np.empty((n_fp, 3))
                     for p in range(n_fp):
                         abc[p, n_axis] = n_side
@@ -300,10 +294,7 @@ def build_fp_newton_parallel(
                             if ax != n_axis:
                                 abc[p, ax] = fc[p, ix2]
                                 ix2 += 1
-                    nb_interp[f] = interp_matrix_from_cube_coords_nb(
-                        abc, n_is_prism, n_is_nat_prism, n1d, n_sps,
-                        v_sps_inv_prism, v_sps_inv_tet,
-                        v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+                    nb_interp[f] = native_prism_interp_matrix_nb(abc, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
                 nb_cell_id[f] = nc
 
         # ---- Owner 侧 Newton (neighbor_primary 才需要) ----
@@ -360,10 +351,7 @@ def build_fp_newton_parallel(
                             if ax != o_axis:
                                 abc_o[p, ax] = fc_o[p, ix2]
                                 ix2 += 1
-                    ow_interp[f] = interp_matrix_from_cube_coords_nb(
-                        abc_o, o_is_prism, o_is_nat_prism, n1d, n_sps,
-                        v_sps_inv_prism, v_sps_inv_tet,
-                        v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+                    ow_interp[f] = native_prism_interp_matrix_nb(abc_o, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
                 ow_cell_id[f] = oc
 
     return (nb_fc, nb_resid, ow_fc, ow_resid,

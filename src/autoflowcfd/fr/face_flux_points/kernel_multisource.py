@@ -9,7 +9,7 @@ AutoFlowCFD - Multi-source 面插值矩阵 numba 并行 kernel
 - 坐标变换：_FACE_AXIS, _FACE_SIDE
 - 物理映射：_face_ref_grid_nb, _map_ref_nb
 - Newton 迭代：_newton_locate_nb
-- 模态基：经 `interp_matrix_from_cube_coords_nb` 间接使用（三条基共用一个入口）
+- 插值矩阵：原生四面体 `_native_interp_matrix_nb`、原生棱柱 `native_prism_interp_matrix_nb`
 """
 
 import numpy as np
@@ -23,12 +23,13 @@ from .kernel import (
     _newton_locate_nb,
 )
 from .face_code_tables import (
-    _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
+    _NATIVE_TET_HI, _NATIVE_TET_LO,
 )
+from autoflowcfd.fr.native_prism.interp_numba import native_prism_interp_matrix_nb
 from .native_geometry_nb import (
     _tet_native_locate_nb,
     _native_alpha_beta_to_rst_nb,
-    _native_interp_matrix_nb, interp_matrix_from_cube_coords_nb,
+    _native_interp_matrix_nb,
 )
 
 
@@ -45,7 +46,6 @@ def build_ms_interp_parallel(
     area_arr, face_translation_arr,
     prism_conn, tet_conn, node_coords,
     nb_fc, ow_fc,
-    v_sps_inv_tet, v_sps_inv_prism,
     v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
     v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
     nb_interp, ow_interp,
@@ -135,7 +135,6 @@ def build_ms_interp_parallel(
         # 加了原生棱柱编码 [10,15) 之后必须区分，否则按 `code-6` 会越界
         # 取四面体的表；numba 不做边界检查。见主 kernel 同一处说明。
         pn_is_native_tet = _NATIVE_TET_LO <= pn_code < _NATIVE_TET_HI
-        pn_is_native_prism = pn_code >= _NATIVE_PRISM_LO
         if pn_is_native_tet:
             rst_pn = _native_alpha_beta_to_rst_nb(pn_code - _NATIVE_TET_LO, nb_fc[f])
             interp_pn = _native_interp_matrix_nb(
@@ -145,11 +144,9 @@ def build_ms_interp_parallel(
                 if nb_mask[f, p]:
                     nb_interp[f, p] = interp_pn[p]
         else:
-            # 坍缩面与**原生棱柱面**共用一条（见主 kernel 同一处说明与
-            # `interp_matrix_from_cube_coords_nb` 文档）。
+            # 原生棱柱面（见主 kernel 同一处说明）
             pn_axis = _FACE_AXIS[pn_code]
             pn_side = _FACE_SIDE[pn_code]
-            pn_is_prism = pn_c < n_prism
             abc_n = np.empty((n_fp, 3))
             for p in range(n_fp):
                 abc_n[p, pn_axis] = pn_side
@@ -158,10 +155,7 @@ def build_ms_interp_parallel(
                     if ax != pn_axis:
                         abc_n[p, ax] = nb_fc[f, p, ix2]
                         ix2 += 1
-            interp_pn = interp_matrix_from_cube_coords_nb(
-                abc_n, pn_is_prism, pn_is_native_prism, n1d, n_sps,
-                v_sps_inv_prism, v_sps_inv_tet,
-                v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+            interp_pn = native_prism_interp_matrix_nb(abc_n, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
             for p in range(n_fp):
                 if nb_mask[f, p]:
                     nb_interp[f, p] = interp_pn[p]
@@ -173,7 +167,6 @@ def build_ms_interp_parallel(
         # 加了原生棱柱编码 [10,15) 之后必须区分，否则按 `code-6` 会越界
         # 取四面体的表；numba 不做边界检查。见主 kernel 同一处说明。
         sec_is_native_tet = _NATIVE_TET_LO <= sec_code < _NATIVE_TET_HI
-        sec_is_native_prism = sec_code >= _NATIVE_PRISM_LO
         sec_is_prism = sec_cell < n_prism
         if sec_is_prism:
             sec_nd = np.empty((6, 3))
@@ -228,10 +221,7 @@ def build_ms_interp_parallel(
                     if ax != sec_axis:
                         abc_sec[p, ax] = sec_fc[p, ix2]
                         ix2 += 1
-            interp_sec = interp_matrix_from_cube_coords_nb(
-                abc_sec, sec_is_prism, sec_is_native_prism, n1d, n_sps,
-                v_sps_inv_prism, v_sps_inv_tet,
-                v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+            interp_sec = native_prism_interp_matrix_nb(abc_sec, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
             for p in range(n_fp):
                 nb_sec_resid[ei, p] = sec_rs[p]
                 if not nb_mask[f, p]:
@@ -279,7 +269,6 @@ def build_ms_interp_parallel(
         # 加了原生棱柱编码 [10,15) 之后必须区分，否则按 `code-6` 会越界
         # 取四面体的表；numba 不做边界检查。见主 kernel 同一处说明。
         pn_is_native_tet = _NATIVE_TET_LO <= pn_code < _NATIVE_TET_HI
-        pn_is_native_prism = pn_code >= _NATIVE_PRISM_LO
         if pn_is_native_tet:
             rst_pn_o = _native_alpha_beta_to_rst_nb(pn_code - _NATIVE_TET_LO, ow_fc[f])
             interp_pn_o = _native_interp_matrix_nb(
@@ -291,7 +280,6 @@ def build_ms_interp_parallel(
         else:
             pn_axis = _FACE_AXIS[pn_code]
             pn_side = _FACE_SIDE[pn_code]
-            pn_is_prism = pn_c < n_prism
             abc_o = np.empty((n_fp, 3))
             for p in range(n_fp):
                 abc_o[p, pn_axis] = pn_side
@@ -300,10 +288,7 @@ def build_ms_interp_parallel(
                     if ax != pn_axis:
                         abc_o[p, ax] = ow_fc[f, p, ix2]
                         ix2 += 1
-            interp_pn_o = interp_matrix_from_cube_coords_nb(
-                abc_o, pn_is_prism, pn_is_native_prism, n1d, n_sps,
-                v_sps_inv_prism, v_sps_inv_tet,
-                v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+            interp_pn_o = native_prism_interp_matrix_nb(abc_o, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
             for p in range(n_fp):
                 if ow_mask[f, p]:
                     ow_interp[f, p] = interp_pn_o[p]
@@ -320,7 +305,6 @@ def build_ms_interp_parallel(
         # 加了原生棱柱编码 [10,15) 之后必须区分，否则按 `code-6` 会越界
         # 取四面体的表；numba 不做边界检查。见主 kernel 同一处说明。
         sec_is_native_tet = _NATIVE_TET_LO <= sec_code < _NATIVE_TET_HI
-        sec_is_native_prism = sec_code >= _NATIVE_PRISM_LO
         sec_is_prism = sec_cell < n_prism
         if sec_is_prism:
             sec_nd = np.empty((6, 3))
@@ -374,10 +358,7 @@ def build_ms_interp_parallel(
                     if ax != sec_axis:
                         abc_sec[p, ax] = sec_fc[p, ix2]
                         ix2 += 1
-            interp_sec_o2 = interp_matrix_from_cube_coords_nb(
-                abc_sec, sec_is_prism, sec_is_native_prism, n1d, n_sps,
-                v_sps_inv_prism, v_sps_inv_tet,
-                v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k)
+            interp_sec_o2 = native_prism_interp_matrix_nb(abc_sec, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
             for p in range(n_fp):
                 ow_sec_resid[ei, p] = sec_rs[p]
                 if not ow_mask[f, p]:
