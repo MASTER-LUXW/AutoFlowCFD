@@ -191,16 +191,13 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _CF_SIDE = np.array([v[1] for v in CUBE_FACE_AXIS_SIDE.values()])
     _o_axis_arr = _CF_AXIS[np.asarray(face_conn.owner_cube_face, dtype=np.int32)]
     _o_side_arr = _CF_SIDE[np.asarray(face_conn.owner_cube_face, dtype=np.int32)]
-    # kernel 已计算 neighbor axis/side（含边界面 -1/0.0），直接使用
-    _n_axis_arr = _geom_na
-    _n_side_arr = _geom_ns
     # 缓存常用数组引用
     _is_bnd = face_conn.is_boundary
     _op = owner_primary
     _np_ = neighbor_primary
     fm = build_face_metrics(
         face_conn, mesh, n_faces, n1d, n_prism, sps_1d, weights_1d,
-        _o_axis_arr, _o_side_arr, _n_axis_arr, _n_side_arr, _is_bnd)
+        _o_side_arr, _is_bnd)
     _all_normals = fm.true_normal
     _all_area_w = fm.true_area_weight
     _owner_adj_row_exact = fm.owner_adj_row_exact

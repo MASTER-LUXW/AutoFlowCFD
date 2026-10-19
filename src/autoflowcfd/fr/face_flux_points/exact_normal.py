@@ -335,13 +335,19 @@ def compute_exact_face_normals_and_weights(
         与原 `_all_normals`/`_all_area_w` 完全相同的语义和消费方式（owner 侧
         外法向按 owner FP 网格顺序排列；neighbor 侧取负号，调用方不变）。
     """
-    wx, wy = np.meshgrid(weights_1d, weights_1d, indexing="ij")
-    w_fp = (wx * wy).ravel()  # (n_fp,) 原始（未归一化）张量积求积权重，覆盖 [-1,1]^2
-
     adj_row = compute_exact_adj_rows(
         n_faces, n1d, sps_1d, n_prism, owner_cell, owner_axis, owner_side,
         prism_conn, tet_conn, node_coords, code_arr=owner_code,
     )
+    return normals_and_weights_from_adj_rows(adj_row, weights_1d, owner_side, owner_code)
+
+
+def normals_and_weights_from_adj_rows(adj_row, weights_1d, owner_side, owner_code=None):
+    """owner 侧 adj(J) 行 `(n_faces, n_fp, 3)` -> `(true_normal, true_area_weight)`（`compute_exact_face_normals_and_weights`
+    的后半段，生产构造 `face_metrics.py` 用 numba 算出的 adj 行调用它；I-35，2026-10-19 起生产不再为法向 / 面积
+    权重另走一遍 numpy 参照实现）。"""
+    wx, wy = np.meshgrid(weights_1d, weights_1d, indexing="ij")
+    w_fp = (wx * wy).ravel()  # (n_fp,) 原始（未归一化）张量积求积权重，覆盖 [-1,1]^2
     mag = np.linalg.norm(adj_row, axis=-1)
     mag_safe = np.maximum(mag, 1e-300)
     # native 四面体（owner_code>=6）：_native_tet_adj_row_batched 已经是

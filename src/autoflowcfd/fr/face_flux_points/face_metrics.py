@@ -4,9 +4,9 @@
 规范）。整段原样搬运，逻辑一字未改；只把原来的局部变量改成形参
 （去掉前导下划线）。
 
-调用的是 **numba 版** `exact_normal_kernel.compute_exact_adj_rows_fast`
-—— 生产路径走这一条，numpy 版 `exact_normal.compute_exact_adj_rows` 只
-作为交叉验证的参考实现（两者实测一致到 4e-16）。
+adj 行一律由 **numba 版** `exact_normal_kernel.compute_exact_adj_rows_fast` 计算，法向 / 面积权重由 owner 侧
+adj 行派生（`exact_normal.normals_and_weights_from_adj_rows`）；numpy 版 `exact_normal.compute_exact_adj_rows`
+只作为测试里的交叉验证参照（两者实测一致到 4e-16）。
 """
 
 from dataclasses import dataclass
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
-from .exact_normal import compute_exact_face_normals_and_weights
+from .exact_normal import normals_and_weights_from_adj_rows
 
 
 @dataclass
@@ -35,10 +35,7 @@ def build_face_metrics(
     n_prism: int,
     sps_1d: np.ndarray,
     weights_1d: np.ndarray,
-    o_axis_arr: np.ndarray,
     o_side_arr: np.ndarray,
-    n_axis_arr: np.ndarray,
-    n_side_arr: np.ndarray,
     is_bnd: np.ndarray,
 ) -> FaceMetrics:
     """逐通量点求精确法向/面积权重与两侧的 adj 行。"""
@@ -54,22 +51,6 @@ def build_face_metrics(
     # 对平面面（绝大多数四面体面、未翘曲的棱柱四边形面）结果与旧的常数
     # 值逐位一致（见对应单元测试），只有真正非平面的棱柱四边形侧面才会
     # 表现出per-FP的真实差异。
-    # owner_code 透传（native 四面体 owner_code>=6 分派，见
-    # compute_exact_face_normals_and_weights/compute_exact_adj_rows 文档
-    # "真实 bug 修复"说明——o_axis_arr 对 native 面存的是复用的
-    # excluded_vertex，与坍缩坐标 (axis,side) 语义会数值碰撞，必须靠
-    # 原始 cube face code 消除歧义）。
-    _all_normals, _all_area_w = compute_exact_face_normals_and_weights(
-        n_faces=n_faces, n1d=n1d, sps_1d=sps_1d, weights_1d=weights_1d, n_prism=n_prism,
-        owner_cell=np.asarray(face_conn.owner_cell, dtype=np.int64),
-        owner_axis=o_axis_arr.astype(np.int64), owner_side=o_side_arr.astype(np.float64),
-        owner_code=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
-        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
-                    else np.empty((0, 6), dtype=np.int64)),
-        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
-                  else np.empty((0, 4), dtype=np.int64)),
-        node_coords=mesh._node_coords,
-    )
 
     # 真实 bug 修复的第二部分（2026-08-23）：P1+ 内部面主通量（
     # inviscid_kernel.py）与 troubled_cell.py
@@ -103,6 +84,12 @@ def build_face_metrics(
         node_coords=mesh._node_coords,
         code_arr=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
     )
+    # 法向与面积权重由同一份 owner adj 行派生（I-35，2026-10-19）：此前先用 numpy 参照实现
+    # （`compute_exact_face_normals_and_weights`，内部重算一遍 owner adj 行——就是上面那条峰值 ~5GB、P2 初始化 10+
+    # 分钟的路径）只为求这两个量，随后 numba 版再算一遍 owner adj 行。两者一致到 ~4e-16。
+    _all_normals, _all_area_w = normals_and_weights_from_adj_rows(
+        _owner_adj_row_exact, weights_1d, o_side_arr.astype(np.float64),
+        np.asarray(face_conn.owner_cube_face, dtype=np.int64))
     _neighbor_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.neighbor_cell, dtype=np.int64),
