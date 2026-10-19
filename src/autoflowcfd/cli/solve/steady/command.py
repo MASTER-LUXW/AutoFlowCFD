@@ -6,15 +6,15 @@
 
 import click
 
-from autoflowcfd.core.utils.order_continuation.policy import MAX_ORDER, MIN_STEADY_ORDER
-from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
-from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
-from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.cli.solve.commands import solve
-from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.cli.solve.shared_options import config_default, shared_solve_options
+from autoflowcfd.config.solver_config import SteadyConfig
+
+_TURBULENCE_CHOICES = ['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']
+_TIME_SCHEME_CHOICES = ['rk3', 'newton-krylov']
 
 from .multi_gpu import _run_multi_gpu
 from .cpu_mpi import _run_cpu_mpi
@@ -23,22 +23,16 @@ from .single_node import _run_single_node
 
 @solve.command(name='steady')
 @click.argument('input_file', type=click.Path(exists=True))
-@click.option('--backend', type=click.Choice(['cpu', 'gpu']), default='cpu', help='计算后端 (CPU/GPU)')
-@click.option('--order', type=click.IntRange(MIN_STEADY_ORDER, MAX_ORDER), default=2,
-              help=f'FR 目标阶数（{MIN_STEADY_ORDER}~{MAX_ORDER}；>=1 时从 P0 逐阶爬坡）')
-@click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']),
-              default='sst',
+@click.option('--turbulence-model', '-m', type=click.Choice(_TURBULENCE_CHOICES),
+              default=config_default(SteadyConfig, 'turbulence'), show_default=True,
               help='湍流模型。sa 为 SA-neg（Allmaras, Johnson & Spalart 2012，为高阶离散设计的负值鲁棒 '
                    'Spalart-Allmaras；高阶 P2/P3 隐式稳态推荐，SST 的 C0 折点使其在高阶下收敛缓慢，见 '
-                   'core/turbulence/sa 模块文档）。真实bug修复（2026-09-02，排查多GPU分布式DDES/IDDES时发现）：此前这里的'
-                   'Choice列表缺 iddes/les 两项——底层单机/CPU MPI/多GPU分布式路径均已支持这两个模型'
-                   '（solve transient命令的Choice列表本来就包含它们），steady命令这里一直没有同步，'
-                   '导致 --turbulence-model iddes/les 在steady命令下无法使用（会被click直接拒绝），'
-                   '与transient命令行为不一致。另外注意：ddes/iddes/les 会在 VELOCITY_INLET 边界'
-                   '自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身正确'
-                   '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
-@click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
-@click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default='rk3',
+                   'core/turbulence/sa 模块文档）。ddes/iddes/les 在 VELOCITY_INLET 边界启用合成湍流入口；'
+                   'wmles 不启用（近壁应力由壁面模型给出）')
+@click.option('--max-iter', '-n', type=int, default=config_default(SteadyConfig, 'max_iter'), show_default=True,
+              help='最大迭代步数')
+@click.option('--time-scheme', '-t', type=click.Choice(_TIME_SCHEME_CHOICES),
+              default=config_default(SteadyConfig, 'time_scheme', _TIME_SCHEME_CHOICES), show_default=True,
               help='稳态伪时间推进格式。rk3：显式 SSP-RK3（CFL 受显式稳定极限约束，'
                    '真实网格上走完一个绕体特征时间要上万步）；newton-krylov：矩阵自由 '
                    'Newton-Krylov + 伪瞬态延拓（SER CFL 律 + 单元块 Jacobi 预处理，见 '
@@ -46,7 +40,7 @@ from .single_node import _run_single_node
                    '单元决定。全部后端（单机 CPU/GPU、--n-ranks>1 的 CPU 分布式与'
                    '--multi-gpu，含 --fully-distributed）同一份算法：分布式下内积与'
                    '线搜索跨 rank 归约、块 Jacobi 用全局一致着色。')
-@click.option('--cfl-start', type=float, default=None,
+@click.option('--cfl-start', type=float, default=config_default(SteadyConfig, 'cfl_init'),
               help='自适应 CFL 初始值。**默认按 --time-scheme 取该格式 CFL 律的签名默认值**'
                    '（rk3 为显式控制器的 0.03；newton-krylov 为 SER 律的 5）——两者差两个'
                    '数量级，CLI 不再写死任何一个（adaptive_cfl/policy.py）。以下为 rk3 默认值'
@@ -57,7 +51,7 @@ from .single_node import _run_single_node
                    '的谱半径大 5.2 倍；修复后重新定界（见 --cfl-max 帮助）。0.03 是'
                    '唯一在真实网格上跑过 350+ 步单调下降的起步值，控制器从它往 '
                    '--cfl-max 爬。')
-@click.option('--cfl-max', type=float, default=None,
+@click.option('--cfl-max', type=float, default=config_default(SteadyConfig, 'cfl_max'),
               help='自适应 CFL 上限，默认按 --time-scheme 取（rk3 为 0.06；newton-krylov 为 '
                    'SER 的 1e8——隐式没有线性稳定极限；1e4 时伪时间项远未可忽略，高阶尾段退化成线性收敛，'
                    'A/B 数据见 adaptive_cfl/ser.py）。'
@@ -75,7 +69,7 @@ from .single_node import _run_single_node
                    '旧文案里那句"SSP-RK3 线性稳定极限 ~1.0"是标量对流的教科书值，'
                    '与本项目 CFL 参数的定义（面基谱半径 + 低马赫预处理波速）不是'
                    '同一个量纲，已删除。')
-@click.option('--cfl-min', type=float, default=None,
+@click.option('--cfl-min', type=float, default=config_default(SteadyConfig, 'cfl_min'),
               help='自适应 CFL 下限，默认按 --time-scheme 取（rk3 为 0.01；newton-krylov 为 '
                    'SER 的 0.5，更小的伪时间步由 Newton 步自身的 dtau 缩档负责）。'
                    'rk3 默认值标定历史：下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
@@ -88,65 +82,17 @@ from .single_node import _run_single_node
                    '20 倍"没关完的另一半。改动方向是安全的：下限只允许控制器'
                    '收缩得更多，绝不会抬高 CFL，因此不可能把原本稳定的运行变'
                    '成不稳定。')
-@click.option('--phase-max-iter', type=int, default=None,
-              help=PHASE_MAX_ITER_HELP)
-@click.option('--residual-drop-threshold', type=float, default=100.0,
-              help=RESIDUAL_DROP_THRESHOLD_HELP)
-@click.option('--output', '-o', 'output_dir', type=click.Path(), default='./results', help='结果输出目录')
-@click.option('--checkpoint-interval', type=int, default=100, help='检查点保存间隔')
-@click.option('--surface-mesh', '-s', type=click.Path(exists=True), default=None,
-              help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
-@click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
-@click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
-@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
-@click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
-@click.option('--fully-distributed', is_flag=True,
-              help='完全分布式网格加载：只有 root rank 加载完整网格，其余 rank 只接收 root 预先切好的紧凑数据'
-                   '（--n-ranks>1 默认的"传统模式"是每个 rank 各自加载完整网格）。可单独用（CPU MPI），也可配合 '
-                   '--multi-gpu；全部湍流模型、时间格式、Order Continuation 与续算都支持。需要 --n-ranks>1')
-@click.option('--gpu-device', type=int, default=0, help='GPU 设备 ID（默认 0，多 GPU 时每个 rank 自动分配）')
-@click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
-@click.option('--turbulence-intensity', type=float, default=0.01,
-              help='来流湍流强度 Tu（默认 0.01=1%），外部气动 ≤1%，城市道路 3-5%。'
-                   '也驱动 --turbulence-model ddes 时 BD-02 SEM 入口的目标雷诺应力')
-@click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0），外部气动推荐 2-10')
-@click.option('--sem-num-eddies', type=int, default=_SEM_DEFAULT_NUM_EDDIES,
-              help='ddes/iddes/les 模式下合成湍流入口 (SEM) 的涡核数量（默认按 Jarrin 密度判据 V_B/sigma^3 自动取）')
-@click.option('--mu-molecular', type=float, default=1.8e-5, help='分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气），非标准工况请覆盖')
-@click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
-@click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
-@click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
-@click.option('--aoa', 'aoa_deg', type=float, default=0.0,
-              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。来流边界、初场、SEM 入口方向、气动力的风轴系'
-                   '分解（Cd 沿来流、Cl 垂直于来流）与参考面积的迎风投影都按它构造；力矩 Cm/Cy/Cr 报在体轴系。'
-                   '约定见 core/utils/flow_direction.py')
-@click.option('--aos', 'aos_deg', type=float, default=0.0,
-              help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
-@click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
-              help='YAML 配置文件（`config init` 生成模板）：文件里写出的字段覆盖对应选项的默认值，命令行显式'
-                   '给出的选项优先于文件')
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='以已有 checkpoint 的场为初场（例如低阶解收敛后直接在更高阶上继续，不重走低阶的爬坡）。'
                    'checkpoint 阶数可以低于 --order（平均流与湍流场精确延拓），不能高于；起步后直接在 '
                    '--order 上推进，--tol 相对于该阶数上的第一个残差。全部后端可用')
-@click.option('--tol', type=float, default=DEFAULT_STEADY_TOL, show_default=True,
+@click.option('--tol', type=float, default=config_default(SteadyConfig, 'convergence_tol'), show_default=True,
               help='相对收敛容差（目标阶数的残差下降到初值的 tol 倍即收敛；Order Continuation 低一阶放宽 10 倍）')
-@click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
-              help='启用问题单元人工粘性（默认关闭，全部后端可用）：熵残差判据 '
-                   '(h/p)·max|û·∇s| 定位数值熵产生的单元（P1 起有效），只对它们叠加全部'
-                   '守恒变量的拉普拉斯 div(ν∇U)，见 core/fr_operators/artificial_viscosity/'
-                   'entropy_viscosity.py。设置写入 checkpoint，续算沿用')
-@click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
-              help='人工粘性强度标定常数（无量纲，默认1.0，ν = 斜坡·alpha·|u|·h/p），'
-                   '只在 --artificial-viscosity 时有意义')
-@click.option('--wall-treatment', type=click.Choice(list(WALL_TREATMENTS)), default=DEFAULT_WALL_TREATMENT,
-              show_default=True,
-              help='RANS（sa/sst/ddes/iddes）的近壁处理：resolved=低雷诺数壁面处理（要求第一层 y+~1）；'
-                   'auto=自动壁面处理（Spalding 平衡壁面模型给壁面剪应力，第一层 y+ 从 1 到对数层都可用），'
-                   '见 core/turbulence/wall_model/treatment.py。设置写入 checkpoint，续算沿用')
-@click.option('--low-mach-precond/--no-low-mach-precond', 'low_mach_precond', default=True, show_default=True,
+@click.option('--low-mach-precond/--no-low-mach-precond', 'low_mach_precond',
+              default=config_default(SteadyConfig, 'low_mach_precond'), show_default=True,
               help='低马赫数伪时间预处理（rk3/newton-krylov；见 core/utils/preconditioning.py）：不改变定常解，'
                    '低马赫数下把声学刚性从伪时间推进里去掉。设置写入 checkpoint，续算沿用')
+@shared_solve_options(SteadyConfig)
 @config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
                  aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment, low_mach_precond):

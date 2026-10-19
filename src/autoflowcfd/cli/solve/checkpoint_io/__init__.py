@@ -11,6 +11,7 @@
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
+from .resume_run import continue_single_node  # noqa: F401
 from .write import (  # noqa: F401
     periodic_checkpoint_callback,
     save_results,
@@ -19,6 +20,7 @@ from .write import (  # noqa: F401
 )
 from .rebuild import (  # noqa: F401
     physics_from_metadata,
+    rebuild_from_checkpoint,
     rebuild_solver_from_checkpoint,
 )
 from .initial_field import (  # noqa: F401
@@ -31,8 +33,10 @@ from .restore import (  # noqa: F401
 )
 
 __all__ = [
+    "continue_single_node",
     "periodic_checkpoint_callback",
     "physics_from_metadata",
+    "rebuild_from_checkpoint",
     "rebuild_solver_from_checkpoint",
     "restore_solver_state_from_fields",
     "restore_state_from_checkpoint",

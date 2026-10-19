@@ -7,11 +7,7 @@ from typing import Optional
 
 import click
 
-from autoflowcfd.core.utils.order_continuation.policy import MAX_ORDER, MIN_TRANSIENT_ORDER
-from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
-from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
-from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
 from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
@@ -19,6 +15,10 @@ from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoin
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients, resolve_reference_area
 from autoflowcfd.cli.solve.commands import solve
+from autoflowcfd.cli.solve.shared_options import config_default, shared_solve_options
+from autoflowcfd.config.solver_config import TransientConfig
+
+_TIME_METHOD_CHOICES = ["dual-time", "rk3"]
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
@@ -26,102 +26,41 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
 @solve.command(name='transient')
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]),
-              default="cpu", help="计算后端")
-@click.option("--order", "-p", type=click.IntRange(MIN_TRANSIENT_ORDER, MAX_ORDER), default=2,
-              help=f"FR 离散阶数（{MIN_TRANSIENT_ORDER}~{MAX_ORDER}）")
 @click.option("--time-method", "-t",
-              type=click.Choice(["dual-time", "rk3"]),
-              default="dual-time",
+              type=click.Choice(_TIME_METHOD_CHOICES),
+              default=config_default(TransientConfig, "time_scheme", _TIME_METHOD_CHOICES), show_default=True,
               help="时间推进方法，两档都是时间精确的。dual-time（默认）：每个物理步 --dt 是若干个带 BDF 物理时间项"
                    "的隐式 Newton 步，步长不受显式稳定条件限制。rk3：显式 SSP-RK3、全场同一物理步长——每个 --dt 切成"
                    "若干子步，子步长取全场显式稳定步长（--cfl-start）的最小值、最后一个子步恰好落在 t+dt；CFL 固定、"
                    "低马赫预处理关闭（core/time_integration/time_accurate.py）。")
 @click.option("--turbulence-model", "-m",
               type=click.Choice(["sst", "sa", "ddes", "iddes", "wmles", "les"]),
-              default="ddes",
-              help="湍流模型。sa 为 SA-neg URANS（core/turbulence/sa）。iddes 按 Shur et al. (2008)/Gritskevich et al. (2012) "
-                   "SST-IDDES 重新实现（取代此前的死代码版本），部分常数（f_e2 的 "
-                   "c_t/c_l）本会话未能独立复核原始文献数值，见 core/turbulence/des.py "
-                   "::IDDESModel 文档。注意：ddes/iddes/les 会在 VELOCITY_INLET 边界"
-                   "自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身 "
-                   "正确预测近壁应力，不需要额外的入口湍流结构，见 "
-                   "core/fr_solver/boundary.py 文档）")
-@click.option("--max-iter", "-n", default=100, help="最大迭代次数")
-@click.option('--phase-max-iter', type=int, default=None,
-              help=PHASE_MAX_ITER_HELP)
-@click.option('--residual-drop-threshold', type=float, default=100.0,
-              help=RESIDUAL_DROP_THRESHOLD_HELP)
-@click.option('--aoa', 'aoa_deg', type=float, default=0.0,
-              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。**2026-09-17 新增**：'
-                   '此前来流方向在全代码库被硬编码成 +x，没有任何攻角选项——而攻角'
-                   '扫掠是最常见的外流气动研究。开启后 Q_free（边界自由来流态）、'
-                   '初场、SEM 入口方向、气动力的风轴系分解（Cd 沿来流、Cl 垂直于来流）、'
-                   '参考面积的迎风投影五处统一按它构造。0 时与此前行为逐位相同。'
-                   '力矩 Cm/Cy/Cr 仍报在体轴系，不随攻角旋转（气动数据标准呈现方式）。'
-                   '约定与风轴系公式见 core/utils/flow_direction.py')
-@click.option('--aos', 'aos_deg', type=float, default=0.0,
-              help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
-@click.option("--dt", default=1e-5, help="时间步长 (秒)")
-@click.option('--cfl-start', type=float, default=None,
+              default=config_default(TransientConfig, "turbulence"), show_default=True,
+              help="湍流模型。sa 为 SA-neg URANS（core/turbulence/sa）；ddes/iddes 为 SST-DDES/IDDES（Gritskevich et al. "
+                   "2012，core/turbulence/des/）。ddes/iddes/les 在 VELOCITY_INLET 边界启用合成湍流入口；wmles 不启用"
+                   "（近壁应力由壁面模型给出）")
+@click.option("--max-iter", "-n", type=int, default=config_default(TransientConfig, "max_iter"), show_default=True,
+              help="物理时间步数（给了 --physical-time 时按 physical_time/dt 换算，忽略本选项）")
+@click.option("--dt", type=float, default=config_default(TransientConfig, "dt"), show_default=True,
+              help="物理时间步长 (秒)")
+@click.option('--cfl-start', type=float, default=config_default(TransientConfig, 'cfl_init'),
               help='CFL 数。--time-method rk3：显式子步的固定 CFL（全场显式稳定步长按它取，默认 0.03，'
                    'adaptive_cfl/policy.py 唯一来源）；dual-time：内迭代伪时间 CFL 的起点（SER 律，默认 1e4）。')
-@click.option('--cfl-max', type=float, default=None,
+@click.option('--cfl-max', type=float, default=config_default(TransientConfig, 'cfl_max'),
               help='dual-time 内迭代伪时间 CFL 的上限（SER 律）。rk3 档 CFL 固定为 --cfl-start，不用它。')
-@click.option('--cfl-min', type=float, default=None,
+@click.option('--cfl-min', type=float, default=config_default(TransientConfig, 'cfl_min'),
               help='dual-time 内迭代伪时间 CFL 的下限（SER 律）。rk3 档 CFL 固定为 --cfl-start，不用它。')
-@click.option("--physical-time", default=None, help="总物理时间（秒）")
-@click.option("--output", "-o", "output_dir", default="./transient_results", help="输出目录")
-@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
-              help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
-@click.option("--skip-quality-check", is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
-@click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
+@click.option("--physical-time", type=float, default=config_default(TransientConfig, "total_time"),
+              help="总物理时间（秒）；不给时按 --max-iter 个物理步推进")
 @click.option('--dual-time-inner-iter', type=int, default=DEFAULT_DUAL_TIME_STEPS,
               help=f'--time-method dual-time 时每个物理步的内迭代（带 BDF 物理时间项的 Newton 步）次数上限，'
                    f'残差降到该物理步起点的 1e-3 即提前结束，通常 2~7 次（默认上限 {DEFAULT_DUAL_TIME_STEPS}）')
-@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）。'
                    'checkpoint 阶数可以低于 --order（平均流与湍流场精确延拓到目标阶数），不能高于；'
                    '从 checkpoint 起步时直接在 --order 上推进，不做阶数爬坡')
-@click.option('--turbulence-intensity', type=float, default=0.01,
-              help='来流湍流强度 Tu（默认 0.01=1%）。也驱动 ddes/iddes/les 模式下 '
-                   'BD-02 SEM 入口的目标雷诺应力（2026-08-28 起复用同一个值，'
-                   '此前 SEM 用独立硬编码 5%，见 core/fr_solver/boundary.py 文档）')
-@click.option('--sem-num-eddies', type=int, default=_SEM_DEFAULT_NUM_EDDIES,
-              help='ddes/iddes/les 模式下合成湍流入口 (SEM) 的涡核数量（默认按 Jarrin 密度判据 V_B/sigma^3 自动取）')
-@click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0）')
-@click.option('--mu-molecular', type=float, default=1.8e-5, help='分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气），非标准工况请覆盖')
-@click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
-@click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
-@click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
-@click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
-              help='YAML 配置文件（`config init -t transient` 生成模板）：文件里写出的字段覆盖对应选项的默认值'
-                   '（total_time 对应 --physical-time），命令行显式给出的选项优先于文件')
-@click.option('--n-ranks', type=int, default=1,
-              help='MPI rank 总数（>1 时走分布式求解器——CPU MPI"传统模式"，或配合 '
-                   '--multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
-                   '2026-09-02 补齐：此前本命令完全没有分布式支持，DUAL_TIME/DES/LES '
-                   '瞬态仿真只能单机跑，与 solve steady 已有的分布式覆盖不一致')
-@click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
-@click.option('--fully-distributed', is_flag=True,
-              help='"完全分布式加载"（只有 root rank 加载完整网格），需要 --n-ranks>1，'
-                   '与 --multi-gpu 互斥；已支持 --time-method dual-time（2026-09-02 起，'
-                   'package 已接入 time_scheme 字段）')
-@click.option('--gpu-device', type=int, default=None, help='--multi-gpu 时的 GPU 设备号')
-@click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
-              help='启用问题单元人工粘性（默认关闭，全部后端可用），与 solve steady 同名选项'
-                   '同一实现：熵残差判据定位数值熵产生的单元，只对它们叠加 div(ν∇U)')
-@click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
-              help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
-@click.option('--wall-treatment', type=click.Choice(list(WALL_TREATMENTS)), default=DEFAULT_WALL_TREATMENT,
-              show_default=True,
-              help='RANS（sa/sst/ddes/iddes）的近壁处理：resolved=低雷诺数壁面处理（要求第一层 y+~1）；'
-                   'auto=自动壁面处理（Spalding 平衡壁面模型给壁面剪应力，第一层 y+ 从 1 到对数层都可用），'
-                   '见 core/turbulence/wall_model/treatment.py。设置写入 checkpoint，续算沿用')
-@click.option('--checkpoint-interval', type=int, default=100,
-              help='中间 checkpoint 保存间隔（步数，单机与分布式路径都生效），结束时另写一次')
+@shared_solve_options(TransientConfig)
 @config_file_overrides
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,

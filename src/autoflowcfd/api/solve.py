@@ -1,296 +1,225 @@
-"""AutoFlowCFD V2.0 - 求解入口：稳态、瞬态、从 checkpoint 续算
+"""AutoFlowCFDAPI 的求解入口：稳态、瞬态、从 checkpoint 续算。
 
-从 `src/autoflowcfd/api.py` 的 `AutoFlowCFDAPI` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+与 CLI 走同一套构造：求解前质量门 + 高阶网格（`grid/validation/solve_gate.py`）、求解器工厂
+（`cli/solve/solver_factory.py::build_single_node_solver`）、checkpoint 重建与续算的时间步长/容差
+（`cli/solve/checkpoint_io/rebuild.py`、`core/utils/checkpoint_time.py`）。参数就是配置类的字段
+（`SteadyConfig` / `TransientConfig`，默认值与校验都在那里，见 docs/CONFIGURATION_GUIDE.md）。
 
-**只含方法，没有状态**：全部属性由 `AutoFlowCFDAPI` 的 `__init__` 建立，
-这里通过 `self` 访问。
+2026-10-19 以前：`run_steady`/`run_transient` 各自逐行解析约 40 行"显式参数 > config > 写死默认值"，写死的默认值
+是第三份来源（1.225/33.33/101325/1000 步/"sst"/order 2/1e2），参数名与配置字段不一致（turbulence_model/tol/
+threads/physical_time/time_method），未知参数透传进求解器构造函数；求解前不跑质量门；续算把 dt=1e-3、tol=1e-6
+写死并总是传给 solve()，续算瞬态时静默改掉 checkpoint 里的物理时间步。
 """
 
-from typing import Optional, Any
+import dataclasses
+from typing import Any, Optional
+
 from loguru import logger
+
+from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, field_default
 from autoflowcfd.grid.structures import VolumeMeshData
-from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
-from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
-from autoflowcfd.config.turbulence_names import turbulence_solver_name
-from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
-from autoflowcfd.api_config import api_resume_simulation
+
+
+def _save_volume_mesh(volume_mesh, output_dir: str) -> str:
+    """体网格写成 `output_dir/volume_mesh.pkl`（与 `grid generate-volume -o *.pkl` 同一格式），返回路径。
+
+    checkpoint 记录它作为 `input_file`：`solve resume` / `resume_simulation` 据此重建求解器。
+    """
+    import os
+    import pickle
+
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "volume_mesh.pkl")
+    with open(path, "wb") as f:
+        pickle.dump(volume_mesh, f)
+    return path
+
+
+def _resolved_config(config_cls, config, fields: dict):
+    """`config`（缺省为配置类默认值）上覆盖 `fields`；重新构造，经配置类同一处校验。"""
+    if config is not None and not isinstance(config, config_cls):
+        raise TypeError(f"config 必须是 {config_cls.__name__}，收到 {type(config).__name__}")
+    names = {f.name for f in dataclasses.fields(config_cls) if f.init}
+    unknown = sorted(set(fields) - names)
+    if unknown:
+        raise TypeError(f"{config_cls.__name__} 没有字段 {unknown}；可用字段：{sorted(names)}")
+    return dataclasses.replace(config if config is not None else config_cls(), **fields)
 
 
 class _APISolveMixin:
     """求解入口：稳态、瞬态、从 checkpoint 续算"""
 
-    def run_steady(
-        self,
-        volume_mesh: VolumeMeshData,
-        backend: Optional[str] = None,
-        order: Optional[int] = None,
-        turbulence_model: Optional[str] = None,
-        max_iter: Optional[int] = None,
-        dt: float = 1e-4,
-        tol: Optional[float] = None,
-        rho_inf: Optional[float] = None,
-        vel_inf: Optional[float] = None,
-        p_inf: Optional[float] = None,
-        threads: Optional[int] = None,
-        config: Optional[SteadyConfig] = None,
-        phase_max_iter: Optional[int] = None,
-        residual_drop_threshold: Optional[float] = None,
-        **kwargs
-    ) -> Any:
-        """Run steady-state FR simulation.
+    def _solve_and_write(self, solver, volume_mesh, config, *, transient: bool, **solve_kwargs):
+        """求解并按配置的 `output_dir` / `checkpoint_interval` 落盘（中间 checkpoint + 收尾结果），与 CLI 同一组写出函数。
 
-        Args:
-            volume_mesh: VolumeMeshData（generate_volume_mesh 的输出，不是
-                load_grid 返回的表面 GridData——V2 求解器需要体网格）
-            backend, order, turbulence_model, max_iter, rho_inf, vel_inf,
-                p_inf: None（默认）时按"`config`（若提供）里的同名字段 >
-                内建默认值"解析；显式传值始终优先于 `config`。真实修复
-                （V2.0 专家组盲审发现，2026-08-28）：此前这些形参恒为
-                字面默认值，`config` 参数根本不存在——`create_steady_
-                config()`/`ConfigLoader` 能构建出完整校验过的
-                `SteadyConfig`，但没有任何路径把它真正喂给这里，配置
-                对象是自洽但对求解行为完全没有影响的孤儿数据结构。
-            config: 可选的 `SteadyConfig`（`create_steady_config()`/
-                `load_solver_config()` 的返回值）。提供时，上面几个显式
-                形参未被调用方传值（即仍是 None）的，改用它的同名字段
-                （`turbulence_model` 对应 `config.turbulence`，需要按
-                `TurbulenceModel` 枚举做取值映射，见
-                `config/turbulence_names.py::turbulence_solver_name`；其余字段名完全一致）；
-                `mu_molecular`/`turbulence_intensity`/`viscosity_ratio`
-                这三个 `SolverConfig` 基类字段同理，未显式经由 `**kwargs`
-                传入时会从 `config` 补上，再透传给 FRSolver 构造函数。
-            phase_max_iter, residual_drop_threshold: None（默认）时按
-                "config（若提供）里的同名字段 > 内建默认值"解析，与
-                order/max_iter 等参数同一套优先级规则；直接透传给
-                `FRSolver.solve()`，见该方法/`order_continuation.
-                run_order_continuation` 同名参数文档。
-            dt: 时间步长（稳态格式按局部伪时间步推进，只有合成湍流入口用到它）
-            tol: 相对收敛容差；None 时取 `config.convergence_tol`，都没有时 `DEFAULT_STEADY_TOL`
-            threads: numba 并行线程数；None 时取 `config.n_threads`，都没有时 -1（自动）
-            **kwargs: 其余参数透传给 FRSolver 构造函数
-                （例如 mu_molecular/dual_time_inner_iter/bc_overrides；
-                config 提供时，这三个物理量的 config 字段仅在 kwargs 里
-                没有同名键时才会被补入）
-
-        Returns:
-            SolverResult: Simulation result object（同时把 solver 存在
-            self.solver，供 calculate_coefficients/export_vtk 使用）
-
-        此前这里直接把 `grid_data`（表面网格）传给 `FRSolver(mesh=grid_data,
-        ...)`——但 FRSolver 要求的 `mesh` 是 HighOrderMesh（真正的高阶
-        网格对象，带 face_connectivity/sps_coords 等 FR 求解需要的一切），
-        不是原始 GridData/VolumeMeshData；且随后 `solver.solve()` 调用
-        （在 resume_simulation 路径里还多传了 initial_solution/
-        start_iteration 两个 FRSolver.solve() 根本不接受的参数）在当前
-        V2 FR 架构下必然出错。改为镜像 CLI `solve steady`
-        （cli/solve/steady.py）的真实构造流程：先用
-        HighOrderMesh.load_from_volume_mesh 把体网格升格成高阶网格，
-        再构造 FRSolver，需要湍流模型时补上壁面距离场
-        （V2.0 专家组评审逐行核实：此前的实现从未被真正跑通过）。
+        2026-10-19 以前 API 从不写结果：配置里的 `output_dir`、`checkpoint_interval` 被静默忽略，长程计算中断即丢失。
         """
-        logger.info("Starting steady-state FR simulation")
+        from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
+        from autoflowcfd.config.turbulence_names import turbulence_solver_name
 
-        from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-
-        backend = backend if backend is not None else (config.backend.value if config is not None else "cpu")
-        order = order if order is not None else (config.order if config is not None else 2)
-        if turbulence_model is not None:
-            pass
-        elif config is not None:
-            turbulence_model = turbulence_solver_name(config.turbulence)
-        else:
-            turbulence_model = "sst"
-        max_iter = max_iter if max_iter is not None else (config.max_iter if config is not None else 1000)
-        tol = tol if tol is not None else (config.convergence_tol if config is not None else DEFAULT_STEADY_TOL)
-        threads = threads if threads is not None else (config.n_threads if config is not None else -1)
-        rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
-        vel_inf = vel_inf if vel_inf is not None else (config.vel_inf if config is not None else 33.33)
-        p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
-        phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
-        residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
-        if config is not None:
-            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
-                          "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment",
-                          "low_mach_precond", "time_scheme"):
-                kwargs.setdefault(field, getattr(config, field))
-            # SteadyConfig.cfl_init/cfl_max/cfl_min -> FRSolver.cfl_start/cfl_max/cfl_min，只转发给出的值
-            # （默认 None：由 CFL 律按时间格式取默认，见 build_cfl_policy）。
-            if getattr(config, "cfl_init", None) is not None:
-                kwargs.setdefault("cfl_start", config.cfl_init)
-            if getattr(config, "cfl_max", None) is not None:
-                kwargs.setdefault("cfl_max", config.cfl_max)
-            if getattr(config, "cfl_min", None) is not None:
-                kwargs.setdefault("cfl_min", config.cfl_min)
-
-        mesh = HighOrderMesh(order=order)
-        mesh.load_from_volume_mesh(volume_mesh)
-
-        # CPU / 单 GPU 由 backend 分派（与 CLI 同一个入口；湍流模型需要时带上壁距）
-        solver = build_single_node_solver(
-            backend, mesh, volume_mesh,
-            order=order,
-            turb_model_name=turbulence_model,
-            rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-            n_threads=threads,
-            **kwargs,
-        )
-
+        input_file = _save_volume_mesh(volume_mesh, config.output_dir)
+        names = (turbulence_solver_name(config.turbulence), config.backend.value)
         result = solver.solve(
-            max_iter=max_iter, dt=dt, tol=tol,
-            phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold,
-        )
-        self.solver = solver
-
-        logger.info(
-            f"Simulation complete: {result.iterations} iterations, "
-            f"converged={result.converged}"
-        )
-
+            checkpoint_callback=periodic_checkpoint_callback(config.checkpoint_interval, config.output_dir, input_file,
+                                                             *names, transient=transient),
+            phase_max_iter=config.phase_max_iter, residual_drop_threshold=config.residual_drop_threshold,
+            **solve_kwargs)
+        write_single_node_outputs(solver, config.output_dir, result.iterations, input_file, *names, transient=transient)
         return result
 
-    def run_transient(
+    def _build_solver(self, volume_mesh: VolumeMeshData, config, *, aoa_deg: float, aos_deg: float,
+                      skip_quality_check: bool, reference_area: Optional[float], **solver_kwargs):
+        """质量门 + 高阶网格 + 求解器（CPU / 单 GPU），与 `solve steady/transient` 的单机分支同一组构造参数。"""
+        from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
+        from autoflowcfd.config.turbulence_names import turbulence_solver_name
+        from autoflowcfd.grid.validation.solve_gate import high_order_mesh_for_solver
+
+        mesh = high_order_mesh_for_solver(volume_mesh, config.order, skip_quality_check=skip_quality_check)
+        solver = build_single_node_solver(
+            config.backend.value, mesh, volume_mesh,
+            gpu_device=config.gpu_device,
+            order=config.order,
+            turb_model_name=turbulence_solver_name(config.turbulence),
+            time_scheme=config.time_scheme,
+            n_threads=config.n_threads,
+            cfl_start=config.cfl_init, cfl_max=config.cfl_max, cfl_min=config.cfl_min,
+            turbulence_intensity=config.turbulence_intensity,
+            viscosity_ratio=config.viscosity_ratio,
+            mu_molecular=config.mu_molecular,
+            rho_inf=config.rho_inf, vel_inf=config.vel_inf, p_inf=config.p_inf,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
+            artificial_viscosity_enabled=config.artificial_viscosity_enabled,
+            artificial_viscosity_alpha=config.artificial_viscosity_alpha,
+            wall_treatment=config.wall_treatment,
+            **solver_kwargs,
+        )
+        # 参考面积（未给时沿来流方向自动估算）：每步日志的 Cd/Cl/Cs 读它，与 CLI 同一个函数
+        from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
+
+        resolve_reference_area(solver, volume_mesh, reference_area)
+        self.volume_mesh = volume_mesh
+        self.solver = solver
+        return solver
+
+    def run_steady(self, volume_mesh: VolumeMeshData, config: Optional[SteadyConfig] = None, *,
+                   aoa_deg: float = 0.0, aos_deg: float = 0.0, reference_area: Optional[float] = None,
+                   skip_quality_check: bool = False, **fields) -> Any:
+        """稳态求解。
+
+        Args:
+            volume_mesh: 体网格（`generate_volume_mesh` 的输出；面网格不能直接求解）
+            config: 稳态配置，缺省为 `SteadyConfig()` 的默认值
+            aoa_deg, aos_deg: 攻角/侧滑角（度），约定同 CLI `--aoa/--aos`
+            reference_area: 气动系数参考面积 (m^2)，None 时沿来流方向的迎风投影自动估算（同 CLI `--reference-area`）
+            skip_quality_check: 跳过求解前质量门（同 CLI `--skip-quality-check`，仅用于临时诊断）
+            **fields: 覆盖 `config` 的字段（名字同 YAML，如 order=3、turbulence="sa"、time_scheme="newton-krylov"）
+
+        Returns:
+            SolverResult（求解器同时存于 `self.solver`，供 calculate_coefficients/export_vtk 使用）。结果与中间
+            checkpoint 写在 `output_dir`（体网格存为其中的 volume_mesh.pkl，checkpoint 可用 `solve resume` 续算）
+
+        Raises:
+            MeshQualityGateError: 体网格未通过求解前质量门
+        """
+        from autoflowcfd.core.time_integration.base import STEADY_DT
+
+        config = _resolved_config(SteadyConfig, config, fields)
+        logger.info(f"Starting steady-state FR simulation: P{config.order}, {config.turbulence.value}, "
+                    f"{config.time_scheme.value}")
+        solver = self._build_solver(volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg,
+                                    skip_quality_check=skip_quality_check, reference_area=reference_area,
+                                    low_mach_precond=config.low_mach_precond)
+        result = self._solve_and_write(solver, volume_mesh, config, transient=False,
+                                       max_iter=config.max_iter, dt=STEADY_DT, tol=config.convergence_tol)
+        logger.info(f"Simulation complete: {result.iterations} iterations, converged={result.converged}")
+        return result
+
+    def run_transient(self, volume_mesh: VolumeMeshData, config: Optional[TransientConfig] = None, *,
+                      aoa_deg: float = 0.0, aos_deg: float = 0.0, reference_area: Optional[float] = None,
+                      skip_quality_check: bool = False, **fields) -> Any:
+        """瞬态求解（双时间步或显式时间精确推进），参数同 `run_steady`；配置类为 `TransientConfig`。
+
+        步数为 `config.n_steps`（给了 total_time 时按 total_time/dt 换算，否则 max_iter）；给了
+        `init_from_checkpoint` 时以该 checkpoint 的场为初场（阶数可低于 order，精确延拓）。瞬态不以残差为停止
+        条件，跑满全部物理步。
+        """
+        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+
+        config = _resolved_config(TransientConfig, config, fields)
+        logger.info(f"Starting transient FR simulation: P{config.order}, {config.turbulence.value}, "
+                    f"{config.time_scheme.value}, {config.n_steps} steps x dt={config.dt}")
+        solver = self._build_solver(
+            volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg, skip_quality_check=skip_quality_check,
+            reference_area=reference_area,
+            # 瞬态的显式格式做时间精确推进（全场同一物理步长的子步）；双时间步本身时间精确
+            time_accurate=config.time_scheme != TimeIntegrationScheme.DUAL_TIME)
+        if config.init_from_checkpoint:
+            from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
+
+            start_single_node_from_checkpoint(solver, config.init_from_checkpoint)
+        result = self._solve_and_write(solver, volume_mesh, config, transient=True,
+                                       max_iter=config.n_steps, dt=config.dt, tol=0.0)
+        logger.info(f"Transient simulation complete: {result.iterations} steps")
+        return result
+
+    def resume_simulation(
         self,
-        volume_mesh: VolumeMeshData,
-        backend: Optional[str] = None,
-        order: Optional[int] = None,
-        time_method: Optional[str] = None,
-        turbulence_model: Optional[str] = None,
-        mode: str = None,
-        physical_time: Optional[float] = None,
+        checkpoint_file: str,
+        max_iter: int = 0,
+        *,
         dt: Optional[float] = None,
-        tol: float = 0.0,
-        rho_inf: Optional[float] = None,
-        vel_inf: Optional[float] = None,
-        p_inf: Optional[float] = None,
-        threads: Optional[int] = None,
-        config: Optional[TransientConfig] = None,
+        tol: float = field_default(SteadyConfig, "convergence_tol"),
+        checkpoint_interval: int = field_default(SteadyConfig, "checkpoint_interval"),
+        backend: Optional[str] = None,
+        surface_mesh: Optional[str] = None,
+        threads: int = field_default(SteadyConfig, "n_threads"),
+        gpu_device: Optional[int] = None,
+        skip_quality_check: bool = False,
+        cfl_start: Optional[float] = None,
+        cfl_max: Optional[float] = None,
+        cfl_min: Optional[float] = None,
+        time_scheme: Optional[str] = None,
+        low_mach_precond: Optional[bool] = None,
         phase_max_iter: Optional[int] = None,
-        residual_drop_threshold: Optional[float] = None,
-        **kwargs
+        residual_drop_threshold: float = field_default(SteadyConfig, "residual_drop_threshold"),
     ) -> Any:
-        """Run transient FR simulation (DES/LES).
+        """从 checkpoint 重建求解器并（可选）继续求解，与 CLI `solve resume` 单机分支同一套重建、续算与落盘
+        （结果与中间 checkpoint 写在 checkpoint 所在算例目录，`checkpoint_io/resume_run.py`）。
 
         Args:
-            volume_mesh: VolumeMeshData（generate_volume_mesh 的输出）
-            backend, order, turbulence_model, physical_time, dt, rho_inf,
-                vel_inf, p_inf: None（默认）时按"`config`（若提供）里的
-                同名字段 > 内建默认值"解析，显式传值始终优先——与
-                run_steady 的 `config` 参数同一套规则（见该方法文档）。
-                `physical_time` 对应 `config.total_time`。
-            time_method: 时间推进方案（`core/time_integration/base.py::scheme_from_name` 的取值，如 "dual-time"/
-                "rk3"）；None 时取 `config.time_scheme`，都没有时 "dual-time"。显式格式做全场同一物理步长的时间
-                精确推进（`core/time_integration/time_accurate.py`）
-            turbulence_model: Turbulence model (none/sst/ddes/wmles/les)
-            mode: turbulence_model 的别名（向后兼容）
-            physical_time: 总物理时间（秒）；未提供时按 dt*1000 估算迭代数
-            dt: 时间步长
-            tol: 收敛容差（瞬态通常传 0.0，跑满 max_iter）
-            rho_inf, vel_inf, p_inf: 自由来流条件
-            threads: numba 并行线程数；None 时取 `config.n_threads`，都没有时 -1（自动）
-            config: 可选的 `TransientConfig`，见上方参数说明与
-                run_steady 同名参数的文档（`mu_molecular`/
-                `turbulence_intensity`/`viscosity_ratio` 同样从
-                `config` 补入 `kwargs`）。
-            phase_max_iter, residual_drop_threshold: 见 run_steady 同名
-                参数文档，瞬态同样共用 `FRSolver.solve()`/
-                `run_order_continuation` 这一套机制（目标阶数 >= 1 时
-                生效，见 order_continuation/policy.py）。
-            **kwargs: 其余参数透传给 FRSolver 构造函数
+            checkpoint_file: checkpoint 文件
+            max_iter: 继续迭代的步数；0 只恢复状态（求解器与体网格存于 `self.solver`/`self.volume_mesh`，可直接导出），
+                返回未收敛的结果
+            dt: 时间步长覆盖；None 沿用 checkpoint 记录（瞬态为物理时间步长，`checkpoint_time.resume_time_step`）
+            tol: 相对收敛容差（时间精确的续算跑满全部步，`run_tolerance`）
+            其余: 同 CLI `solve resume` 同名选项（time_scheme 只在稳态格式之间切换；low_mach_precond 为 None 时沿用
+                checkpoint 记录）
 
         Returns:
-            SolverResult: Simulation result object（同时把 solver 存在
-            self.solver）
-
-        此前的实现构造了一整套本项目从未在其他任何地方使用的
-        solver_config.TimeIntegrationScheme/TransientConfig 映射链，
-        最终仍然是把表面 GridData 直接传给 FRSolver（同 run_steady 的
-        问题）——见 run_steady 文档字符串。改为与 run_steady 相同的
-        HighOrderMesh 构造流程，time_method 直接对齐 core 层真正使用
-        的 TimeIntegrationScheme 取值，不再引入第二套不兼容的枚举
-        （即 C-01/S-05 指出的双枚举不兼容问题的源头之一）。
+            SolverResult
         """
-        logger.info("Starting transient FR simulation")
+        from pathlib import Path
 
-        from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+        from autoflowcfd.cli.solve.checkpoint_io import continue_single_node, rebuild_from_checkpoint
+        from autoflowcfd.core.utils.checkpoint_time import resume_time_step
 
-        if mode is not None:
-            turbulence_model = mode
-
-        backend = backend if backend is not None else (config.backend.value if config is not None else "cpu")
-        order = order if order is not None else (config.order if config is not None else 2)
-        if turbulence_model is not None:
-            pass
-        elif config is not None:
-            turbulence_model = turbulence_solver_name(config.turbulence)
-        else:
-            turbulence_model = "sst"
-        dt = dt if dt is not None else (config.dt if config is not None else 1e-4)
-        threads = threads if threads is not None else (config.n_threads if config is not None else -1)
-        if time_method is None:
-            time_method = config.time_scheme if config is not None else "dual-time"
-        if physical_time is None and config is not None:
-            physical_time = config.total_time
-        rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
-        vel_inf = vel_inf if vel_inf is not None else (config.vel_inf if config is not None else 33.33)
-        p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
-        phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
-        residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
-        if config is not None:
-            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
-                          "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment"):
-                kwargs.setdefault(field, getattr(config, field))
-            # CFL：字段名映射与 run_steady 一致，只转发给出的值
-            if getattr(config, "cfl_init", None) is not None:
-                kwargs.setdefault("cfl_start", config.cfl_init)
-            if getattr(config, "cfl_max", None) is not None:
-                kwargs.setdefault("cfl_max", config.cfl_max)
-            if getattr(config, "cfl_min", None) is not None:
-                kwargs.setdefault("cfl_min", config.cfl_min)
-
-        # 词汇->枚举的唯一事实来源在
-        # `core/time_integration/base.py::scheme_from_name`（2026-09-18
-        # 合并，此前这里、CLI、配置层各有一份，其中配置层那份把
-        # dual-time 映到 backward_euler、imex 映到 RK3，都是静默给错值）。
-        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
-        core_time_scheme = scheme_from_name(time_method)
-        # 瞬态的显式格式做时间精确推进（全场同一物理步长的子步）；双时间步本身时间精确
-        kwargs.setdefault("time_accurate", core_time_scheme != TimeIntegrationScheme.DUAL_TIME)
-
-        if physical_time is None:
-            raise ValueError("run_transient 需要 physical_time（或带 total_time 的 config）")
-        from autoflowcfd.core.time_integration.base import physical_time_steps
-        max_iter = physical_time_steps(float(physical_time), float(dt))
-
-        mesh = HighOrderMesh(order=order)
-        mesh.load_from_volume_mesh(volume_mesh)
-
-        solver = build_single_node_solver(
-            backend, mesh, volume_mesh,
-            order=order,
-            turb_model_name=turbulence_model,
-            time_scheme=core_time_scheme,
-            rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-            n_threads=threads,
-            **kwargs,
-        )
-
-        result = solver.solve(
-            max_iter=max_iter, dt=dt, tol=tol,
-            phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold,
+        if not Path(checkpoint_file).exists():
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_file}")
+        logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
+        solver, iteration, metadata, volume_mesh = rebuild_from_checkpoint(
+            checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
+            skip_quality_check=skip_quality_check, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=time_scheme, gpu_device=0 if gpu_device is None else gpu_device,
+            low_mach_precond=low_mach_precond,
         )
         self.solver = solver
+        self.volume_mesh = volume_mesh
+        logger.info(f"State restored from checkpoint (iter={iteration})")
+        if max_iter <= 0:
+            from autoflowcfd.core.fr_solver.state import SolverResult
 
-        logger.info(
-            f"Transient simulation complete: {result.iterations} iterations, "
-            f"converged={result.converged}"
-        )
-
-        return result
-
-    def resume_simulation(self, checkpoint_file: str, **kwargs) -> Any:
-        """从检查点恢复仿真。"""
-        return api_resume_simulation(self, checkpoint_file, **kwargs)
+            return SolverResult(converged=False, iterations=iteration, final_residual=float("nan"))
+        return continue_single_node(
+            solver, iteration, metadata, checkpoint_file, max_iter=max_iter, dt=resume_time_step(dt, metadata, solver),
+            tol=tol, checkpoint_interval=checkpoint_interval, phase_max_iter=phase_max_iter,
+            residual_drop_threshold=residual_drop_threshold)

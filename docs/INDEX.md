@@ -146,7 +146,7 @@
 
 ### 高级用户（第 2-3 月）
 
-1. ✅ 学习 [API 高级用法](API.md#高级用法)
+1. ✅ 学习 [API 参考](API.md#求解)
 2. ✅ 进行 [参数化优化研究](TUTORIALS.md#算例-5-参数化优化研究)
 3. ✅ 自定义 [边界条件扩展](DEVELOPER_GUIDE.md#新增边界条件)
 4. ✅ 贡献代码或文档
@@ -198,7 +198,7 @@
 - 壁面函数: [边界系统 v2](boundary_system_v2_upgrade.md)
 
 #### 后处理
-- 气动系数: [API 参考](API.md#calculate_coefficients)
+- 气动系数: [API 参考](API.md#后处理)
 - VTK 导出: [VTK 导出指南](VTK_EXPORT_GUIDE.md)
 - 收敛分析: [算例教程](TUTORIALS.md#收敛性分析)
 

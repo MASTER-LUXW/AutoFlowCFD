@@ -5,6 +5,7 @@
 
 
 
+import functools
 from typing import Optional
 
 import click
@@ -92,7 +93,7 @@ def resolve_resume_low_mach_precond(requested, metadata) -> bool:
     return bool(metadata.get("low_mach_precond", True))
 
 
-def rebuild_solver_from_checkpoint(
+def rebuild_from_checkpoint(
     checkpoint_path: str,
     backend: Optional[str] = None,
     surface_mesh: Optional[str] = None,
@@ -154,6 +155,9 @@ def rebuild_solver_from_checkpoint(
         low_mach_precond: 低马赫预处理覆盖；`None` 时沿用 checkpoint 记录（`resolve_resume_low_mach_precond`）。
 
     Returns:
+        (solver, iteration, metadata, volume_data)：volume_data 是重建时加载的体网格（Python API 续算后低阶 VTK
+        导出要用它，不必再加载一遍）；其余三项见下。只要前三项的调用方用 `rebuild_solver_from_checkpoint`。
+
         (solver, iteration, metadata): 重建好的 FRSolver 实例（状态已从
         checkpoint 恢复）、checkpoint 记录的迭代数、以及重建所用的完整
         metadata 字典（含 input_file/order/turbulence_model/backend，
@@ -255,4 +259,10 @@ def rebuild_solver_from_checkpoint(
     from autoflowcfd.core.utils.checkpoint_time import restore_inner_iteration_limit
 
     restore_inner_iteration_limit(solver, metadata)
-    return solver, iteration, metadata
+    return solver, iteration, metadata, volume_data
+
+
+@functools.wraps(rebuild_from_checkpoint)
+def rebuild_solver_from_checkpoint(*args, **kwargs):
+    """`rebuild_from_checkpoint` 的前三项 (solver, iteration, metadata)，参数相同。"""
+    return rebuild_from_checkpoint(*args, **kwargs)[:3]

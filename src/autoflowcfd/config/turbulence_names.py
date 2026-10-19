@@ -26,9 +26,9 @@ def turbulence_solver_name(model: "TurbulenceModel") -> str:
 def turbulence_from_name(name: str) -> "TurbulenceModel":
     """求解器 / CLI 的模型名或枚举值（"sst"、"sst_kw"、"sa" ...）-> 枚举；未知名字报错，
     不静默换成别的模型。"""
-    key = str(name).lower()
+    key = str(getattr(name, "value", name)).strip().lower()
     for model, solver_name in _SOLVER_NAME_BY_TURBULENCE.items():
         if key in (solver_name, model.value):
             return model
     valid = sorted(set(_SOLVER_NAME_BY_TURBULENCE.values()) | {m.value for m in _SOLVER_NAME_BY_TURBULENCE})
-    raise ValueError(f"Unknown turbulence model '{name}', expected one of {valid}")
+    raise ValueError(f"无效的湍流模型: {name!r}。必须是以下之一: {valid}")

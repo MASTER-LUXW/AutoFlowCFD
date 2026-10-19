@@ -1,263 +1,293 @@
-"""Python API 的单元测试。"""
+"""Python API（`autoflowcfd.api`）的单元测试。
+
+2026-10-19 重构（I-167）后的约定：参数就是配置类字段（默认值与校验只在配置类里）；求解前跑与 CLI 同一道质量门；
+续算的时间步长/容差与 CLI `solve resume` 同一套（不再写死 dt=1e-3、tol=1e-6）；网格校验用真实校验器；后处理方法
+作用于 `self.solver`，没有未使用的 `result` 形参。
+"""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
-from pathlib import Path
 
 from autoflowcfd import AutoFlowCFDAPI, create_api, get_version
+from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, TurbulenceModel
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as S
+
+_GATE = "autoflowcfd.grid.validation.solve_gate.high_order_mesh_for_solver"
+_FACTORY = "autoflowcfd.cli.solve.solver_factory.build_single_node_solver"
 
 
-class TestAutoFlowCFDAPI:
-    """AutoFlowCFDAPI 类的测试。"""
+_WRITERS = ("autoflowcfd.cli.solve.checkpoint_io.periodic_checkpoint_callback",
+            "autoflowcfd.cli.solve.checkpoint_io.write_single_node_outputs",
+            "autoflowcfd.cli.solve.checkpoint_io.resume_run.periodic_checkpoint_callback",
+            "autoflowcfd.cli.solve.checkpoint_io.resume_run.write_single_node_outputs")
 
-    def setup_method(self) -> None:
-        """准备测试夹具。"""
-        self.api = AutoFlowCFDAPI()
 
-    def test_initialization(self) -> None:
-        """Test API initialization."""
-        assert self.api.verbose is False
-        assert self.api._config_loader is not None
+@pytest.fixture
+def writers():
+    """结果落盘函数的替身（替身求解器不能真的写 checkpoint）；返回 {名字: mock}。"""
+    with patch(_WRITERS[0]) as cb, patch(_WRITERS[1]) as final, patch(_WRITERS[2]) as rcb, patch(_WRITERS[3]) as rfinal, \
+         patch("autoflowcfd.api.solve._save_volume_mesh", return_value="out/volume_mesh.pkl") as save:
+        yield {"callback": cb, "final": final, "resume_callback": rcb, "resume_final": rfinal, "save": save}
 
-    def test_initialization_verbose(self) -> None:
-        """verbose 模式下的 API 初始化。"""
+
+@pytest.fixture(autouse=True)
+def _no_reference_area_estimate(request):
+    """替身体网格估算不了参考面积；求解入口的参考面积解析单独由 TestPost 验证。"""
+    if request.node.cls is TestPost:
+        yield None
+        return
+    with patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area") as resolve:
+        yield resolve
+
+
+def _solver(iterations=7):
+    solver = MagicMock()
+    solver.solve.return_value = SimpleNamespace(converged=True, iterations=iterations, final_residual=1e-9)
+    return solver
+
+
+class TestBasics:
+    def test_initialization_and_environment(self):
         api = AutoFlowCFDAPI(verbose=True)
-        assert api.verbose is True
+        assert api.verbose is True and api.solver is None and api.volume_mesh is None
+        env = api.check_environment()
+        assert {"python_version", "platform", "autoflowcfd_version", "gpu_available"} <= set(env)
+        assert api.get_version() == get_version()
 
-    def test_get_version(self) -> None:
-        """Test version retrieval."""
-        version = self.api.get_version()
-        assert version == "0.1.0"
-
-    def test_check_environment(self) -> None:
-        """Test environment check."""
-        env_info = self.api.check_environment()
-        assert "python_version" in env_info
-        assert "platform" in env_info
-        assert "autoflowcfd_version" in env_info
-        assert "gpu_available" in env_info
-
-    def test_create_steady_config(self) -> None:
-        """创建稳态配置。"""
-        config = self.api.create_steady_config(
-            backend="gpu",
-            order=3,
-            turbulence="sst_kw"
-        )
-        assert config.backend.value == "gpu"
-        assert config.order == 3
-        assert config.turbulence.value == "sst_kw"
-
-    def test_create_transient_config(self) -> None:
-        """创建瞬态配置。"""
-        config = self.api.create_transient_config(
-            backend="cpu",
-            mode="ddes",
-            dt=1e-4,
-            total_time=0.3
-        )
-        assert config.backend.value == "cpu"
-        assert config.dt == 1e-4
-        assert config.total_time == 0.3
-
-    @patch('autoflowcfd.api_grid_ops.NASParser')
-    def test_load_grid(self, mock_parser_class: Mock) -> None:
-        """Test grid loading."""
-        # Mock parser and grid data
-        mock_parser = MagicMock()
-        mock_grid_data = MagicMock()
-        mock_grid_data.get_node_count.return_value = 1000
-        mock_grid_data.get_cell_count.return_value = 2000
-        
-        mock_parser.parse.return_value = mock_grid_data
-        mock_parser_class.return_value = mock_parser
-        
-        # Test load_grid
-        grid = self.api.load_grid("test.nas", validate=False)
-        
-        assert grid == mock_grid_data
-        mock_parser_class.assert_called_once()
-
-    def test_get_grid_info(self) -> None:
-        """提取网格信息。"""
-        mock_grid = MagicMock()
-        mock_grid.node_count = 1000
-        mock_grid.cell_count = 2000
-        mock_grid.boundaries.boundary_names = ["BODY", "INLET"]
-        mock_grid.boundaries.get_boundary_cells.side_effect = lambda x: list(range(10))
-
-        info = self.api.get_grid_info(mock_grid)
-
-        assert info["node_count"] == 1000
-        assert info["cell_count"] == 2000
-        assert "boundary_groups" in info
-
-    def test_validate_grid(self) -> None:
-        """Test grid validation."""
-        mock_grid = MagicMock()
-        
-        with patch('autoflowcfd.api_grid_ops.GridValidator') as mock_validator_class:
-            mock_validator = MagicMock()
-            mock_validator.validate.return_value = {
-                "error_count": 0,
-                "warning_count": 0
-            }
-            mock_validator_class.return_value = mock_validator
-            
-            report = self.api.validate_grid(mock_grid)
-            
-            assert report["error_count"] == 0
-
-    @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.solve.build_single_node_solver')
-    def test_run_steady(self, mock_solver_class: Mock, mock_mesh_class: Mock) -> None:
-        """Test steady simulation.
-
-        run_steady 需要先把 volume_mesh 升格成 HighOrderMesh 再构造
-        求解器（见 api.py::run_steady 文档字符串——此前这里直接把
-        表面网格传给 FRSolver 是那个从未跑通过的 bug 本身），所以这里
-        同时 mock 掉 HighOrderMesh 构造与按后端分派的求解器构造（含壁距），
-        不依赖真实网格数据。
-        """
-        mock_volume_mesh = MagicMock()
-        mock_mesh_class.return_value.load_from_volume_mesh.return_value = None
-
-        mock_result = MagicMock()
-        mock_result.converged = True
-        mock_result.iterations = 1000
-
-        mock_solver = MagicMock()
-        mock_solver.solve.return_value = mock_result
-        mock_solver_class.return_value = mock_solver
-
-        result = self.api.run_steady(
-            mock_volume_mesh,
-            backend="cpu",
-            order=2,
-            max_iter=500
-        )
-
-        assert result.converged is True
-        assert result.iterations == 1000
-        mock_solver_class.assert_called_once()
-        assert mock_solver_class.call_args.args[0] == "cpu"
-        assert self.api.solver is mock_solver
-
-    @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.solve.build_single_node_solver')
-    def test_run_transient(self, mock_solver_class: Mock, mock_mesh_class: Mock) -> None:
-        """Test transient simulation."""
-        mock_volume_mesh = MagicMock()
-        mock_mesh_class.return_value.load_from_volume_mesh.return_value = None
-
-        mock_result = MagicMock()
-        mock_result.converged = True
-        mock_result.iterations = 3000
-
-        mock_solver = MagicMock()
-        mock_solver.solve.return_value = mock_result
-        mock_solver_class.return_value = mock_solver
-
-        result = self.api.run_transient(
-            mock_volume_mesh,
-            mode="ddes",
-            physical_time=0.3,
-            dt=1e-4
-        )
-
-        assert result.iterations == 3000
-        mock_solver_class.assert_called_once()
-        # physical_time/dt 决定 max_iter，solve() 应该按算出来的迭代数调用
-        _, solve_kwargs = mock_solver.solve.call_args
-        assert solve_kwargs["max_iter"] == 3000  # 0.3 s / 1e-4 s；int(0.3 / 1e-4) 截断成 2999 是 I-164 缺陷
-
-    def test_resume_simulation_missing_checkpoint(self) -> None:
-        """checkpoint 不存在时 resume 抛 FileNotFoundError。"""
-        with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
-            self.api.resume_simulation("nonexistent.h5")
-
-    def test_calculate_coefficients_without_solver_raises(self) -> None:
-        """没有求解器时报错（此前返回全零系数，读者无法区分"算出来是 0"与"没算"）。"""
-        with pytest.raises(ValueError, match="run_steady"):
-            self.api.calculate_coefficients(MagicMock())
-
-    def test_export_vtk_without_prior_solve_raises(self) -> None:
-        """export_vtk 需要先跑过 run_steady/run_transient（self.solver/
-        self.volume_mesh 均已设置）——没有的话应该给出清楚的 ValueError，
-        不是此前那种"传了错的 result.solution/grid_data 最终在别处
-        抛不相关异常"（V2.0 专家组评审逐行核实此前实现从未跑通过）。
-        """
-        assert self.api.solver is None
-        assert self.api.volume_mesh is None
-        with pytest.raises(ValueError, match="run_steady/run_transient"):
-            self.api.export_vtk(result=None, filename="output.vtk")
-
-    def test_get_convergence_history_placeholder(self) -> None:
-        """收敛历史接口。"""
-        mock_result = MagicMock()
-        history = self.api.get_convergence_history(mock_result)
-        
-        assert "iterations" in history
-        assert "residuals" in history
-        assert history["iterations"] == []
-
-    def test_load_config(self, tmp_path: Path) -> None:
-        """Test config loading."""
-        # Create temporary config file
-        config_file = tmp_path / "test.yaml"
-        config_file.write_text("""
-mode: steady
-backend: cpu
-order: 3
-turbulence: sst_kw
-max_iter: 1000
-""")
-        
-        config = self.api.load_config(str(config_file))
-        assert config is not None
-
-
-class TestCreateAPI:
-    """便捷函数 create_api 的测试。"""
-
-    def test_create_api_default(self) -> None:
-        """用默认参数创建 API。"""
-        api = create_api()
-        assert isinstance(api, AutoFlowCFDAPI)
-        assert api.verbose is False
-
-    def test_create_api_verbose(self) -> None:
-        """verbose 模式下创建 API。"""
+    def test_create_api(self):
         api = create_api(verbose=True)
-        assert api.verbose is True
+        assert isinstance(api, AutoFlowCFDAPI) and api.verbose is True
+
+
+class TestConfig:
+    def test_create_configs_use_config_field_names(self):
+        api = create_api()
+        steady = api.create_steady_config(backend="gpu", order=3, turbulence="sst", time_scheme="newton-krylov")
+        assert steady.backend.value == "gpu" and steady.order == 3
+        assert steady.turbulence is TurbulenceModel.SST_KW and steady.time_scheme is S.NEWTON_KRYLOV
+        transient = api.create_transient_config(turbulence="ddes", dt=1e-4, total_time=0.3)
+        assert transient.n_steps == 3000
+        with pytest.raises(TypeError):
+            api.create_steady_config(turbulence_model="sst")          # 旧参数名不再接受
+        with pytest.raises(ValueError, match="湍流模型"):
+            api.create_transient_config(turbulence="kepsilon")
+
+    def test_load_config_returns_a_validated_object(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text("mode: steady\nbackend: cpu\norder: 3\nturbulence: sst\nmax_iter: 300\n", encoding="utf-8")
+        cfg = create_api().load_config(path)
+        assert isinstance(cfg, SteadyConfig) and cfg.order == 3 and cfg.max_iter == 300
+        path.write_text("mode: steady\norder: 9\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="目标阶数"):
+            create_api().load_config(path)
+
+
+class TestGrid:
+    def test_load_grid_runs_the_real_surface_validator(self):
+        grid = MagicMock(node_count=10, cell_count=4)
+        with patch("autoflowcfd.grid.nas_io.parser.NASParser") as parser, \
+             patch("autoflowcfd.grid.validation.validator.GridValidator") as validator:
+            parser.return_value.parse.return_value = grid
+            validator.return_value.validate.return_value = {"passed": True, "summary": ""}
+            api = create_api()
+            assert api.load_grid("x.nas") is grid
+        validator.assert_called_once_with(grid)
+        assert api.grid_data is grid
+
+    def test_validate_volume_mesh_is_the_solve_quality_gate(self):
+        report = SimpleNamespace(passed=False)
+        with patch("autoflowcfd.grid.validation.quality_validator.MeshQualityValidator") as validator:
+            validator.return_value.validate_volume_mesh.return_value = report
+            assert create_api().validate_volume_mesh(MagicMock()) is report
+
+
+@pytest.mark.usefixtures("writers")
+class TestRunSteady:
+    def test_defaults_come_from_the_config_class(self):
+        solver = _solver()
+        with patch(_GATE) as gate, patch(_FACTORY, return_value=solver) as factory:
+            api = create_api()
+            vm = MagicMock()
+            result = api.run_steady(vm)
+        default = SteadyConfig()
+        gate.assert_called_once_with(vm, default.order, skip_quality_check=False)
+        args, kw = factory.call_args
+        assert args[0] == default.backend.value
+        assert kw["turb_model_name"] == "sst" and kw["time_scheme"] is default.time_scheme
+        assert kw["low_mach_precond"] is True and kw["gpu_device"] is None
+        solve_kw = solver.solve.call_args.kwargs
+        assert solve_kw["max_iter"] == default.max_iter and solve_kw["tol"] == default.convergence_tol
+        assert result.iterations == 7 and api.solver is solver and api.volume_mesh is vm
+
+    def test_fields_override_the_config(self, _no_reference_area_estimate):
+        solver = _solver()
+        cfg = SteadyConfig(order=1, max_iter=50, turbulence="sa")
+        vm = MagicMock()
+        with patch(_GATE), patch(_FACTORY, return_value=solver) as factory:
+            create_api().run_steady(vm, cfg, order=3, time_scheme="newton-krylov", aoa_deg=4.0, reference_area=1.5)
+        _no_reference_area_estimate.assert_called_once_with(solver, vm, 1.5)
+        kw = factory.call_args.kwargs
+        assert kw["order"] == 3 and kw["turb_model_name"] == "sa" and kw["time_scheme"] is S.NEWTON_KRYLOV
+        assert kw["aoa_deg"] == 4.0
+        assert solver.solve.call_args.kwargs["max_iter"] == 50
+        assert cfg.order == 1, "调用方的 config 对象不能被改动"
+
+    def test_unknown_field_and_wrong_config_type_are_rejected(self):
+        api = create_api()
+        with pytest.raises(TypeError, match="没有字段"):
+            api.run_steady(MagicMock(), tol=1e-8)                    # 字段名是 convergence_tol
+        with pytest.raises(TypeError, match="SteadyConfig"):
+            api.run_steady(MagicMock(), TransientConfig())
+
+    def test_quality_gate_failure_stops_the_run(self):
+        """修复前 API 直接 `HighOrderMesh.load_from_volume_mesh`，质量门 FAILED 的网格照样求解。"""
+        from autoflowcfd.grid.validation.solve_gate import MeshQualityGateError
+
+        bad = SimpleNamespace(passed=False, summary=lambda: "FAILED")
+        with patch("autoflowcfd.grid.validation.quality_validator.MeshQualityValidator") as validator, \
+             patch(_FACTORY) as factory:
+            validator.return_value.validate_volume_mesh.return_value = bad
+            with pytest.raises(MeshQualityGateError, match="质量门"):
+                create_api().run_steady(MagicMock())
+        factory.assert_not_called()
+
+
+@pytest.mark.usefixtures("writers")
+class TestRunTransient:
+    def test_steps_from_total_time_or_max_iter(self):
+        for fields, steps in ((dict(total_time=0.3, dt=1e-4), 3000), (dict(max_iter=40), 40)):
+            solver = _solver()
+            with patch(_GATE), patch(_FACTORY, return_value=solver) as factory:
+                create_api().run_transient(MagicMock(), **fields)
+            kw = solver.solve.call_args.kwargs
+            assert kw["max_iter"] == steps and kw["tol"] == 0.0
+            assert factory.call_args.kwargs["turb_model_name"] == "ddes"
+            assert factory.call_args.kwargs["time_accurate"] is False          # 默认 dual_time
+
+    def test_explicit_scheme_is_time_accurate_and_init_from_is_used(self):
+        solver = _solver()
+        with patch(_GATE), patch(_FACTORY, return_value=solver) as factory, \
+             patch("autoflowcfd.cli.solve.checkpoint_io.start_single_node_from_checkpoint") as start:
+            create_api().run_transient(MagicMock(), time_scheme="rk3", init_from_checkpoint="steady.h5")
+        assert factory.call_args.kwargs["time_accurate"] is True
+        start.assert_called_once_with(solver, "steady.h5")
+
+
+class TestWritesResults:
+    """修复前 API 从不落盘：配置的 output_dir / checkpoint_interval 被静默忽略，中断即丢失、结果不能续算。"""
+
+    def test_run_writes_checkpoints_and_results_resumable_from_the_saved_mesh(self, writers):
+        solver = _solver(iterations=12)
+        vm = MagicMock()
+        with patch(_GATE), patch(_FACTORY, return_value=solver):
+            create_api().run_steady(vm, output_dir="case_a", checkpoint_interval=25, turbulence="sa")
+        writers["save"].assert_called_once_with(vm, "case_a")
+        cb_args = writers["callback"].call_args
+        assert cb_args.args == (25, "case_a", "out/volume_mesh.pkl", "sa", "cpu")
+        assert cb_args.kwargs["transient"] is False
+        assert solver.solve.call_args.kwargs["checkpoint_callback"] is writers["callback"].return_value
+        final = writers["final"].call_args
+        assert final.args == (solver, "case_a", 12, "out/volume_mesh.pkl", "sa", "cpu")
+
+    def test_transient_outputs_are_marked_transient(self, writers):
+        with patch(_GATE), patch(_FACTORY, return_value=_solver()):
+            create_api().run_transient(MagicMock(), max_iter=3)
+        assert writers["callback"].call_args.kwargs["transient"] is True
+        assert writers["final"].call_args.kwargs["transient"] is True
+
+    def test_saved_mesh_is_the_volume_mesh_pickle(self, tmp_path):
+        import pickle
+
+        from autoflowcfd.api.solve import _save_volume_mesh
+
+        path = _save_volume_mesh({"cells": [1, 2, 3]}, str(tmp_path / "out"))
+        with open(path, "rb") as f:
+            assert pickle.load(f) == {"cells": [1, 2, 3]}
+        assert path.endswith("volume_mesh.pkl")
+
+
+class TestResume:
+    def test_missing_checkpoint(self):
+        with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
+            create_api().resume_simulation("nonexistent.h5")
+
+    _META = {"input_file": "case/volume_mesh.pkl", "turbulence_model": "sa", "backend": "cpu"}
+
+    def _resume(self, tmp_path, scheme, metadata, **kw):
+        metadata = {**self._META, **metadata}
+        (tmp_path / "checkpoints").mkdir(exist_ok=True)
+        ck = tmp_path / "checkpoints" / "c.h5"
+        ck.write_bytes(b"")
+        solver = _solver()
+        solver.time_integrator = SimpleNamespace(scheme=scheme)
+        vm = MagicMock()
+        with patch("autoflowcfd.cli.solve.checkpoint_io.rebuild_from_checkpoint",
+                   return_value=(solver, 150, metadata, vm)) as rebuild:
+            api = create_api()
+            api.resume_simulation(str(ck), **kw)
+        return api, solver, rebuild, vm
+
+    def test_dual_time_resume_keeps_the_checkpoint_time_step(self, tmp_path, writers):
+        """修复前 API 续算写死 dt=1e-3、tol=1e-6：续算瞬态时静默改掉物理时间步、按残差提前停；且不落盘。"""
+        api, solver, _, vm = self._resume(tmp_path, S.DUAL_TIME, {"dt": 2.5e-4}, max_iter=10)
+        kw = solver.solve.call_args.kwargs
+        assert kw["dt"] == 2.5e-4 and kw["tol"] == 0.0
+        assert api.solver is solver and api.volume_mesh is vm      # 续算后可直接导出
+        cb = writers["resume_callback"].call_args
+        assert cb.args[1] == str(tmp_path) and cb.kwargs["iteration_offset"] == 150 and cb.kwargs["transient"] is True
+        final = writers["resume_final"].call_args
+        assert final.args[2] == 150 + 7 and final.kwargs["transient"] is True
+
+    def test_steady_resume_options_reach_the_rebuild(self, tmp_path, writers):
+        _, solver, rebuild, _ = self._resume(tmp_path, S.NEWTON_KRYLOV, {}, max_iter=5, time_scheme="rk3",
+                                             low_mach_precond=False, cfl_max=50.0)
+        kw = rebuild.call_args.kwargs
+        assert kw["time_scheme"] == "rk3" and kw["low_mach_precond"] is False and kw["cfl_max"] == 50.0
+        assert solver.solve.call_args.kwargs["tol"] == SteadyConfig().convergence_tol
+
+    def test_zero_steps_only_restores(self, tmp_path):
+        _, solver, _, _ = self._resume(tmp_path, S.SSP_RK3, {})
+        solver.solve.assert_not_called()
+
+
+class TestPost:
+    def test_reference_area_defaults_to_the_windward_projection(self):
+        """修复前缺省 reference_area=1.0：系数量级随网格单位任意。现在与 CLI 同一个估算函数。"""
+        api = create_api()
+        api.solver = MagicMock()
+        api.solver.host_view.return_value = SimpleNamespace(freestream={"vel_inf": 30.0})
+        api.volume_mesh = MagicMock()
+        coeffs = SimpleNamespace(to_dict=lambda: {"Cd": 0.3})
+        with patch("autoflowcfd.cli.solve.aero_coefficients.reference_area_for", return_value=2.2) as area,              patch("autoflowcfd.postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr",
+                   return_value=coeffs) as compute:
+            assert api.calculate_coefficients() == {"Cd": 0.3}
+        assert area.call_args.args[2] is None
+        assert compute.call_args.kwargs["reference_area"] == 2.2
+
+    def test_methods_need_a_solver(self):
+        api = create_api()
+        with pytest.raises(ValueError, match="run_steady"):
+            api.calculate_coefficients(reference_area=2.0)
+        with pytest.raises(ValueError, match="run_steady"):
+            api.export_vtk("output.vtk")
+        assert api.get_convergence_history() == {"iterations": [], "residuals": []}
 
 
 class TestGetVersion:
-    """get_version 函数的测试。"""
-
-    def test_version_format(self) -> None:
-        """版本字符串的格式。"""
-        version = get_version()
-        assert isinstance(version, str)
-        assert len(version) > 0
-
-    def test_version_matches_module(self) -> None:
-        """版本号与模块的 __version__ 一致。"""
+    def test_version_matches_module(self):
         import autoflowcfd
-        assert get_version() == autoflowcfd.__version__
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        assert get_version() == autoflowcfd.__version__ and len(get_version()) > 0
 
 
 class TestApiGenerateVolumeMesh:
-    """`AutoFlowCFDAPI.generate_volume_mesh` 此前必崩（门面多传一个位置参数 `method`），且 API 自己直接构造
-    VolumeMeshGenerator、生成的网格不带面网格数据。现在与 CLI 走同一个入口。"""
+    """`AutoFlowCFDAPI.generate_volume_mesh` 与 CLI `grid generate-volume` 走同一个入口（此前门面多传一个位置参数
+    `method` 必崩，且 API 自己构造 VolumeMeshGenerator、生成的网格不带面网格数据）。"""
 
     def _surface(self):
         import numpy as np
-        from types import SimpleNamespace
 
         xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
         nodes = SimpleNamespace(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
@@ -266,7 +296,6 @@ class TestApiGenerateVolumeMesh:
             boundaries=SimpleNamespace(groups={}, bc_types={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0, 1]))
 
     def test_forwards_parameters_and_keeps_surface_mesh(self, monkeypatch):
-        from types import SimpleNamespace
         import autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator as vmg
 
         seen = {}
@@ -286,6 +315,14 @@ class TestApiGenerateVolumeMesh:
         assert mesh.surface_mesh["faces"].shape == (4, 3)
 
     def test_unknown_parameter_is_rejected(self):
-        api = create_api()
         with pytest.raises(TypeError, match="method"):
-            api.generate_volume_mesh(self._surface(), method="tetrahedral")
+            create_api().generate_volume_mesh(self._surface(), method="tetrahedral")
+
+
+def test_quickstart_style_example_uses_existing_names():
+    """包文档与门面文档里的示例参数名必须真实存在（此前示例对面网格调 run_steady、传 turbulence/convergence_tol）。"""
+    import inspect
+
+    sig = inspect.signature(AutoFlowCFDAPI.calculate_coefficients)
+    assert "result" not in sig.parameters and "reference_area" in sig.parameters
+    assert "result" not in inspect.signature(AutoFlowCFDAPI.export_vtk).parameters

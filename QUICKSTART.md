@@ -229,49 +229,27 @@ poetry run autoflowcfd solve steady volume_mesh.pkl -c config.yaml
 
 ### 方式二：Python API（推荐开发者）
 
-创建 `run_simulation.py` 脚本：
+创建 `run_simulation.py` 脚本（完整参考见 [API 文档](docs/API.md)）：
 
 ```python
 from autoflowcfd import AutoFlowCFDAPI
 
-# 创建 API 实例
-api = AutoFlowCFDAPI(verbose=True)
+api = AutoFlowCFDAPI()
 
-# 加载网格
-print("📂 加载网格文件...")
-grid = api.load_grid("examples/ahmed_demo/ahmed_body_demo.nas")
-print(f"✅ 网格加载成功: {grid.node_count} 节点, {grid.cell_count} 单元")
+# 面网格 -> 体网格（与 `grid generate-volume` 同一入口）
+surface = api.load_grid("examples/ahmed_demo/ahmed_body_demo.nas")
+volume_mesh = api.generate_volume_mesh(surface)
 
-# 配置并运行稳态仿真
-print("\n🚀 启动稳态仿真...")
-result = api.run_steady(
-    grid,
-    backend="cpu",
-    turbulence="sst_kw",
-    order=2,
-    max_iter=1000,
-    convergence_tol=1.0e-6,
-    output_dir="./quick_test_output"
-)
+# 稳态求解（参数名同配置文件字段，见 docs/CONFIGURATION_GUIDE.md；求解前跑网格质量门）
+result = api.run_steady(volume_mesh, order=2, turbulence="sst", max_iter=1000, output_dir="./quick_test_output")
+print(f"收敛: {result.converged}  迭代: {result.iterations}  最终残差: {result.final_residual:.6e}")
 
-# 输出结果
-print("\n" + "="*60)
-print("📊 仿真结果摘要")
-print("="*60)
-print(f"收敛状态: {'✅ 已收敛' if result.converged else '❌ 未收敛'}")
-print(f"迭代次数: {result.iterations}")
-print(f"最终残差: {result.final_residual:.6e}")
+# 气动系数（参考面积缺省按来流方向的迎风投影估算）
+coeffs = api.calculate_coefficients()
+print(f"Cd = {coeffs['Cd']:.4f}  Cl = {coeffs['Cl']:.4f}  Cs = {coeffs['Cs']:.4f}")
 
-coeffs = api.calculate_coefficients(result)
-print(f"\n风阻系数 Cd: {coeffs['Cd']:.4f}")
-print(f"升力系数 Cl: {coeffs['Cl']:.4f}")
-print(f"侧力系数 Cs: {coeffs['Cs']:.4f}")
-print("="*60)
-
-# 导出 VTK 可视化文件
-print("\n💾 导出可视化数据...")
-api.export_vtk(result, output_file="./quick_test_output/result.vtu")
-print("✅ 导出完成！可使用 ParaView 打开 result.vtu 查看流场")
+# 导出 VTK（ParaView 打开）
+api.export_vtk("./quick_test_output/result.vtu")
 ```
 
 运行脚本：

@@ -7,8 +7,8 @@ from typing import Optional, Tuple
 import click
 
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.validation.solve_gate import MeshQualityGateError, high_order_mesh_for_solver
 from autoflowcfd.grid.schema.grid_data import VolumeMeshData
-from autoflowcfd.grid.curved_mapping.curved_mapping import MeshDistortionError
 
 
 def load_mesh_for_solver(
@@ -124,40 +124,10 @@ def load_mesh_for_solver(
 
     print(f"Volume mesh loaded: {volume_data.nodes.count} nodes, {volume_data.cell_count} cells")
 
-    if skip_quality_check:
-        print("⚠️  --skip-quality-check 已启用，跳过求解前的网格质量门检查")
-    else:
-        if report is None:
-            # .pkl 路径没有随身带质量报告（不像 .nas 路径复用了
-            # import_external_volume_mesh 内部已经跑过的那一份），这里现场
-            # 补一次 - 两条路径最终都必须经过同一道质量门检查，不能因为走的
-            # 是哪条加载路径而有差别。
-            from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
-            print("Validating volume mesh quality before solving...")
-            report = MeshQualityValidator().validate_volume_mesh(volume_data)
-        if not report.passed:
-            raise click.ClickException(
-                f"网格质量门检查未通过，拒绝求解（避免残差在退化单元处异常"
-                f"放大）：\n{report.summary()}\n"
-                f"如果明确了解风险、只是想临时诊断，可以加 "
-                f"--skip-quality-check 跳过这道检查强行求解。"
-            )
-        print("✅ Volume mesh quality gate passed")
-
-    mesh = HighOrderMesh(order=order)
+    # 质量门与高阶网格构造：与 Python API 共用 `grid/validation/solve_gate.py`。.nas 路径复用导入时已经跑过的质量
+    # 报告，.pkl 路径在那里现场算一次——两条加载路径必须经过同一道质量门
     try:
-        mesh.load_from_volume_mesh(volume_data)
-    except MeshDistortionError as e:
-        # 质量门检查（上面）用启发式指标筛查网格质量，不保证能拦住所有
-        # 退化/反转单元（尤其 --skip-quality-check 场景）；曲边映射在
-        # 构造高阶几何时会做严格的 Jacobian 符号检查，兜底再次拦截并给出
-        # 可读诊断，而不是让 UnboundLocalError/裸 ValueError 直接扎穿到
-        # 用户面前（此前 tet/prism 分支的报错逻辑本身有 bug 导致必然抛
-        # UnboundLocalError 而不是这里设计好的 MeshDistortionError，已在
-        # curved_mapping.py::compute_jacobian 修复）。
-        raise click.ClickException(
-            f"网格在构造高阶曲边几何时检测到畸变单元，拒绝求解：{e}\n"
-            f"请在网格生成/修复阶段处理该单元（'autoflowcfd grid check'/"
-            f"'repair'），不要用 --skip-quality-check 强行跳过。"
-        ) from e
+        mesh = high_order_mesh_for_solver(volume_data, order, report=report, skip_quality_check=skip_quality_check)
+    except MeshQualityGateError as e:
+        raise click.ClickException(str(e)) from e
     return mesh, volume_data

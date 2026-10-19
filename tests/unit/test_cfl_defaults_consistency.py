@@ -115,33 +115,36 @@ class TestConfigLayer:
             assert getattr(cfg, field) is None, f"{cls_name}.{field} 默认值不是 None"
 
 
+
+def _factory_kwargs(fn_name, config):
+    """用替身网格/求解器跑一次 API 入口，返回求解器工厂收到的关键字参数。"""
+    from unittest.mock import MagicMock, patch
+
+    from autoflowcfd.api import AutoFlowCFDAPI
+
+    solver = MagicMock()
+    solver.solve.return_value = MagicMock(iterations=1)
+    with patch("autoflowcfd.grid.validation.solve_gate.high_order_mesh_for_solver"), \
+         patch("autoflowcfd.cli.solve.solver_factory.build_single_node_solver", return_value=solver) as factory, \
+         patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"), \
+         patch("autoflowcfd.api.solve._save_volume_mesh", return_value="vm.pkl"), \
+         patch("autoflowcfd.cli.solve.checkpoint_io.periodic_checkpoint_callback"), \
+         patch("autoflowcfd.cli.solve.checkpoint_io.write_single_node_outputs"):
+        getattr(AutoFlowCFDAPI(), fn_name)(MagicMock(), config)
+    return factory.call_args.kwargs
+
+
 class TestApiForwardsConfigCfl:
-    """`api.run_steady` / `api.run_transient` 必须把 config 的三个字段
-    映射成 FRSolver 的构造参数（`cfl_init -> cfl_start`）。
+    """`api.run_steady` / `api.run_transient` 必须把 config 的三个字段映射成求解器的构造参数
+    （`cfl_init -> cfl_start`）——漏掉任何一个都会让该字段静默失效。用替身网格与求解器真实调用入口。"""
 
-    用源码文本检查而不是跑真实求解：这两个入口要真实网格与完整求解器，
-    而"有没有接这三个字段"是结构性事实。三个字段名各自出现即足够——
-    漏掉任何一个都会让该字段静默失效，那正是本文件要防的。
-    """
+    @pytest.mark.parametrize("fn_name,cls_name", [("run_steady", "SteadyConfig"), ("run_transient", "TransientConfig")])
+    def test_config_cfl_forwarded(self, fn_name, cls_name):
+        from autoflowcfd.config import solver_config
 
-    @pytest.mark.parametrize("fn_name", ["run_steady", "run_transient"])
-    def test_config_cfl_forwarded(self, fn_name):
-        from tests.unit._module_source import module_sources
-
-        # api 2026-09-24 拆成子包，`api_mod.__file__` 只是 __init__.py。
-        # 先定位到真正定义这个方法的子模块，再在它内部截取方法体（截取
-        # 依赖"下一个同缩进 def"，拼接后没有意义）。
-        src = next((s for _n, s in module_sources("autoflowcfd.api")
-                    if f"def {fn_name}(" in s), None)
-        assert src is not None, f"api 包里找不到 def {fn_name}("
-        start = src.index(f"def {fn_name}(")
-        # 截到下一个同缩进的 def，避免把相邻方法的代码算进来
-        nxt = src.find("\n    def ", start + 1)
-        body = src[start:nxt if nxt > 0 else len(src)]
-        for pair in ('kwargs.setdefault("cfl_start", config.cfl_init)',
-                     'kwargs.setdefault("cfl_max", config.cfl_max)',
-                     'kwargs.setdefault("cfl_min", config.cfl_min)'):
-            assert pair in body, f"api.{fn_name} 没有转发：{pair}"
+        cfg = getattr(solver_config, cls_name)(cfl_min=0.01, cfl_init=0.02, cfl_max=0.05)
+        kw = _factory_kwargs(fn_name, cfg)
+        assert (kw["cfl_start"], kw["cfl_max"], kw["cfl_min"]) == (0.02, 0.05, 0.01)
 
 
 class TestDistributedEntriesForwardCfl:

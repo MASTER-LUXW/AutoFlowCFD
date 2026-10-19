@@ -23,7 +23,7 @@ def test_sa_is_a_real_option():
 
 
 def test_unknown_name_is_an_error_not_sst():
-    with pytest.raises(ValueError, match="Unknown turbulence model"):
+    with pytest.raises(ValueError, match="无效的湍流模型"):
         turbulence_from_name("kepsilon")
 
 

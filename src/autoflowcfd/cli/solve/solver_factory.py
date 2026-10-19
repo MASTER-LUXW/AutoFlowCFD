@@ -18,14 +18,14 @@ def resolve_backend_name(backend: str) -> str:
     return "gpu" if gpu_available else "cpu"
 
 
-def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int = 0, **solver_kwargs):
+def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device=None, **solver_kwargs):
     """按后端构造单机求解器；湍流模型需要壁距时一并准备（两个后端同一个壁距来源）。
 
     Args:
         backend: "cpu"、"gpu" 或 "auto"（有可用 GPU 用 gpu，否则 cpu）
         mesh: 已加载的高阶网格
         volume_data: `load_mesh_for_solver` 返回的体网格数据（取 WALL 边界面算壁距）
-        gpu_device: GPU 设备号（只用于 gpu）
+        gpu_device: GPU 设备号（只用于 gpu；None 为 0）
         **solver_kwargs: 两个求解器同名的构造参数（`order`/`turb_model_name`/`time_scheme`/来流/CFL/...）
 
     Raises:
@@ -56,7 +56,7 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
 
     return GPUFRSolver(
-        mesh=mesh, device_id=gpu_device,
+        mesh=mesh, device_id=0 if gpu_device is None else gpu_device,
         wall_distance_source=wall_distance_source_if_needed(solver_kwargs.get("turb_model_name", "NONE"),
                                                             volume_data),
         **solver_kwargs)

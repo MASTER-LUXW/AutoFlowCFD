@@ -15,9 +15,9 @@ AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
 示例：
     >>> from autoflowcfd import AutoFlowCFDAPI
     >>> api = AutoFlowCFDAPI()
-    >>> grid = api.load_grid("car_model.nas")
-    >>> result = api.run_steady(grid, backend="gpu", order=3)
-    >>> coeffs = api.calculate_coefficients(result)
+    >>> volume_mesh = api.generate_volume_mesh(api.load_grid("car_surface.nas"))
+    >>> result = api.run_steady(volume_mesh, backend="gpu", order=3)
+    >>> coeffs = api.calculate_coefficients(reference_area=2.2)
     >>> print(f"Drag Coefficient: {coeffs['Cd']:.4f}")
 """
 
@@ -137,6 +137,6 @@ def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
         
     Example:
         >>> api = autoflowcfd.create_api()
-        >>> grid = api.load_grid("model.nas")
+        >>> grid = api.load_grid("car_surface.nas")
     """
     return AutoFlowCFDAPI(verbose=verbose)

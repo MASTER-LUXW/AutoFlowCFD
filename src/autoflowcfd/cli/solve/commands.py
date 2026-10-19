@@ -24,13 +24,9 @@ from loguru import logger
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
-from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
-from autoflowcfd.core.utils.checkpoint_time import is_dual_time, run_tolerance
-from autoflowcfd.cli.solve.checkpoint_io import (
-    periodic_checkpoint_callback,
-    rebuild_solver_from_checkpoint,
-    write_single_node_outputs,
-)
+from autoflowcfd.config.solver_config import SteadyConfig, field_default
+from autoflowcfd.core.utils.checkpoint_time import run_tolerance
+from autoflowcfd.cli.solve.checkpoint_io import continue_single_node, rebuild_solver_from_checkpoint
 
 # 真实 bug（已修复，2026-08-21）：此前这里 `import logging` +
 # `logging.getLogger(__name__)` 用的是标准库 logging，不是本项目全局
@@ -73,11 +69,12 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
                    "checkpoint 里已经存了一份，此处可不传；两者都缺失且 "
                    "input_file 是 .nas 体网格时才会报错")
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)')
-@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
+@click.option('--threads', '-j', type=int, default=field_default(SteadyConfig, 'n_threads'), show_default=True,
+              help=THREADS_HELP)
 @click.option('--skip-quality-check', is_flag=True,
               help='跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的'
                    '网格，resume 同样需要跳过；不建议，仅用于临时诊断）')
-@click.option('--checkpoint-interval', type=int, default=100,
+@click.option('--checkpoint-interval', type=int, default=field_default(SteadyConfig, 'checkpoint_interval'),
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 @click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default=None,
@@ -111,7 +108,7 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
                    'steady` 对齐为 0.01。单机与分布式续算都生效。')
 @click.option('--phase-max-iter', type=int, default=None,
               help=PHASE_MAX_ITER_HELP)
-@click.option('--residual-drop-threshold', type=float, default=100.0,
+@click.option('--residual-drop-threshold', type=float, default=field_default(SteadyConfig, 'residual_drop_threshold'),
               help=RESIDUAL_DROP_THRESHOLD_HELP)
 @click.option('--n-ranks', type=int, default=1,
               help='MPI rank 总数（>1 时重建为分布式求解器——CPU MPI"传统模式"，'
@@ -128,7 +125,7 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
 @click.option('--dt', type=float, default=None,
               help='时间步长覆盖。不给时沿用 checkpoint 记录的值（dual-time 瞬态的物理时间步长必须与原算例一致；'
                    '早于 2026-10-09 的 dual-time checkpoint 没有记录，需要显式给出）')
-@click.option('--tol', type=float, default=DEFAULT_STEADY_TOL, show_default=True,
+@click.option('--tol', type=float, default=field_default(SteadyConfig, 'convergence_tol'), show_default=True,
               help='相对收敛容差（与 solve steady --tol 同义）')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
@@ -196,28 +193,15 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         gpu_device=0 if gpu_device is None else gpu_device,
         low_mach_precond=low_mach_precond,
     )
-    input_file = metadata["input_file"]
-    turbulence_model = metadata["turbulence_model"]
-    target_backend = metadata["backend"]
-    resolved_surface_mesh = metadata.get("surface_mesh")
-    output_dir = str(Path(checkpoint_file).parent.parent)
-
-    # 中间 checkpoint（2026-08-22 修复：此前 resume 只在全部跑完后写一次）：resume 起点的绝对迭代数
-    # 作为偏移，否则文件名会用小迭代数覆盖 resume 之前就存在的同名 checkpoint
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
-    result = solver.solve(
-        max_iter=max_iter, dt=_resume_dt(dt, metadata, solver), tol=run_tolerance(tol, solver),
-        checkpoint_callback=periodic_checkpoint_callback(
-            checkpoint_interval, output_dir, input_file, turbulence_model, target_backend,
-            surface_mesh=resolved_surface_mesh, iteration_offset=iteration, transient=is_dual_time(solver)),
-        phase_max_iter=phase_max_iter,
+    # 求解 + 中间 checkpoint + 收尾写出：与 Python API 共用（checkpoint_io/resume_run.py）
+    result = continue_single_node(
+        solver, iteration, metadata, checkpoint_file, max_iter=max_iter, dt=_resume_dt(dt, metadata, solver),
+        tol=tol, checkpoint_interval=checkpoint_interval, phase_max_iter=phase_max_iter,
         residual_drop_threshold=residual_drop_threshold)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")
-
-    write_single_node_outputs(solver, output_dir, iteration + result.iterations, input_file,
-                              turbulence_model, target_backend, surface_mesh=resolved_surface_mesh)
     # solver._reference_area 而非 CLI 参数：重建时两者都是 None 会自动估算并存到这个属性上
     _report_aerodynamic_coefficients(solver.host_view(), getattr(solver, "_reference_area", None))
 
@@ -244,7 +228,7 @@ def _resume_distributed(
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
     dt: Optional[float] = None,
-    tol: float = DEFAULT_STEADY_TOL,
+    tol: float = field_default(SteadyConfig, "convergence_tol"),
     reference_area: Optional[float] = None,
     low_mach_precond: Optional[bool] = None,
 ) -> None:

@@ -18,6 +18,7 @@
 """
 
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
+import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -88,7 +89,7 @@ class SolverConfig:
             同义字段只会制造"两个名字哪个才是真的"的新歧义，不是真正
             解决 C-01。
         turbulence: 湍流模型
-        gpu_device: GPU 设备 ID（仅 GPU 模式）
+        gpu_device: GPU 设备号；None = 单 GPU 用 0、多 GPU 按 rank % GPU 数分配（`cli/solve/shared_options.py`）
         n_threads: numba 线程数，-1 = 运行时取 `DEFAULT_N_THREADS`（`core/fr_solver/solver/threads.py`；保持 -1
             不在这里改写成本机核数——2026-10-18 以前改写了，`config init` 模板因此写死生成机器的核数，CLI 的 -1
             与配置层的 -1 也不是同一个线程数）
@@ -121,10 +122,10 @@ class SolverConfig:
         >>> print(config.backend)
         'gpu'
     """
-    backend: BackendType = BackendType.AUTO
+    backend: BackendType = BackendType.CPU
     order: int = 2
     turbulence: TurbulenceModel = TurbulenceModel.SST_KW
-    gpu_device: int = 0
+    gpu_device: Optional[int] = None
     n_threads: int = -1  # -1 表示自动检测
     output_dir: str = "./results"
     checkpoint_interval: int = 100
@@ -145,12 +146,15 @@ class SolverConfig:
         同一组常量。2026-10-18 以前另有 `config/schema.py::ConfigSchema` 再校验一遍（口径不同、生产不调用），
         YAML 加载器另做一遍枚举转换；直接构造 `SteadyConfig(backend="gpuu")` 不报错。"""
         self.backend = _enum_value(BackendType, self.backend, "后端")
-        self.turbulence = _enum_value(TurbulenceModel, self.turbulence, "湍流模型")
+        # 湍流模型名接受枚举值与命令行名（sst_kw / sst 同义），唯一映射在 turbulence_names.py
+        from autoflowcfd.config.turbulence_names import turbulence_from_name
+
+        self.turbulence = turbulence_from_name(self.turbulence)
         if not (type(self)._min_order <= self.order <= MAX_ORDER):
             raise ValueError(f"FR 目标阶数必须在 {type(self)._min_order}~{MAX_ORDER} 之间，得到 {self.order}")
 
         # 验证 gpu_device
-        if self.gpu_device < 0:
+        if self.gpu_device is not None and self.gpu_device < 0:
             raise ValueError(f"GPU 设备 ID 必须为非负数，得到 {self.gpu_device}")
 
         if self.n_threads != -1 and self.n_threads < 1:
@@ -280,7 +284,7 @@ class SteadyConfig(SolverConfig):
         ...     cfl_max=0.5
         ... )
     """
-    max_iter: int = 50
+    max_iter: int = 1000
     time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3
     cfl_init: Optional[float] = None
     cfl_max: Optional[float] = None
@@ -340,8 +344,13 @@ class TransientConfig(SolverConfig):
     """
     _min_order = MIN_TRANSIENT_ORDER
 
-    dt: float = 1e-4
-    total_time: float = 0.1
+    # 瞬态的默认湍流模型与输出目录不同于稳态（与 `solve transient` 一致）
+    turbulence: TurbulenceModel = TurbulenceModel.DDES
+    output_dir: str = "./transient_results"
+    dt: float = 1e-5
+    # 总物理时间；None 时按 max_iter 个物理步推进（与 `solve transient --physical-time/--max-iter` 一致）
+    total_time: Optional[float] = None
+    max_iter: int = 100
     # 瞬态默认双时间步（时间精确的隐式内迭代）；显式格式在瞬态里做全场同一物理步长的时间精确推进
     # （`core/time_integration/time_accurate.py`）
     time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.DUAL_TIME
@@ -367,15 +376,14 @@ class TransientConfig(SolverConfig):
         if self.dt <= 0:
             raise ValueError(f"时间步长必须为正数，得到 {self.dt}")
 
-        # 验证总时间
-        if self.total_time <= 0:
+        # 验证总时间 / 步数
+        if self.total_time is not None and self.total_time <= 0:
             raise ValueError(f"总时间必须为正数，得到 {self.total_time}")
+        if self.max_iter < 1:
+            raise ValueError(f"max_iter 必须为正数，得到 {self.max_iter}")
 
         _raise_on_cfl_triplet(self)
 
-        # 计算总步数
-        from autoflowcfd.core.time_integration.base import physical_time_steps
-        self.total_steps = physical_time_steps(self.total_time, self.dt)
 
         # 验证自由流条件
         if self.rho_inf <= 0:
@@ -387,35 +395,15 @@ class TransientConfig(SolverConfig):
     
     @property
     def n_steps(self) -> int:
-        """获取总时间步数。"""
-        return self.total_steps
+        """物理时间步数：给了 total_time 时按 `physical_time_steps` 换算（唯一换算函数），否则为 max_iter。"""
+        if self.total_time is None:
+            return self.max_iter
+        from autoflowcfd.core.time_integration.base import physical_time_steps
+
+        return physical_time_steps(self.total_time, self.dt)
 
 
-def create_steady_config(**kwargs) -> SteadyConfig:
-    """创建带有默认值的稳态配置的工厂函数。
-    
-    Args:
-        **kwargs: 覆盖默认值
-        
-    Returns:
-        SteadyConfig: 配置好的稳态求解器配置
-        
-    示例:
-        >>> config = create_steady_config(backend="gpu", max_iter=10000)
-    """
-    return SteadyConfig(**kwargs)
-
-
-def create_transient_config(**kwargs) -> TransientConfig:
-    """创建带有默认值的瞬态配置的工厂函数。
-    
-    Args:
-        **kwargs: 覆盖默认值
-        
-    Returns:
-        TransientConfig: 配置好的瞬态求解器配置
-        
-    示例:
-        >>> config = create_transient_config(dt=1e-5, total_time=0.5)
-    """
-    return TransientConfig(**kwargs)
+def field_default(config_cls, name: str):
+    """配置类字段的默认值（命令行选项默认值、Python API 续算参数默认值都读这里——默认值只在配置类里写一次）。"""
+    f = next(f for f in dataclasses.fields(config_cls) if f.name == name)
+    return f.default if f.default is not dataclasses.MISSING else f.default_factory()

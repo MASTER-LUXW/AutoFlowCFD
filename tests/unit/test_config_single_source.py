@@ -95,3 +95,34 @@ def test_template_comments_cover_every_field_and_template_round_trips(tmp_path, 
     assert "n_threads: -1" in text, "模板不能写死生成机器的核数"
     loaded = loader.load(path)
     assert type(loaded) is cls and loaded == cls()
+
+
+@pytest.mark.parametrize("command,cls", [("steady", SteadyConfig), ("transient", TransientConfig)])
+def test_cli_option_defaults_are_the_config_defaults(command, cls):
+    """命令行选项默认值读配置类（`cli/solve/shared_options.py`）。2026-10-19 以前各写一份：稳态最大步数 1000 vs 50、
+    瞬态湍流模型 ddes vs sst、瞬态 dt 1e-5 vs 1e-4、瞬态输出目录、--gpu-device。"""
+    from autoflowcfd.cli.solve.config_file import _cli_name, _cli_value
+
+    params = {p.name: p for p in cli.commands["solve"].commands[command].params}
+    default = cls()
+    for f in dataclasses.fields(cls):
+        if not f.init:
+            continue
+        p = params[_cli_name(f.name, params)]
+        assert p.default == _cli_value(p, f.name, getattr(default, f.name)), (command, f.name)
+
+
+def test_multi_gpu_default_device_lets_each_rank_pick_its_own(tmp_path):
+    """`solve steady --multi-gpu` 不给 --gpu-device 时传 None（多 GPU 求解器按 rank % GPU 数分配）。修复前默认 0，
+    每个 rank 都用 0 号 GPU，与帮助文字"每个 rank 自动分配"不符。"""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    mesh = tmp_path / "m.pkl"
+    mesh.write_bytes(b"")
+    with patch("autoflowcfd.cli.solve.steady.command._run_multi_gpu") as run:
+        res = CliRunner().invoke(cli, ["solve", "steady", str(mesh), "--backend", "gpu", "--multi-gpu",
+                                       "--n-ranks", "2"])
+    assert res.exit_code == 0, res.output
+    assert run.call_args.kwargs["gpu_device"] is None

@@ -35,9 +35,9 @@
 2. YAML 里**显式写出**的字段；
 3. 命令行选项的默认值。
 
-YAML 里没写的字段**不参与**——不会用配置类自己的默认值去覆盖命令行默认值（例如配置类的 `max_iter` 默认 50，
-只写了来流参数的 YAML 不会把 `solve steady` 的最大步数从 1000 改成 50）。YAML 里出现当前命令没有对应参数的
-字段（例如把瞬态的 `dt` 写进稳态配置）时报错，而不是静默忽略。
+三条入口的默认值是同一份：命令行选项的默认值就读配置类的字段默认值（`cli/solve/shared_options.py`），下表"默认"
+一列对命令行、YAML 与 Python API 都成立。YAML 里出现当前命令没有对应参数的字段（例如把瞬态的 `dt` 写进稳态配置）
+时报错，而不是静默忽略。
 
 ---
 
@@ -63,12 +63,12 @@ vel_inf: 40.0
 
 | 字段 | 默认 | 对应命令行 | 说明 |
 |---|---|---|---|
-| `backend` | `auto` | `--backend` | `cpu` / `gpu` / `auto`（有可用 GPU 时用 gpu） |
+| `backend` | `cpu` | `--backend` | `cpu` / `gpu` / `auto`（有可用 GPU 时用 gpu；命令行只收 cpu/gpu） |
 | `order` | `2` | `--order` | FR 目标阶数 0~3；>=1 时从 P0 逐阶爬坡（Order Continuation） |
-| `turbulence` | `sst_kw` | `--turbulence-model` | `none` / `sst_kw` / `sa` / `ddes` / `iddes` / `wmles` / `les`（命令行里 `sst_kw` 写作 `sst`） |
-| `gpu_device` | `0` | `--gpu-device` | GPU 设备号 |
+| `turbulence` | `sst_kw`（瞬态 `ddes`） | `--turbulence-model` | `none` / `sst`（同 `sst_kw`）/ `sa` / `ddes` / `iddes` / `wmles` / `les` |
+| `gpu_device` | `null` | `--gpu-device` | GPU 设备号；`null` = 单 GPU 用 0、多 GPU 按 rank % GPU 数分配 |
 | `n_threads` | `-1` | `--threads` | CPU 线程数，`-1` = 运行时取本机核数 |
-| `output_dir` | `./results` | `--output` | 结果目录 |
+| `output_dir` | `./results`（瞬态 `./transient_results`） | `--output` | 结果目录 |
 | `checkpoint_interval` | `100` | `--checkpoint-interval` | 中间 checkpoint 间隔（步） |
 | `turbulence_intensity` | `0.01` | `--turbulence-intensity` | 来流湍流强度 Tu，(0, 1] |
 | `viscosity_ratio` | `5.0` | `--viscosity-ratio` | 来流粘性比 nu_t/nu |
@@ -83,7 +83,7 @@ vel_inf: 40.0
 
 | 字段 | 默认 | 对应命令行 | 说明 |
 |---|---|---|---|
-| `max_iter` | `50` | `--max-iter` | 最大迭代步数（命令行默认 1000；见上文"优先级"） |
+| `max_iter` | `1000` | `--max-iter` | 最大迭代步数 |
 | `time_scheme` | `ssp_rk3` | `--time-scheme` | 稳态推进格式：`rk3`（显式）/ `newton-krylov`（隐式） |
 | `cfl_init` / `cfl_max` / `cfl_min` | `null` | `--cfl-start` / `--cfl-max` / `--cfl-min` | 自适应 CFL 初值/上限/下限；`null` 按时间格式取默认（显式 0.03/0.06/0.01，隐式 SER 律起点 5） |
 | `convergence_tol` | `1e-6` | `--tol` | 相对收敛容差（目标阶数的残差降到初值的 tol 倍） |
@@ -94,8 +94,9 @@ vel_inf: 40.0
 
 | 字段 | 默认 | 对应命令行 | 说明 |
 |---|---|---|---|
-| `dt` | `1e-4` | `--dt` | 物理时间步长 (s) |
-| `total_time` | `0.1` | `--physical-time` | 总物理时间 (s)；步数 = total_time/dt（非整数倍时向上取整并告警） |
+| `dt` | `1e-5` | `--dt` | 物理时间步长 (s) |
+| `total_time` | `null` | `--physical-time` | 总物理时间 (s)；步数 = total_time/dt（非整数倍时向上取整并告警） |
+| `max_iter` | `100` | `--max-iter` | `total_time` 为 `null` 时的物理时间步数 |
 | `time_scheme` | `dual_time` | `--time-method` | `dual-time`（BDF + Newton-Krylov 内迭代）或显式格式（全场同一物理步长的时间精确推进） |
 | `cfl_init` / `cfl_max` / `cfl_min` | `null` | `--cfl-start` / `--cfl-max` / `--cfl-min` | 显式：子步固定 CFL；dual-time：内迭代伪时间 CFL 的 SER 律参数 |
 | `init_from_checkpoint` | `null` | `--init-from` | 以已有 checkpoint 的场为初场（阶数可低于 `order`，精确延拓） |

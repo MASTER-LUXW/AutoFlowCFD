@@ -34,7 +34,8 @@ def test_non_positive_inputs_raise(total_time, dt):
 
 
 def test_transient_config_uses_shared_conversion():
-    assert TransientConfig(total_time=0.3, dt=0.1).total_steps == 3
+    assert TransientConfig(total_time=0.3, dt=0.1).n_steps == 3
+    assert TransientConfig(max_iter=7).n_steps == 7          # total_time 为 None 时按步数
 
 
 def test_no_truncating_conversions_left_in_source():

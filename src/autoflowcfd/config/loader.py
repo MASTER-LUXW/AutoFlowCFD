@@ -145,7 +145,7 @@ class ConfigLoader:
             config = TransientConfig(**merged)
             logger.info(
                 f"瞬态配置已加载: backend={config.backend}, "
-                f"dt={config.dt}, total_time={config.total_time}"
+                f"dt={config.dt}, 步数={config.n_steps}"
             )
             return config
         except Exception as e:
@@ -277,7 +277,7 @@ class ConfigLoader:
             'backend': '计算后端: ' + ', '.join(b.value for b in BackendType) + '（auto：有可用 GPU 用 gpu）',
             'order': f'FR 目标阶数 {lo}~{MAX_ORDER}' + ('（>=1 时从 P0 逐阶爬坡）' if steady else ''),
             'turbulence': '湍流模型: ' + ', '.join(t.value for t in TurbulenceModel),
-            'gpu_device': 'GPU 设备号',
+            'gpu_device': 'GPU 设备号（null：单 GPU 用 0，多 GPU 按 rank % GPU 数分配）',
             'n_threads': f'numba 线程数，-1 = {DEFAULT_N_THREADS}（实测扩展性甜点，不是核数）',
             'output_dir': '结果输出目录',
             'checkpoint_interval': '中间 checkpoint 保存间隔（步）',
@@ -289,7 +289,7 @@ class ConfigLoader:
             'wall_treatment': 'RANS 近壁处理: auto（平衡壁面模型）/ resolved（要求第一层 y+~1）',
             'phase_max_iter': 'Order Continuation 非最终阶段步数上限（null：按阶段数均分，目标阶数吃满剩余步数）',
             'residual_drop_threshold': 'Order Continuation 非最终阶段提前升阶所需的残差下降倍数',
-            'max_iter': '最大迭代步数',
+            'max_iter': '最大迭代步数' if steady else '物理时间步数（total_time 为 null 时生效）',
             'time_scheme': '时间格式: ' + ', '.join(sch.value for sch in schemes),
             # 留空（null）= 按时间格式取 CFL 律的默认值（显式与隐式相差两个数量级，见 build_cfl_policy）
             'cfl_init': '自适应 CFL 初值（null：按时间格式取默认）',
@@ -298,7 +298,7 @@ class ConfigLoader:
             'convergence_tol': '相对收敛容差（对应 --tol）',
             'low_mach_precond': '低马赫数伪时间预处理（不改变定常解）',
             'dt': '物理时间步长，单位秒',
-            'total_time': '总物理时间，单位秒',
+            'total_time': '总物理时间，单位秒（null：按 max_iter 个物理步）',
             'init_from_checkpoint': '以已有 checkpoint 的场为初场（null：来流均匀场）',
             'rho_inf': '自由流密度，单位 kg/m^3',
             'vel_inf': '自由流速度大小，单位 m/s',

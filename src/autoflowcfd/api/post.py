@@ -9,17 +9,17 @@
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from loguru import logger
 
 
 class _APIPostMixin:
-    """后处理：气动系数、VTK 导出、收敛历史"""
+    """后处理：气动系数、VTK 导出、收敛历史（都作用于 `self.solver` 的当前状态；`SolverResult` 不携带解场，
+    2026-10-19 以前各方法保留的未使用 `result` 形参已删除）"""
 
     def calculate_coefficients(
         self,
-        result: Any = None,
-        reference_area: float = 1.0,
+        reference_area: Optional[float] = None,
         reference_length: float = 1.0,
         moment_center: Optional[List[float]] = None,
         groups: Optional[List[str]] = None,
@@ -27,27 +27,30 @@ class _APIPostMixin:
         """当前求解器状态的气动力/力矩系数（`postprocess/fr_coefficients.py`）。
 
         Args:
-            result: 不使用（`SolverResult` 不携带解场），保留位置参数兼容
-            reference_area: 参考面积 (m^2)
+            reference_area: 参考面积 (m^2)；None 时沿来流方向的迎风投影自动估算（与 CLI 同一个函数
+                `cli/solve/aero_coefficients.py::reference_area_for`）。2026-10-19 以前缺省为 1.0，系数量级随网格单位任意
             reference_length: 力矩参考长度 (m)
             moment_center: 力矩参考点 (3,)，缺省为原点
             groups: 参与积分的 WALL 组名，缺省为全部 WALL 组
         """
         if self.solver is None or not hasattr(self.solver, 'mesh'):
             raise ValueError("calculate_coefficients 需要先运行 run_steady/run_transient 或 resume_simulation")
+        from autoflowcfd.cli.solve.aero_coefficients import reference_area_for
         from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
+        host = self.solver.host_view()
+        area = reference_area_for(host.freestream, self.volume_mesh, reference_area)
+        if area is None:
+            raise ValueError("无法从体网格自动估算参考面积（体网格不带面网格数据），请给出 reference_area")
         return compute_aerodynamic_coefficients_fr(
-            self.solver.host_view(), reference_area=reference_area, reference_length=reference_length,
+            host, reference_area=area, reference_length=reference_length,
             moment_center=moment_center, groups=groups,
         ).to_dict()
 
-    def export_vtk(self, result: Any = None, filename: str = None, high_order: bool = False,
-                   fields: Optional[List[str]] = None) -> None:
+    def export_vtk(self, filename: str, high_order: bool = False, fields: Optional[List[str]] = None) -> None:
         """导出当前求解器状态的 VTK 文件（低阶：.vtk/.vtu 按扩展名；高阶拉格朗日单元：只 .vtu）。
 
         Args:
-            result: 不使用（`SolverResult` 不携带解场），保留位置参数兼容
             filename: 输出文件名
             high_order: True 时按 FR 解的分段多项式导出高阶拉格朗日单元（`postprocess/vtk_export_highorder`）
             fields: 导出的场（默认速度、压力；可含 k/omega/nu_tilde/nut/turbulence/q_criterion，高阶导出另可含 density）
@@ -56,9 +59,7 @@ class _APIPostMixin:
         from autoflowcfd.core.backend.base import SolutionVector
 
         if self.solver is None or self.volume_mesh is None:
-            raise ValueError("export_vtk 需要先成功运行 run_steady/run_transient（self.solver 与 self.volume_mesh 均已设置）")
-        if filename is None:
-            raise ValueError("export_vtk 需要提供 filename")
+            raise ValueError("export_vtk 需要先运行 run_steady/run_transient 或 resume_simulation")
         host = self.solver.host_view()
 
         if high_order:
@@ -88,7 +89,7 @@ class _APIPostMixin:
         exporter.export(filename, fields=fields, format='xml' if filename.endswith('.vtu') else 'legacy')
         logger.info(f"VTK 已导出：{filename}")
 
-    def get_convergence_history(self, result: Any = None) -> Dict[str, list]:
+    def get_convergence_history(self) -> Dict[str, list]:
         """获取收敛历史。
 
         真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里恒为
@@ -99,9 +100,6 @@ class _APIPostMixin:
         GPUFRSolver/MultiGPUDistributedSolver 都在各自的 solve 循环里
         逐迭代 append，同一个约定，见 fr_solver/solver.py::solve() 与
         core/utils/order_continuation.py::run_order_continuation）。
-
-        Args:
-            result: 未使用，保留以兼容旧调用签名
 
         Returns:
             包含 iterations（1-based 迭代序号）和 residuals 的字典；
