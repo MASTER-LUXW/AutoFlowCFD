@@ -28,6 +28,7 @@ turbulence.py::distributed_compute_turbulence_source_and_viscosity`，
 
 import types
 import numpy as np
+from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
@@ -95,6 +96,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
 
     # ---- CPU 分布式参照（本会话早些时候已验证与单机逐位一致）----
     turb_cpu = SSTModelFR(n_local, n_sps)
+    configure_sst_model(turb_cpu, 30.0, "resolved")   # 真实求解器构造后同样设定上界
     turb_cpu.k_field = k_field[partition.local_cells].copy()
     turb_cpu.omega_field = omega_field[partition.local_cells].copy()
     U_local = U[partition.local_cells]
@@ -120,6 +122,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     mesh_data['cell_volumes'] = mesh.cell_volumes[compact_global_ids]
 
     turb_gpu = GPUTurbulenceSST(n_local, n_sps, device_id=0)
+    configure_sst_model(turb_gpu, 30.0, "resolved")   # 与 CPU 侧同一组上界
     turb_gpu.k_field = k_field[partition.local_cells].copy()
     turb_gpu.omega_field = omega_field[partition.local_cells].copy()
 

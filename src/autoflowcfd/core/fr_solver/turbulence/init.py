@@ -85,10 +85,8 @@ def _set_turbulence_bounds(solver) -> None:
     1e260+ 量级（实测 cube_demo 100 步内即达到），而平均流完全不受影响
     （nu_t 被 SST a1 限幅保持合理），形成隐蔽的发散失效模式。
     """
-    if not hasattr(solver, 'turb_model') or solver.turb_model is None:
-        return
-    if not hasattr(solver.turb_model, 'k_max'):
-        return  # 不是 SST 模型，无上界属性
+    if not isinstance(getattr(solver, "turb_model", None), SSTModelFR):
+        return  # 只有 SST（及以它为基础的 DDES/IDDES）有 k/omega 上界
     # 直接取键，理由见 `_set_freestream_turbulence` 同名注释
     from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 

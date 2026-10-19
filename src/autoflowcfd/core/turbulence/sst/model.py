@@ -65,10 +65,11 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         self.omega_inf = omega_inf
         self.k_inf = k_inf
 
-        # k/omega 物理上界（防止输运方程数值爆炸），求解器初始化时按来流与壁距重定：
-        #   k_max = 0.5 * vel_inf^2（湍动能不超过平均流动能）
+        # k/omega 物理上界（防止输运方程数值爆炸），构造点经 `bounds.configure_sst_model` 按来流设定、壁距设定后重定：
+        #   k_max = 0.5 * vel_inf^2（湍动能不超过平均流动能）；未设定时为 None，`clip_to_bounds` 报错
+        #   （2026-10-19 以前默认 1e6 占位，漏调设定函数时静默按占位值运行）
         #   omega_max 随最近壁面解点给定（`bounds.py` 模块文档），壁距未知时取 OMEGA_MAX_FLOOR
-        self.k_max: float = 1e6
+        self.k_max = None
         self.omega_max: float = OMEGA_MAX_FLOOR
 
         # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法）。

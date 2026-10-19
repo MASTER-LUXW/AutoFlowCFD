@@ -17,6 +17,7 @@ DDES/IDDES 扩展沿用完全相同的判据，唯一的额外复杂度是 IDDES
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
@@ -114,6 +115,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
             return self.mesh.cell_volumes
 
     turb_ref = SSTModelFR(n_cells, n_sps)
+    configure_sst_model(turb_ref, 30.0, "resolved")   # 真实求解器构造后同样设定上界
     turb_ref.k_field = k_field.copy()
     turb_ref.omega_field = omega_field.copy()
     solver_ref = _FakeSingleMachineSolver()
@@ -137,6 +139,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
     fake_halo = ShapeKeyedFakeHalo(U[native_ids][..., :5], k_omega_extended)
 
     turb_local = SSTModelFR(partition.n_local_cells, n_sps)
+    configure_sst_model(turb_local, 30.0, "resolved")   # 真实求解器构造后同样设定上界
     turb_local.k_field = k_field[partition.local_cells].copy()
     turb_local.omega_field = omega_field[partition.local_cells].copy()
 
@@ -260,6 +263,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
     from autoflowcfd.core.fr_solver.turbulence import compute_turbulence_source
 
     turb_ref = SSTModelFR(n_cells, n_sps)
+    configure_sst_model(turb_ref, 30.0, "resolved")   # 真实求解器构造后同样设定上界
     turb_ref.k_field = k_field.copy()
     turb_ref.omega_field = omega_field.copy()
 
@@ -305,6 +309,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
     turb_locals = {}
     for r in (0, 1):
         t = SSTModelFR(partitions[r].n_local_cells, n_sps)
+        configure_sst_model(t, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         t.k_field = k_field[partitions[r].local_cells].copy()
         t.omega_field = omega_field[partitions[r].local_cells].copy()
         turb_locals[r] = t
@@ -403,6 +408,7 @@ class TestDdesModelDistinctFromSst:
 
         def _run(turb_model_name):
             turb = SSTModelFR(n_cells, n_sps)
+            configure_sst_model(turb, 30.0, "resolved")   # 真实求解器构造后同样设定上界
             turb.k_field = k_field.copy()
             turb.omega_field = omega_field.copy()
 

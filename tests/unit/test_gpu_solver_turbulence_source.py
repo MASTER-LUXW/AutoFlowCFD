@@ -31,6 +31,7 @@ k/omega/nu_t 更新结果与 CPU 单机路径 `compute_turbulence_source`
 
 import types
 import numpy as np
+from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 import pytest
 
@@ -144,6 +145,7 @@ def _build_standins(turb_model_name):
     # ---- GPU（numpy 替身）：调用完整的 compute_turbulence_source_gpu ----
     mesh_data = _prepare_mesh_ops_data(mesh, ops)
     turb_gpu = GPUTurbulenceSST(n_cells, n_sps, device_id=0)
+    configure_sst_model(turb_gpu, 30.0, "resolved")   # 与 CPU 侧同一组上界
     turb_gpu.k_field = k_field.copy()
     turb_gpu.omega_field = omega_field.copy()
 
@@ -196,6 +198,7 @@ def _build_standins(turb_model_name):
     # ---- CPU 单机参照 ----
 
     turb_cpu = SSTModelFR(n_cells, n_sps)
+    configure_sst_model(turb_cpu, 30.0, "resolved")   # 真实求解器构造后同样设定上界
     turb_cpu.k_field = k_field.copy()
     turb_cpu.omega_field = omega_field.copy()
 

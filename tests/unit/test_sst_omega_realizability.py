@@ -9,6 +9,7 @@
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 import pytest
 
 from autoflowcfd.core.turbulence.sst import SSTModelFR
@@ -50,6 +51,7 @@ class TestAmbientSustainingTerms:
         """无剪切来流上 (k_inf, omega_inf) 的源项恰为零——标准 SST 在这里是
         `-beta* k omega` / `-beta omega^2` 的纯衰减。"""
         model = SSTModelFR(3, 2, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = K_INF
         model.omega_field[:] = OMEGA_INF
         Sk, Sw = _sources(model)
@@ -61,6 +63,7 @@ class TestAmbientSustainingTerms:
     def test_freestream_is_exact_equilibrium_under_des(self):
         """DES 分支（D_k = rho k^1.5 / l_eff）下同一个不动点同样精确成立。"""
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = K_INF
         model.omega_field[:] = OMEGA_INF
         Sk, _ = _sources(model, des=_ConstantLength(0.02))
@@ -69,6 +72,7 @@ class TestAmbientSustainingTerms:
     def test_decay_below_ambient_is_restored(self):
         """k、omega 低于环境值时源项为正（向环境值回复），高于时为负。"""
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = [[0.1 * K_INF], [10.0 * K_INF]]
         model.omega_field[:] = [[0.1 * OMEGA_INF], [10.0 * OMEGA_INF]]
         Sk, Sw = _sources(model)
@@ -79,6 +83,7 @@ class TestAmbientSustainingTerms:
         """P0（S=0、无产生项）下 omega=1e-12 不再是不动点：源项约为
         `rho beta omega_inf^2 > 0`，把它拉回来（2026-09-07 那次撞 k_max 的起点）。"""
         model = SSTModelFR(1, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = 0.0514
         model.omega_field[:] = 1e-12
         _, Sw = _sources(model)
@@ -92,6 +97,7 @@ class TestOmegaRealizabilityMin:
         n_cells, n_sps = 4, 1
         omega_inf = 100.0  # 故意设小，让强应变点的 0.1 S 更大
         model = SSTModelFR(n_cells, n_sps, k_inf=0.1, omega_inf=omega_inf)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(n_cells, n_sps)
         grad_U[0, 0, 0, 0] = 1e5  # 只有这一点有强应变
         model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5, grad_k=grad_k, grad_omega=grad_omega)
@@ -107,6 +113,7 @@ class TestOmegaRealizabilityMin:
         """安全网的前提：来流不动点 (k_inf, omega_inf) 严格高于下限，限制器在
         那里不激活。"""
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = K_INF
         model.omega_field[:] = OMEGA_INF
         _sources(model)
@@ -120,6 +127,7 @@ class TestOmegaRealizabilityMin:
         量，`bounds.py` 模块文档），模型项用 omega_eff = 0.1 omega_inf（涡粘有限），
         源项为正、把它推回来。"""
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = [[0.0514], [K_INF]]
         model.omega_field[:] = [[1e-12], [OMEGA_INF]]
         _, Sw = _sources(model)
@@ -136,6 +144,7 @@ class TestTransportedFieldsAreNotClipped:
 
     def test_negative_k_is_kept_and_restored(self):
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = [[-0.01], [K_INF]]
         model.omega_field[:] = OMEGA_INF
         Sk, _ = _sources(model)
@@ -146,6 +155,7 @@ class TestTransportedFieldsAreNotClipped:
 
     def test_limiter_only_recovers_non_finite_and_caps_upper(self):
         model = SSTModelFR(3, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        configure_sst_model(model, 30.0, "resolved")   # 真实求解器构造后同样设定上界
         model.k_field[:] = [[np.nan], [2.0 * model.k_max], [-1.0]]
         model.omega_field[:] = [[np.inf], [2.0 * model.omega_max], [-5.0]]
         model.apply_positivity_limiter()

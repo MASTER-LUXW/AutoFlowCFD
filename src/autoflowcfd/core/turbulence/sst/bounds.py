@@ -128,10 +128,20 @@ def log_omega_wall_k_slope(xp, nu, d1, k_owner, beta1: float, omega_max: float):
 
 def configure_sst_model(model, vel_inf: float, wall_treatment: str) -> None:
     """SST 模型构造后的全局设定（CPU、单 GPU、多 GPU 共用）：k_max = 0.5 vel_inf^2（湍动能不超过平均流动能）、
-    omega_max 取下限（壁距设定后按最近壁面解点重定）、近壁处理方式。"""
+    omega_max 取下限（壁距设定后按最近壁面解点重定）、近壁处理方式。
+
+    Raises:
+        ValueError: 来流速度不是正的有限值。k 上界以来流动能为尺度（各入口条件都取来流状态，没有另外的速度尺度）；
+            2026-10-19（I-43）以前来流速度为 0 时 k_max = 0、把 k 场整体截成 0（湍流被静默关掉）。
+    """
+    import math
+
     from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
 
-    model.k_max = 0.5 * float(vel_inf) ** 2
+    vel_inf = float(vel_inf)
+    if not (math.isfinite(vel_inf) and vel_inf > 0.0):
+        raise ValueError(f"SST 模型的 k 上界需要正的来流速度（收到 vel_inf={vel_inf}）")
+    model.k_max = 0.5 * vel_inf ** 2
     model.omega_max = OMEGA_MAX_FLOOR
     model.wall_treatment = validate_wall_treatment(wall_treatment)
 
@@ -178,6 +188,8 @@ def apply_omega_upper_bound(model, wall_distance, nu: float, global_min=None) ->
 def clip_to_bounds(model, xp) -> None:
     """非有限值恢复（`xp.maximum(NaN, x)` 仍是 NaN，不先处理会永久污染场）与上界。
     **不裁剪下界**，理由见模块文档。"""
+    if model.k_max is None:
+        raise RuntimeError("SST 模型的上界尚未设定（构造后必须调用 configure_sst_model）")
     k = xp.where(xp.isfinite(model.k_field), model.k_field, 0.0)
     w = xp.where(xp.isfinite(model.omega_field), model.omega_field, float(model.omega_inf))
     model.k_field = xp.minimum(k, model.k_max)
