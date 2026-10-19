@@ -96,7 +96,7 @@ class TestDistributedOrderContinuationDispatch:
         # 新阶数（P2，27 SPs/cell）下的 state 形状必须与 ops 一致——
         # 阶数切换后 partition/dist_flat_face/state 没有正确重建的话，
         # 这里会是旧阶数的形状。
-        assert solver.state.U.shape[1] == ops.D_3d.shape[0] == 27
+        assert solver.state.U.shape[1] == ops.n_sps == 27
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
     @pytest.mark.parametrize("enabled", [True, False])

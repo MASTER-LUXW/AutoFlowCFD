@@ -59,7 +59,7 @@ def convection_ghost_affine(flat, frame, m_side, dirichlet_faces, open_face):
 def _segments(mesh, ops, npr, nte):
     oi = get_overintegration_context(mesh, ops)
     overint = oi is not None
-    D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
+    D_sp = {0: np.asarray(ops.D_native_prism_padded), 1: np.asarray(ops.D_native_tet_padded)}
     n_cells = int(mesh.n_cells)
     n_prism = int(mesh.n_prism_cells)
     for kind, (lo, hi) in enumerate(((0, n_prism), (n_prism, n_cells))):
@@ -131,7 +131,7 @@ def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_til
         cross_data = np.zeros(0, dtype=np.float32)
         cross_col = cross_offset
     c_ip = resolve_viscous_ip_constant(int(mesh.order))
-    D_prism = np.ascontiguousarray(np.asarray(ops.D_3d_prism)[:npr, :npr])
+    D_prism = np.ascontiguousarray(np.asarray(ops.D_native_prism_padded)[:npr, :npr])
     D_tet = np.ascontiguousarray(np.asarray(ops.D_native_tet_padded)[:nte, :nte])
     n_own, n_nei = flat.owner_unit_normal, flat.neighbor_unit_normal
     for color in range(flat.n_colors):

@@ -124,7 +124,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     )
 
     n_local = new_partition.n_local_cells
-    new_n_sps = solver.ops.D_3d.shape[0]
+    new_n_sps = solver.ops.n_sps
     n_vars = solver.state.n_vars
     new_state = DistributedFRState(new_partition, new_n_sps)
     new_state.U[:n_local] = new_local_U
@@ -193,9 +193,8 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
 
     两种情形（`target_p` 相对 `solver.current_order` 的大小）：
     - **升阶**（`target_p > current_order`，Order Continuation 爬坡的
-      正常情形）：local 守恒变量/湍流场做精确 Lagrange 延拓插值（见
-      `_build_linear_interp_matrix_3d` 文档"只会从低阶向高阶单调推进"
-      一节——这个精确性只在升阶方向成立）。
+      正常情形）：local 守恒变量/湍流场做精确的多项式延拓（`fr/order_interp.py`：旧阶数多项式在新解点上
+      求值——这个精确性只在升阶方向成立）。
     - **降阶到目标阶数以下**（`target_p < current_order`，唯一真实
       发生的场景是 `run_order_continuation`（四个后端共用）开始爬坡前把
       solver 从"CLI 直接在目标阶数构造"重置回 P0，见该函数文档）：

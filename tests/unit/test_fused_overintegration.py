@@ -199,7 +199,7 @@ class TestRealOperators:
         for field in (wide, wide[:, :, 1:4]):          # 连续与切片视图两种输入
             V = field.shape[2]
             ref = np.empty((n, s, V, 3))
-            for lo, hi, D in ((0, npr, ops.D_3d_prism), (npr, n, ops.D_native_tet_padded)):
+            for lo, hi, D in ((0, npr, ops.D_native_prism_padded), (npr, n, ops.D_native_tet_padded)):
                 D2 = np.ascontiguousarray(np.transpose(D, (0, 2, 1))).reshape(s * 3, s)
                 gc = contract_shared_operator_1axis(D2, np.ascontiguousarray(field[lo:hi])).reshape(hi - lo, s, 3, V)
                 ref[lo:hi] = np.matmul(np.swapaxes(gc, -1, -2), inv[lo:hi])

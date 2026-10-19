@@ -98,8 +98,8 @@ def _prepare_mesh_ops_data(mesh, ops):
         'n_prism': mesh.n_prism_cells,
     }
     ops_data = {
-        'D_3d_prism': ops.D_3d_prism,
-        'D_3d_tet': ops.D_3d_tet,
+        'D_native_prism_padded': ops.D_native_prism_padded,
+        'D_native_tet_padded': ops.D_native_tet_padded,
     }
     # 补齐生产 GPU 路径会上传、替身容易漏掉的键（native 算子 + 过积分
     # 算子 + 细点度量），见 _gpu_standin_helpers 模块文档。
@@ -123,7 +123,7 @@ class TestNativeScalarTransportMatchesCpu:
         from autoflowcfd.core.turbulence.transport import compute_scalar_convection_residual as _cpu_convection
         import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+        mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
         flat = get_flat_face_geometry(mesh, ops)
         mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)
@@ -163,7 +163,7 @@ class TestNativeScalarTransportMatchesCpu:
         from autoflowcfd.core.turbulence.transport import compute_scalar_diffusion_residual as _cpu_diffusion
         import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+        mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
         flat = get_flat_face_geometry(mesh, ops)
         mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)
@@ -201,7 +201,7 @@ class TestNativeScalarTransportMatchesCpu:
         from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
         import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+        mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
         flat = get_flat_face_geometry(mesh, ops)
         mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)

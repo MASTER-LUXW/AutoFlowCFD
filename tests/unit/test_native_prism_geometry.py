@@ -101,18 +101,10 @@ class TestOperatorsAndGeometrySwitchTogether:
         # `test_native_operator_magnitude_stays_small`。
 
     @pytest.mark.parametrize("order", [1, 2, 3])
-    def test_native_aliases_the_old_field_names(self, order):
-        """`D_3d_prism` 必须别名到填充好的原生版本。
-
-        这是让"任何无条件读旧字段名的消费点自动拿到原生结果"成立的关键，
-        与四面体当年完全同一个做法。（原先还断言 `ops.prism_basis_mode ==
-        "native"`；那个字段随坍缩档一起删除了 —— 只剩一条基时，再记录
-        "当前是哪条"就是冗余。）
-        """
+    def test_padded_prism_operator_has_the_solution_point_width(self, order):
+        """原生棱柱微分算子零填充到解点宽度 `ops.n_sps`（别名 `D_3d_prism` 已于 2026-10-19 删除）。"""
         ops = self._ops(order)
-        n_global = (order + 1) ** 3
-        assert ops.D_3d_prism is ops.D_native_prism_padded
-        assert ops.D_3d_prism.shape == (n_global, n_global, 3)
+        assert ops.D_native_prism_padded.shape == (ops.n_sps, ops.n_sps, 3)
         assert ops.n_native_sps_prism == native_prism_n_sps(order)
 
     @pytest.mark.parametrize("order", [1, 2, 3])
@@ -148,7 +140,7 @@ class TestOperatorsAndGeometrySwitchTogether:
         爆炸：P1 2.05 -> P3 560.1），也就是原生把它压低了两个数量级 ——
         这正是自由流保持性从 ~1e-9 改善到机器零的直接原因。
         """
-        mag_n = float(np.abs(self._ops(order).D_3d_prism).max())
+        mag_n = float(np.abs(self._ops(order).D_native_prism_padded).max())
         ceiling = {1: 1.30, 2: 3.90, 3: 7.30}[order]
         assert mag_n <= ceiling, (
             f"order={order}: max|D_3d_prism| = {mag_n:.6f} 超过上界 "

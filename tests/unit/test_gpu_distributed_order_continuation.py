@@ -141,7 +141,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         )
 
         class _FakeOps:
-            D_3d = np.zeros((8, 8))
+            n_sps = 8
         import autoflowcfd.fr.operators as ops_mod
         patch_pkg_attr(monkeypatch, ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
 
@@ -209,7 +209,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         )
 
         class _FakeOps:
-            D_3d = np.zeros((1, 1))
+            n_sps = 1
         import autoflowcfd.fr.operators as ops_mod
         patch_pkg_attr(monkeypatch, ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
 

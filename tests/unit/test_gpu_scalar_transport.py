@@ -81,8 +81,8 @@ def _prepare_mesh_ops_data(mesh, ops):
         'n_prism': mesh.n_prism_cells,
     }
     ops_data = {
-        'D_3d_prism': ops.D_3d_prism,
-        'D_3d_tet': ops.D_3d_tet,
+        'D_native_prism_padded': ops.D_native_prism_padded,
+        'D_native_tet_padded': ops.D_native_tet_padded,
     }
     # 补齐生产 GPU 路径会上传、替身容易漏掉的键，见
     # _gpu_standin_helpers 模块文档（四处替身共用一份实现）。

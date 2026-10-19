@@ -2,7 +2,6 @@
 
 从 `fr/operators.py`（原 705 行）拆出（2026-09-19，项目"单文件不超
 500 行"规范）：这里只有容器与它的取算子方法，构建流程在 `build.py`。
-纯搬家，未改任何逻辑。
 
 容器本身的设计背景（坍缩四面体基已删除、两类原生面算子的分派约定等）
 见 `__init__.py` 的模块文档。
@@ -14,35 +13,15 @@ from dataclasses import dataclass
 
 @dataclass
 class FROperators:
-    """
-    FR 算子容器，存储预计算的所有矩阵。
+    """FR 算子容器（四面体与三棱柱都是原生基，算子零填充块对角到统一解点宽度，`fr/native_padding.py`）。
 
-    Attributes:
-        D_1d: 一维微分矩阵，形状 (n_pts, n_pts)
-        D_3d: 三维微分算子，形状 (n_pts^3, n_pts^3, 3)——朴素张量积 Lagrange
-            微分矩阵，只对六面体（无坍缩坐标退化面）正确；四面体/棱柱的
-            体积散度/梯度/几何 Jacobian 计算必须改用 D_3d_tet/D_3d_prism。
-        D_3d_tet: 四面体体积微分矩阵，形状同 D_3d——**别名到
-            `D_native_tet_padded`**（2026-09-03 起，collapsed 四面体基
-            已删除，见模块文档），不再是独立构造的坍缩坐标矩阵。
-        D_3d_prism: 棱柱专用体积微分矩阵，形状同 D_3d，用坍缩坐标模态基
-            （fr/collapsed_basis.py）通过 Vandermonde 矩阵构造，SPs
-            位置与 D_3d 完全相同（不改变点集，只改变"如何对这些点上的
-            节点值求导"）——原因见该模块文档：朴素张量积基与坍缩坐标
-            退化边（棱柱 b=+1）附近真实存在的高阶（度量项、通量的坍缩
-            坐标依赖是有理式而非低阶多项式）结构不匹配，插值多项式在
-            退化边附近的混叠误差会被同样在该处偏小的真实几何 Jacobian
-            放大到灾难量级；坍缩坐标模态基内建与退化因子匹配的结构，
-            能显著降低这一混叠误差（真实网格验证：某棱柱单元体积项
-            残差从 3.15e-11 降到 6.53e-12，约 5 倍）。棱柱没有 native
-            方案可换，这里的坍缩坐标构造不受本次删除影响。
+    2026-10-19 起删除张量积时代的 `D_1d`/`D_3d`（朴素 Lagrange 张量积微分矩阵，只对六面体正确，生产里只被拿来
+    读解点宽度）、别名 `D_3d_tet`/`D_3d_prism`（与 `D_native_tet_padded`/`D_native_prism_padded` 是同一个对象，
+    两个名字并存让消费点各写一种兜底）与恒为 "native" 的 `tet_basis_mode`；解点宽度改为显式字段 `n_sps`。
     """
-    D_1d: np.ndarray
-    D_3d: np.ndarray
-    D_3d_tet: np.ndarray = None
-    D_3d_prism: np.ndarray = None
-    # 体积项去混叠（over-integration，见 collapsed_basis.build_overintegration_operators
-    # 文档）：order==0 时全部为 None（P0 走独立的有限体积残差路径，不需要）。
+    #: 每单元解点存储宽度（全部按单元的数组与填充算子的 SP 轴长度）
+    n_sps: int
+    # 体积项去混叠（over-integration）：order==0 时全部为 None（P0 走独立的有限体积残差路径，不需要）。
     #: 棱柱**实际**使用的过积分阶数（原名 `overint_order`，2026-09-19
     #: 改名对称化）。取值由 `fr/overintegration_order.py::
     #: overintegration_order`（`2*order`）给出。
@@ -74,35 +53,23 @@ class FROperators:
     #: `fr/face_flux_trace.py`）。
     overint_lifted_div_tet: np.ndarray = None
     overint_lifted_div_prism: np.ndarray = None
-    # 四面体路径C（独立于坍缩坐标，见 fr/native_tet/basis.py 与
-    # `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6.md`
-    # 阶段0/1）：2026-09-03 起恒为非 None（native 现在是四面体唯一
-    # 实现，不再有 collapsed 分支可选，`tet_basis_mode` 字段保留仅为
-    # 兼容仍在读取它当"是否 native"判据的旧调用点，取值恒为 "native"）。
-    # D_native_tet 形状 (n_native_sps_tet, n_native_sps_tet, 3)，参考
-    # 坐标是四面体自己的 (r,s,t) 单纯形，节点数一般少于 (order+1)^3。
-    tet_basis_mode: str = "native"
+    # 原生四面体（`fr/native_tet/basis.py`）：D_native_tet 形状 (n_native_sps_tet, n_native_sps_tet, 3)，参考坐标是
+    # 四面体自己的 (r,s,t) 单纯形。
     D_native_tet: np.ndarray = None
     ref_native_tet: np.ndarray = None
     n_native_sps_tet: int = None
-    # `D_native_tet` 零填充到全局统一 SPs 宽度 `n_sps` 之后的版本
-    # （`fr/native_padding.py::pad_native_matrix_to_global`，见 Part8 文档"一、核心
-    # 不变量：零填充块对角"）。`D_3d_tet` 字段（上方 dataclass 开头）就是它的别名。
+    # `D_native_tet` 零填充到解点宽度 `n_sps` 之后的体积微分算子（`fr/native_padding.py::pad_native_matrix_to_global`）。
     # 面外插 / DG 提升见下方 `face_extrap_by_op`/`face_lift_by_op`。
     D_native_tet_padded: np.ndarray = None
 
     # ======================= 原生棱柱基（2026-09-18） =======================
     #
-    # 构造并**别名到** `D_3d_prism`（与四面体那套完全同一个做法）。面算子（外插/提升）在下方整表里按面算子
-    # 索引取（棱柱 face_id 0~4 即面编码 10~14）。
-    #
-    # 坍缩棱柱基已于 2026-09-23 删除，所以这一整组**恒为非 None**；原先
-    # 记录档位的那个字段随之删除（只有一条基，再记"当前是哪条"就是冗余）。
-    # 删除前后的对照数据见 `fr/native_prism/__init__.py`。
+    # 面算子（外插/提升）在下方整表里按面算子索引取（棱柱 face_id 0~4 即面编码 10~14）。删除坍缩棱柱基前后的对照
+    # 数据见 `fr/native_prism/__init__.py`。
     D_native_prism: np.ndarray = None
     ref_native_prism: np.ndarray = None
     n_native_sps_prism: int = None
-    #: 零填充到全局统一宽度 `(order+1)^3` 之后的体积微分算子。
+    #: 零填充到解点宽度 `n_sps` 之后的体积微分算子。
     D_native_prism_padded: np.ndarray = None
     #: 全部原生面（含三角形面的 3 个坍缩顶点槽位）按面算子索引排好的外插 / 提升整表，
     #: 填充到全局 `n_sps` 宽度：`(N_FACE_OPS, n_fp, n_sps)` / `(N_FACE_OPS, n_sps, n_fp)`

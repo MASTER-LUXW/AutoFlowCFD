@@ -57,7 +57,7 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
     （不是本次 native 改动引入的回归），不应该和 native 四面体本身的
     判据混在一起。
     """
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
 
     rho_inf, p_inf = 1.225, 101325.0
@@ -99,7 +99,7 @@ def test_native_padding_rows_stay_frozen_after_real_residual_evaluation(order):
     kernel 之后确实观察到这个效果（体积项 D_native_tet_padded + 修正项
     面提升整表两处填零共同作用的结果）。
     """
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     ref_native, _ = build_native_tet_operators(order)
     n_native = ref_native.shape[0]

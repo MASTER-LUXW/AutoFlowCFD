@@ -29,7 +29,6 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.fr.operators import generate_fr_operators
-from ..curved_mapping.curved_mapping import CurvedMapping
 from ..curved_mapping.curved_mapping_orientation import (
     fix_prism_orientation,
     fix_tet_orientation,
@@ -92,16 +91,8 @@ class HighOrderMesh:
     def __init__(self, order: int = 2):
         self.order = order
         self.n_points_1d = order + 1
-        self.n_sps_per_cell = self.n_points_1d**3
-        # 四面体体积基函数（Part6/7/8 文档，路径C/native 分支）：
-        # 2026-09-03 起恒为 "native"，不再接受 `tet_basis_mode` 参数
-        # ——坍缩坐标四面体基已删除（见 fr/operators.py 模块文档）。
-        # `_build_order_geometry`/`set_order` 恒用 native 直边常数
-        # Jacobian 构造四面体几何，`self.operators` 恒携带
-        # `D_native_tet_padded`/`face_lift_by_op` 等 native 字段。
-        self.tet_basis_mode = "native"
-
         self.operators = generate_fr_operators(order)
+        self.n_sps_per_cell = self.operators.n_sps
 
         self.sps_coords: Optional[np.ndarray] = None
         self.jacobians: Optional[Dict[str, np.ndarray]] = None
@@ -197,7 +188,6 @@ class HighOrderMesh:
         geom = self._build_order_geometry(self.order)
         self.sps_coords = geom["sps_coords"]
         self.jacobians = geom["jacobians"]
-        self._ref_cube_sps = geom["ref_cube_sps"]
         self.jacobians_fine = geom["jacobians_fine"]
         self.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
 
@@ -304,36 +294,9 @@ class HighOrderMesh:
         # 把刚构建好的这个阶数的完整几何缓存起来——顺序 Continuation 结束时
         # 切回目标阶数应直接复用这份（本来就是目标阶数），不应该重新触发一次
         # 昂贵的 Flux 点 重建（见 set_order 文档）。
-        self._order_geometry_cache[self.order] = {
-            "n_points_1d": self.n_points_1d,
-            "n_sps_per_cell": self.n_sps_per_cell,
-            "sps_coords": self.sps_coords,
-            "jacobians": self.jacobians,
-            "ref_cube_sps": self._ref_cube_sps,
-            "operators": self.operators,
-            "face_flux_points": self.face_flux_points,
-            "cell_face_misalignment": self.cell_face_misalignment,
-            "jacobians_fine": self.jacobians_fine,
-            "n_sps_per_cell_fine": self.n_sps_per_cell_fine,
-        }
-        self._active_order = self.order
+        from .high_order_mesh_order import cache_active_order
 
-    def _generate_reference_cube_sps(self, order: Optional[int] = None) -> np.ndarray:
-        """生成计算立方体参考 SPs 坐标。实现见
-        high_order_mesh_order.py::generate_reference_cube_sps（从本文件
-        拆出，控制单文件行数），文档字符串也在那里。"""
-        from .high_order_mesh_order import generate_reference_cube_sps
-
-        return generate_reference_cube_sps(self, order)
-
-    def _compute_jacobians_at_ref_points(
-        self, mapper: "CurvedMapping", ref_pts: np.ndarray, want_scaled_quality: bool
-    ) -> Optional[Dict[str, np.ndarray]]:
-        """在给定参考点集上批量计算精确 Jacobian。实现见
-        high_order_mesh_order.py::compute_jacobians_at_ref_points。"""
-        from autoflowcfd.grid.high_order.order_jacobians import compute_jacobians_at_ref_points
-
-        return compute_jacobians_at_ref_points(self, mapper, ref_pts, want_scaled_quality)
+        cache_active_order(self)
 
     def _build_order_geometry(self, order: int) -> Dict[str, np.ndarray]:
         """在给定阶数下重新推导 SPs 物理坐标与 Jacobian。实现见

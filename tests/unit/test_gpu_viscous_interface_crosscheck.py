@@ -130,7 +130,7 @@ def test_gpu_matches_cpu_native_tet_basis_nonuniform_flow(order):
     不同，见 gpu_viscous.py 模块文档），Q_o/Q_n 状态外插沿用既有的
     owner_src0/neighbor_src0 机制（该机制本身与 tet_basis_mode 无关，
     已在 CPU 端验证过对 native 面同样正确）。"""
-    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    mesh = _build_synthetic_mixed_mesh(order)
     rng = np.random.default_rng(order * 4000 + 41)
 
     rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0

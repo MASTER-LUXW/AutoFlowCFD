@@ -126,7 +126,7 @@ def test_gpu_matches_cpu_native_tet_basis_uniform_flow(order, rel_tol):
     neighbor-primary 的自身面外插 + 面校正分配）。本机没有 CuPy/CUDA，
     这个测试和上面几个一样从未在本机实际执行过，需要在真实 GPU 环境
     运行确认。"""
-    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    mesh = _build_synthetic_mixed_mesh(order)
     rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
     Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
     U_inf = primitive_to_conserved(Q_inf)
@@ -146,7 +146,7 @@ def test_gpu_matches_cpu_native_tet_basis_nonuniform_perturbed_flow(order):
     """native 四面体基 GPU 移植——非均匀扰动流场，覆盖 native 面的
     AUSM+up 非线性通量求值（side_factor 固定+1 分支）+ DG 提升算子
     分配。"""
-    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    mesh = _build_synthetic_mixed_mesh(order)
     rng = np.random.default_rng(order * 7000 + 31)
 
     rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0

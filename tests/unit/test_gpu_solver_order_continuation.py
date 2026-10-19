@@ -150,7 +150,7 @@ class TestGpuSolverInterpolateToNewOrder:
 
         # boundary_ghost_provider/mesh_data/ops 都必须随阶数重建
         # （新阶数 SEM/FP 几何形状），不是残留旧阶数的对象。
-        assert solver.ops.D_3d.shape[0] == 27
+        assert solver.ops.n_sps == 27
         assert solver.mesh_data['det_jacs'].shape[1] == 27
 
     def test_reset_to_p0_when_downgrading(self):

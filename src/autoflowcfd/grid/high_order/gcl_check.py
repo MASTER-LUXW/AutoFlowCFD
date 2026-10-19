@@ -70,9 +70,7 @@ def verify_gcl(mesh, tolerance: float = 1e-8) -> bool:
             cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
         else:
             cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i - mesh.n_prism_cells]]
-        residual = mapper.compute_metric_identity_residual(
-            mesh.sps_coords[i], cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=mesh._ref_cube_sps
-        )
+        residual = mapper.compute_metric_identity_residual(cell_type, cell_nodes)
         cell_max = float(np.max(np.abs(residual)))
         max_residual = max(max_residual, cell_max)
         if cell_max >= tolerance:

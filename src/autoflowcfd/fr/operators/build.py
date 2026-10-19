@@ -1,14 +1,9 @@
 """AutoFlowCFD V2.0 - FR 算子构建流程 `generate_fr_operators`。
 
 从 `fr/operators.py`（原 705 行）拆出（2026-09-19，项目"单文件不超
-500 行"规范）：容器定义在 `container.py`。纯搬家，未改任何逻辑。
+500 行"规范）：容器定义在 `container.py`。
 """
 
-from ..quadrature_points import gauss_legendre
-from ..matrix_operators import (
-    compute_diff_matrix_1d,
-    compute_diff_matrix_3d,
-)
 from ..overintegration_order import overintegration_order, prism_n_fine
 from .container import FROperators
 
@@ -35,34 +30,9 @@ def generate_fr_operators(order: int) -> FROperators:
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
     """
-    n = order + 1  # SPs 数量
-    # 全局统一 SPs 宽度（张量积立方体点数）——原生基（四面体/棱柱）的
-    # 真实自由度少于它，一律零填充到这个宽度，见 fr/native_padding.py
-    # 的"零填充块对角"不变量。定义在这里（而不是下方 3e 段内）是因为
-    # 棱柱原生过积分算子（第 6 段）也要用它填充粗网格轴。
-    n_sps_global = n ** 3
-
-    # 1. 生成点集
-    sps, _ = gauss_legendre(n)
-
-    # 2. 计算一维微分矩阵
-    D_1d = compute_diff_matrix_1d(sps)
-
-    # 3. 计算三维微分算子（朴素张量积，只对六面体正确；棱柱见下，
-    # 四面体走 native 单纯形基，见下方 3e）。
-    D_3d = compute_diff_matrix_3d(D_1d)
-
-    # 3b. `ref_cube_sps` 与 `boundary_extrap_prism` 都已删除
-    # （2026-09-24）：前者唯一的用途是喂给后者，后者的全部消费点随坍缩
-    # 1D 分布机制一并删除。原生棱柱/四面体的**面通量点定位**刻意复用
-    # 坍缩立方体面的参数化（`newton_locate_on_face`，等价性已验证到
-    # 7.5e-17），但那条路径自己在 `fr/face_flux_points/geometry.py` 里
-    # 调 `prism_modal_basis_and_grad`，不经过这里。
-    #
-    # 同批删除的还有 `fps`/`L_interp`（SP->FP 插值矩阵与 FP 位置）与
-    # `g_left`/`g_right`（修正函数导数）：面通量点的真实位置来自
-    # `fr/face_flux_points`（在物理面上 Newton 定位），修正函数族在
-    # DG lift 形式下不存在，两组都没有任何消费点。
+    # 解点存储宽度：原生基（四面体/棱柱）的真实自由度一律零填充到这个宽度（`fr/native_padding.py` 的"零填充块
+    # 对角"不变量）。定义在最前面是因为棱柱原生过积分算子（下一段）也要用它填充粗网格轴。
+    n_sps_global = (order + 1) ** 3
 
     # 6. 棱柱体积项去混叠算子（order==0 时 P0 走独立有限体积路径，不
     # 需要）。四面体那份见下方 3e。
@@ -140,9 +110,6 @@ def generate_fr_operators(order: int) -> FROperators:
     tet_lift_slots = {(v, sl): build_native_tet_lift(order, v, sl)
                       for v in range(4) for sl in range(N_TRI_SLOTS)}
     D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
-
-    # `D_3d_tet` 别名到 native 填充版本（"零填充块对角"设计保证与 D_3d 同构）
-    D_3d_tet = D_native_tet_padded
     # 3f. 棱柱原生基（唯一实现，见 fr/native_prism/__init__.py）。
     #
     # **必须与几何一起切换**：原生 `D` 作用在**原生棱柱节点**上的场，而
@@ -150,21 +117,13 @@ def generate_fr_operators(order: int) -> FROperators:
     # 套到坍缩节点采样的场上没有任何意义（不会报错，只会给出错的导数），
     # 所以 `grid/high_order/high_order_mesh_order.py::build_order_geometry`
     # 用同一组原生棱柱节点与雅可比。
-    D_native_prism = None
-    ref_native_prism = None
-    n_native_sps_prism = None
-    D_native_prism_padded = None
-    if True:  # 棱柱恒为原生基（坍缩档 2026-09-23 删除）
-        from ..native_prism.basis import build_native_prism_operators
-        from ..native_prism.face import build_all_native_prism_face_operators
+    from ..native_prism.basis import build_native_prism_operators
+    from ..native_prism.face import build_all_native_prism_face_operators
 
-        ref_native_prism, D_native_prism = build_native_prism_operators(order)
-        n_native_sps_prism = ref_native_prism.shape[0]
-        prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
-        D_native_prism_padded = pad_native_matrix_to_global(
-            D_native_prism, n_sps_global, pad_axes=(0, 1))
-        # 与四面体同一个别名做法：`D_3d_prism` 即原生填充版本（零填充块对角设计保证形状恒等）
-        D_3d_prism = D_native_prism_padded
+    ref_native_prism, D_native_prism = build_native_prism_operators(order)
+    n_native_sps_prism = ref_native_prism.shape[0]
+    prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
+    D_native_prism_padded = pad_native_matrix_to_global(D_native_prism, n_sps_global, pad_axes=(0, 1))
 
     # native 单纯形基过积分（去混叠）算子（Part8 文档"四·七"节）：fine
     # 网格宽度沿用与棱柱相同的 (over_order+1)^3（`n_sps_per_cell_fine`，
@@ -276,10 +235,7 @@ def generate_fr_operators(order: int) -> FROperators:
         tet_extrap_slots, tet_lift_slots, prism_extrap_slots, prism_lift_slots, n_sps_global)
 
     return FROperators(
-        D_1d=D_1d,
-        D_3d=D_3d,
-        D_3d_tet=D_3d_tet,
-        D_3d_prism=D_3d_prism,
+        n_sps=n_sps_global,
         overint_order_prism=overint_order_prism,
         overint_n_fine_prism=n_fine_prism,
         overint_n_fine_tet=n_fine_tet,
@@ -304,12 +260,3 @@ def generate_fr_operators(order: int) -> FROperators:
         face_lift_by_op=face_lift_by_op,
     )
 
-
-if __name__ == "__main__":
-    # 测试算子生成
-    order = 2
-    ops = generate_fr_operators(order)
-    
-    print(f"FR Operators for P={order}:")
-    print(f"  D_1d shape: {ops.D_1d.shape}")
-    print(f"  D_3d shape: {ops.D_3d.shape}")

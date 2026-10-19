@@ -145,11 +145,9 @@ def _coarse_viscous_div(Q, gv, gT, mut, mesh, ops):
     n_prism = mesh.n_prism_cells
     det = mesh.jacobians["det_jacs"].reshape(nc, ns)
     inv = mesh.jacobians["inv_jacs"].reshape(nc, ns, 3, 3)
-    tet_op = (ops.D_native_tet_padded
-              if getattr(ops, "D_native_tet_padded", None) is not None
-              else ops.D_3d_tet)
+    tet_op = ops.D_native_tet_padded
     div = np.zeros((nc, ns, 5))
-    for lo, hi, op_D in ((0, n_prism, ops.D_3d_prism), (n_prism, nc, tet_op)):
+    for lo, hi, op_D in ((0, n_prism, ops.D_native_prism_padded), (n_prism, nc, tet_op)):
         if hi <= lo:
             continue
         nb = hi - lo

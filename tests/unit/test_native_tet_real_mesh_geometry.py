@@ -84,9 +84,9 @@ def test_native_volume_residual_zero_on_uniform_flow_real_cells():
 def test_native_couette_residual_is_small_on_real_cells():
     """真实网格四面体单元（不是随机合成样本），Couette 剪切流解析解
     体积残差量级检查。2026-09-03 更正：本测试原先与坍缩坐标基
-    （`ops.D_3d_tet`）的残差做倍数对比，量化 native 相对 collapsed 在
+    （`ops.D_native_tet_padded`）的残差做倍数对比，量化 native 相对 collapsed 在
     真实单元上的改善幅度；坍缩坐标四面体基已删除（见 fr/operators.py
-    模块文档），对照组不再存在，也没有独立意义（`ops.D_3d_tet` 现在
+    模块文档），对照组不再存在，也没有独立意义（`ops.D_native_tet_padded` 现在
     只是 `D_native_tet_padded` 的别名，用它算"collapsed 残差"实际是
     退化 Jacobian，不是坍缩坐标基真实行为，见 test_native_simplex_
     basis.py 同一处修复的说明）。改为只验证 native 残差本身处于合理

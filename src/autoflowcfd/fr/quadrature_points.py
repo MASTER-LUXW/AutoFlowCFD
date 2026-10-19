@@ -80,31 +80,3 @@ def gauss_lobatto(n: int) -> Tuple[np.ndarray, np.ndarray]:
         weights[i] = 2.0 / (n * (n - 1) * P_n_minus_1[i]**2)
         
     return points, weights
-
-
-def generate_tensor_product_points(n: int, point_type: str = 'legendre') -> np.ndarray:
-    """
-    生成3D张量积点集。
-    
-    Args:
-        n: 每方向点数
-        point_type: 点集类型 ('legendre' 或 'lobatto')
-        
-    Returns:
-        points_3d: 3D点集坐标，形状 (n^3, 3)
-    """
-    # 生成1D点集
-    if point_type == 'legendre':
-        points_1d, _ = gauss_legendre(n)
-    elif point_type == 'lobatto':
-        points_1d, _ = gauss_lobatto(n)
-    else:
-        raise ValueError(f"Unknown point type: {point_type}")
-    
-    # 构造3D张量积网格
-    xx, yy, zz = np.meshgrid(points_1d, points_1d, points_1d, indexing='ij')
-    
-    # 展平为 (n^3, 3) 数组
-    points_3d = np.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T
-    
-    return points_3d

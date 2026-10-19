@@ -117,12 +117,12 @@ def scalar_convection_volume_divergence(scalar_field, rho, velocity, rho_u_tilde
     oi = get_overintegration_context(mesh, ops)
     if oi is not None:
         return _scalar_convection_volume_overintegrated(scalar_field, rho, velocity, oi, n_sps)
-    tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+    tet_op_D = ops.D_native_tet_padded
     div_F = np.empty((n_cells, n_sps))
     if n_prism > 0:
         scalar_convection_volume_kernel(
             np.ascontiguousarray(scalar_field[:n_prism]), np.ascontiguousarray(rho_u_tilde[:n_prism]),
-            np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism])
+            np.ascontiguousarray(ops.D_native_prism_padded), div_F[:n_prism])
     if n_cells > n_prism:
         scalar_convection_volume_kernel(
             np.ascontiguousarray(scalar_field[n_prism:]), np.ascontiguousarray(rho_u_tilde[n_prism:]),

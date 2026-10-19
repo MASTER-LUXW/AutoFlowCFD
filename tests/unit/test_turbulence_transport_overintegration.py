@@ -188,14 +188,12 @@ class TestOverintegrationIsMoreAccurate:
         G_tilde = contravariant_flux_from_metric(
             det, inv, (gamma_field[:, :, None] * grad_field)[..., None])[..., 0]
         n_prism = mesh.n_prism_cells
-        tet_op = (ops.D_native_tet_padded
-                  if getattr(ops, "D_native_tet_padded", None) is not None
-                  else ops.D_3d_tet)
+        tet_op = ops.D_native_tet_padded
         div_co = np.empty((n_cells, n_sps))
         if n_prism > 0:
             scalar_volume_divergence_kernel(
                 np.ascontiguousarray(G_tilde[:n_prism]),
-                np.ascontiguousarray(ops.D_3d_prism), div_co[:n_prism])
+                np.ascontiguousarray(ops.D_native_prism_padded), div_co[:n_prism])
         if n_cells > n_prism:
             scalar_volume_divergence_kernel(
                 np.ascontiguousarray(G_tilde[n_prism:]),

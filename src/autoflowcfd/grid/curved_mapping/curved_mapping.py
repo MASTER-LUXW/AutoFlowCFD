@@ -32,7 +32,6 @@ from numba import njit
 from typing import Dict, Tuple
 
 from autoflowcfd.fr.operators import generate_fr_operators
-from .curved_mapping_exact_jacobian import tet_exact_jacobian, prism_exact_jacobian
 
 
 @njit(cache=True)
@@ -265,107 +264,17 @@ PRISM_CUBE_FACES: Dict[str, Tuple[int, ...]] = {
 
 
 class CurvedMapping:
-    """高阶曲边映射处理器：计算物理单元内 SPs 处的 Jacobian 矩阵，验证 GCL。"""
+    """高阶单元的几何守恒律（GCL）度量恒等式检验（原生四面体/棱柱，与残差组装同一套体积微分算子）。
+
+    2026-10-19 以前另有 `compute_jacobian`（对坍缩坐标 (a,b,c) 求解析雅可比，坍缩基时代的几何构造路径，删除坍缩
+    棱柱基后只剩死代码在调用）、六面体分支（朴素张量积 `D_3d`，本项目没有六面体单元）与 `verify_gcl_strict`。
+    """
 
     def __init__(self, order: int):
         self.order = order
-        self.n_points_1d = order + 1
         self.operators = generate_fr_operators(order)
-        self.D_3d = self.operators.D_3d
 
-    def _select_d3d(self, cell_type: str) -> np.ndarray:
-        """按单元类型选择体积微分矩阵。
-
-        注意：四面体/棱柱的几何 Jacobian 计算已改用解析精确公式
-        （tet_exact_jacobian/prism_exact_jacobian），不再经过这里选出的
-        D_3d_tet/D_3d_prism——这两个坍缩坐标专用算子现在只用于两处：
-        (1) compute_metric_identity_residual 里对（解析精确的）度量场做
-        离散散度检验，须与流场残差组装实际使用的算子一致；
-        (2) core/fr_gradients.py、fr_residual_inviscid.py 等对高阶流场解
-        本身求导——流场解不像几何映射那样有已知闭式表达式，仍然需要谱
-        微分矩阵。"hex" 等无坍缩坐标退化面的单元类型，几何 Jacobian 仍走
-        朴素张量积 D_3d（compute_jacobian 里对该分支保留原逻辑）。
-        """
-        if cell_type == "tet":
-            return self.operators.D_3d_tet
-        if cell_type == "prism":
-            return self.operators.D_3d_prism
-        return self.D_3d
-
-    def compute_jacobian(
-        self,
-        phys_nodes: np.ndarray,
-        cell_id: int = -1,
-        cell_type: str = "hex",
-        cell_nodes: np.ndarray = None,
-        ref_cube_sps: np.ndarray = None,
-    ) -> Dict[str, np.ndarray]:
-        """计算物理单元内所有 SPs 处的 Jacobian 矩阵。
-
-        Args:
-            cell_type: "tet"/"prism" 用解析精确雅可比（见 tet_exact_jacobian/
-                prism_exact_jacobian 文档：直边单元的物理映射是 (a,b,c) 的
-                已知闭式表达式，解析求导没有谱微分矩阵的截断/插值误差，
-                真实网格验证在偏斜过渡区单元上把 GCL 残差从 ~1e-14 降到
-                ~1e-19，与 det(J) 大小无关），需额外传入 cell_nodes（顶点
-                物理坐标）与 ref_cube_sps（计算立方体坐标）；其他单元类型
-                （六面体等无坍缩坐标退化面）用朴素张量积 D_3d 对已插值好的
-                phys_nodes 直接求导。
-
-        抛出异常:
-            ValueError: cell_type 为 tet/prism 但未提供 cell_nodes/ref_cube_sps
-            MeshDistortionError: 检测到非正 Jacobian 行列式
-        """
-        if cell_type in ("tet", "prism"):
-            if cell_nodes is None or ref_cube_sps is None:
-                raise ValueError(
-                    f"cell_type='{cell_type}' 必须提供 cell_nodes 与 ref_cube_sps "
-                    "才能计算解析精确雅可比（不再走谱微分矩阵近似路径）"
-                )
-            exact_fn = tet_exact_jacobian if cell_type == "tet" else prism_exact_jacobian
-            jacobians = exact_fn(ref_cube_sps, cell_nodes)
-        else:
-            D_3d = self._select_d3d(cell_type)
-            total_sps = len(phys_nodes)
-            jacobians = np.zeros((total_sps, 3, 3))
-            for m in range(3):
-                for n in range(3):
-                    jacobians[:, n, m] = np.dot(D_3d[:, :, m], phys_nodes[:, n])
-
-        # total_sps 只在上面的 hex(else) 分支里赋值；tet/prism 走
-        # exact_fn 分支时从未定义，下面报错信息引用它会抛
-        # UnboundLocalError——即真正遇到畸变四面体/棱柱时，用户拿到的是
-        # 一个 Python 内部错误而不是这里设计好的 MeshDistortionError
-        # 诊断（已用共线退化四面体复现）。用 jacobians 的第一维统一补上。
-        total_sps = jacobians.shape[0]
-
-        # 闭式批量 det+inv（见 batched_det_inv_3x3 文档：数学上与
-        # np.linalg.det/np.linalg.inv 精确等价，真实网格上实测提速约
-        # 300~370 倍，是网格构建阶段原来最大的单项开销）。退化/负值
-        # Jacobian 下 inv 部分可能算出 inf/nan，但下面的检查在任何调用方
-        # 读取 inv_jacs 之前就会抛出 MeshDistortionError 中止，不会被
-        # 静默使用。
-        det_jacs, inv_jacs = batched_det_inv_3x3(np.ascontiguousarray(jacobians))
-
-        if np.any(det_jacs <= 0):
-            min_det = np.min(det_jacs)
-            n_negative = np.sum(det_jacs <= 0)
-            cell_info = f"cell {cell_id}" if cell_id >= 0 else "unknown cell"
-            raise MeshDistortionError(
-                f"Negative or zero Jacobian determinant detected in {cell_info}! "
-                f"Min det(J) = {min_det:.6e}, {n_negative}/{total_sps} SPs affected. "
-                f"This indicates mesh distortion (inverted or degenerate cell) that "
-                f"must be fixed in mesh generation/repair, not silently patched here."
-            )
-        return {"jacobians": jacobians, "det_jacs": det_jacs, "inv_jacs": inv_jacs}
-
-    def compute_metric_identity_residual(
-        self,
-        phys_nodes: np.ndarray,
-        cell_type: str = "hex",
-        cell_nodes: np.ndarray = None,
-        ref_cube_sps: np.ndarray = None,
-    ) -> np.ndarray:
+    def compute_metric_identity_residual(self, cell_type: str, cell_nodes: np.ndarray) -> np.ndarray:
         """离散几何守恒律 (GCL) 的严格检验：Kopriva 度量恒等式。
 
         真正的 GCL 要求伴随矩阵（adjugate/cofactor）的离散散度恒为零：
@@ -430,7 +339,7 @@ class CurvedMapping:
                 native_prism_exact_jacobian,
                 native_prism_n_sps,
             )
-            D_3d = self.operators.D_3d_prism
+            D_3d = self.operators.D_native_prism_padded
             n_sps = D_3d.shape[0]
             n_native = native_prism_n_sps(self.order)
             jac = native_prism_exact_jacobian(
@@ -443,31 +352,10 @@ class CurvedMapping:
             adj = np.zeros((n_sps, 3, 3))
             adj[:n_native] = det_jacs[:, None, None] * inv_jacs
         else:
-            D_3d = self._select_d3d(cell_type)
-            jac_data = self.compute_jacobian(
-                phys_nodes, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
-            )
-            det_jacs = jac_data["det_jacs"]
-            inv_jacs = jac_data["inv_jacs"]
-            adj = det_jacs[:, None, None] * inv_jacs  # adj[:, m, i] = adj(J)_{m,i}
-            n_sps = phys_nodes.shape[0]
+            raise ValueError(f"cell_type 只能是 'tet' 或 'prism'，收到 {cell_type!r}")
 
         residual = np.zeros((n_sps, 3))
         for i in range(3):
             for m in range(3):
                 residual[:, i] += D_3d[:, :, m] @ adj[:, m, i]
         return residual
-
-    def verify_gcl_strict(
-        self,
-        phys_nodes: np.ndarray,
-        tolerance: float = 1e-8,
-        cell_type: str = "hex",
-        cell_nodes: np.ndarray = None,
-        ref_cube_sps: np.ndarray = None,
-    ) -> bool:
-        """严格验证几何守恒律 (GCL)：度量恒等式残差是否在容差内。"""
-        residual = self.compute_metric_identity_residual(
-            phys_nodes, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
-        )
-        return bool(np.max(np.abs(residual)) < tolerance)

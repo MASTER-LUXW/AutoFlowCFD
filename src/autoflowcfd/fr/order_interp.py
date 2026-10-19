@@ -32,10 +32,9 @@ P1 上的线性场插成 P2 上同一个线性场（机器精度）。实测 P1-
     f_new  = V_old(nodes_new) c                 <- 在新解点上求值
     =>  W  = V_old(nodes_new) @ V_old(nodes_old)^{-1}
 
-三条基各自用**自己的**模态族与解点：
+两类单元各自用**自己的**模态族与解点（坍缩棱柱基删除前还有第三条：解点是张量积 Gauss 点、`W` 退化成一维
+Lagrange 张量积）：
 
-* 坍缩棱柱：解点就是张量积 Gauss 点，`W` 退化成一维 Lagrange 的张量积，
-  与既有实现逐位相同（本模块直接复用它，不再写第二份）；
 * 原生棱柱：PKD(三角形)⊗Legendre(挤出) 模态 + Warp&Blend⊗Gauss 解点；
 * 原生四面体：受限 PKD/Dubiner 模态 + Warp&Blend 解点。
 
@@ -104,28 +103,10 @@ def _native_tet_interp(old_order: int, new_order: int) -> np.ndarray:
 
 
 @lru_cache(maxsize=None)
-def _build_cached(old_order: int, new_order: int, prism_native: bool
-                  ) -> Tuple[np.ndarray, np.ndarray]:
-    """真正的构造 + 缓存。**缓存键必须含棱柱基**：矩阵依赖解点位置，
-    而那由当时的棱柱基决定（坍缩棱柱基已删除）。第一版只按 `(old, new)` 缓存，于是
-    同一个进程里先跑坍缩档、再跑原生档时会拿到坍缩的矩阵 —— 被
-    `tests/unit/test_order_interp_basis_aware.py` 的参数化当场抓到
-    （原生棱柱 P1->P2 相对误差 1.44e-01）。
-    """
-    if prism_native:
-        w_prism = _native_prism_interp(old_order, new_order)
-    else:
-        # 坍缩棱柱：复用既有的一维 Lagrange 张量积实现（唯一事实来源）
-        from ..core.utils.order_continuation import (
-            _build_linear_interp_matrix_3d,
-        )
-        from .quadrature_points import gauss_legendre
-
-        old_1d, _ = gauss_legendre(old_order + 1)
-        new_1d, _ = gauss_legendre(new_order + 1)
-        w_prism = np.ascontiguousarray(
-            _build_linear_interp_matrix_3d(old_1d, new_1d))
-
+def _build_cached(old_order: int, new_order: int) -> Tuple[np.ndarray, np.ndarray]:
+    """真正的构造 + 缓存（只读）。棱柱只有原生基，缓存键只需 `(old, new)`（坍缩棱柱基并存时键里还要带基，
+    否则同一进程先后跑两种基会拿错矩阵，见 `tests/unit/test_order_interp_basis_aware.py`）。"""
+    w_prism = _native_prism_interp(old_order, new_order)
     w_tet = _native_tet_interp(old_order, new_order)
     for w in (w_prism, w_tet):
         w.setflags(write=False)
@@ -143,11 +124,7 @@ def build_order_interp_matrices(old_order: int, new_order: int
         raise ValueError(
             f"阶数必须非负，收到 old_order={old_order}, "
             f"new_order={new_order}")
-    # 棱柱恒为原生基（坍缩棱柱基已于 2026-09-23 删除）。`prism_native`
-    # 这个缓存键仍然保留：它是 2026-09-20 修掉"延拓算子按基分派"那处真实
-    # 缺陷时加的，键里带着基信息本身就是那次教训的一部分；恒传 True 让
-    # 缓存语义保持显式。
-    return _build_cached(int(old_order), int(new_order), True)
+    return _build_cached(int(old_order), int(new_order))
 
 
 def apply_order_interp(field: np.ndarray, n_prism_cells: int,

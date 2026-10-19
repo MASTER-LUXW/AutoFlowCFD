@@ -11,21 +11,14 @@
 
 import numpy as np
 
-from autoflowcfd.fr.operators import gauss_legendre, generate_fr_operators
+import pytest
+
 from autoflowcfd.grid.curved_mapping.curved_mapping import (
     CurvedMapping,
     map_prism_to_physical,
     map_tet_to_physical,
-    prism_exact_jacobian,
-    tet_exact_jacobian,
 )
-
-
-def _ref_cube_sps(order: int) -> np.ndarray:
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+from autoflowcfd.grid.curved_mapping.curved_mapping_exact_jacobian import prism_exact_jacobian, tet_exact_jacobian
 
 
 def _finite_diff_jacobian(map_fn, ref_pt: np.ndarray, cell_nodes: np.ndarray) -> np.ndarray:
@@ -70,53 +63,20 @@ def test_prism_exact_jacobian_matches_finite_difference():
 
 
 def test_gcl_residual_near_machine_precision_for_sliver_tet():
-    """解析精确雅可比替代谱微分几何求导的核心验证：即使对边长比~25:1的
-    极端偏斜四面体（det(J)量级~1e-9，真实网格最差单元的典型特征），离散
-    GCL 残差也必须降到机器精度量级，而不是随 det(J) 一起被放大。"""
-    order = 2
-    ops = generate_fr_operators(order)
-    mapper = CurvedMapping(order)
-    mapper.operators = ops
-    ref_sps = _ref_cube_sps(order)
-
+    """即使对边长比~25:1 的极端偏斜四面体（真实网格最差单元的典型特征），离散 GCL 残差（原生四面体基、与残差
+    组装同一套体积微分算子）也必须在机器精度量级，而不是随 det(J) 一起被放大。"""
+    mapper = CurvedMapping(2)
     for nodes, label in [(_TET_NODES_NORMAL, "normal"), (_TET_NODES_SLIVER, "sliver")]:
-        phys_sps = map_tet_to_physical(ref_sps, nodes)
-        jac_data = mapper.compute_jacobian(
-            phys_sps, cell_type="tet", cell_nodes=nodes, ref_cube_sps=ref_sps
-        )
-        residual = mapper.compute_metric_identity_residual(
-            phys_sps, cell_type="tet", cell_nodes=nodes, ref_cube_sps=ref_sps
-        )
-        max_res = np.max(np.abs(residual))
-        min_det = jac_data["det_jacs"].min()
-        # 残差应远小于 det(J) 本身（相对残差应处于机器精度量级），而不是
-        # 和 det(J) 同量级（这正是旧的谱微分几何求导在偏斜单元上的失效模式）。
-        assert max_res < 1e-12, f"{label} tet: GCL residual too large: {max_res:.3e} (min_det={min_det:.3e})"
+        max_res = float(np.max(np.abs(mapper.compute_metric_identity_residual("tet", nodes))))
+        assert max_res < 1e-12, f"{label} tet: GCL residual too large: {max_res:.3e}"
 
 
 def test_gcl_residual_near_machine_precision_for_prism():
-    order = 2
-    ops = generate_fr_operators(order)
-    mapper = CurvedMapping(order)
-    mapper.operators = ops
-    ref_sps = _ref_cube_sps(order)
-
-    phys_sps = map_prism_to_physical(ref_sps, _PRISM_NODES_NORMAL)
-    residual = mapper.compute_metric_identity_residual(
-        phys_sps, cell_type="prism", cell_nodes=_PRISM_NODES_NORMAL, ref_cube_sps=ref_sps
-    )
+    residual = CurvedMapping(2).compute_metric_identity_residual("prism", _PRISM_NODES_NORMAL)
     assert np.max(np.abs(residual)) < 1e-12
 
 
-def test_compute_jacobian_requires_cell_nodes_for_simplex_types():
-    """cell_type=tet/prism 缺少 cell_nodes/ref_cube_sps 时必须显式报错，
-    不能静默退化回旧的谱微分近似路径。"""
-    order = 2
-    mapper = CurvedMapping(order)
-    ref_sps = _ref_cube_sps(order)
-    phys_sps = map_tet_to_physical(ref_sps, _TET_NODES_NORMAL)
-    try:
-        mapper.compute_jacobian(phys_sps, cell_type="tet")
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
+def test_unknown_cell_type_is_rejected():
+    """只有原生四面体/棱柱：其它单元类型（此前的六面体张量积分支）报错。"""
+    with pytest.raises(ValueError, match="cell_type"):
+        CurvedMapping(2).compute_metric_identity_residual("hex", _TET_NODES_NORMAL)

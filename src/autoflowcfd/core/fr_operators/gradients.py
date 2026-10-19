@@ -51,7 +51,7 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
 
     # 四面体/棱柱专用坍缩坐标微分矩阵（不能用朴素张量积 D_3d，理由见
-    # fr/operators.py::FROperators.D_3d_tet/D_3d_prism 文档）。
+    # fr/operators/container.py::FROperators 文档）。
     #
     # 性能优化：D（形状 (s,j,m)）不依赖 cell，只有 field（c,j,v）依赖
     # cell——把 D 的 (s,m) 两个输出轴摊平、j 挪到最后一维，转成
@@ -78,22 +78,11 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     D2_prism = None
     if n_prism > 0:
         D2_prism = np.ascontiguousarray(
-            np.transpose(ops.D_3d_prism, (0, 2, 1))).reshape(n_sps * 3, n_sps)
-    # native 四面体（路径C）：`D_3d_tet`（坍缩坐标专属微分矩阵）对
-    # native 单纯形基节点毫无意义（native 节点不是坍缩坐标张量积
-    # 采样点），必须改用已经零填充到全局 n_sps 宽度的
-    # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量：填充行
-    # 的散度贡献恒为 0，与这里"物理梯度"用途——同样是对体积节点场
-    # 求导——完全兼容，不需要额外处理）。这是 Part8 native 支持范围
-    # 此前遗漏的一处：`compute_physical_gradient` 是粘性残差
-    # （viscous_flux.py）以及 SST/DES 湍流输运（transport.py）梯度
-    # 计算共用的唯一入口，此前一直无条件读取 `D_3d_tet`，对 native
-    # 网格会产生完全错误的梯度（用坍缩坐标基函数的导数系数去解释
-    # native 节点上的场值）。
+            np.transpose(ops.D_native_prism_padded, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+    # 原生四面体：零填充到 n_sps 宽度的 `D_native_tet_padded`（填充行的导数恒为 0）。
     D2_tet = None
     if n_cells > n_prism:
-        tet_ops = (ops.D_native_tet_padded
-                   if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet)
+        tet_ops = ops.D_native_tet_padded
         D2_tet = np.ascontiguousarray(
             np.transpose(tet_ops, (0, 2, 1))).reshape(n_sps * 3, n_sps)
 

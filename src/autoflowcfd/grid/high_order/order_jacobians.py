@@ -3,81 +3,16 @@
 从 `high_order_mesh_order.py`（原 561 行）拆出（2026-09-19，项目"单
 文件不超 500 行"规范）：那边留的是参考点集生成、`build_order_geometry`
 总装与 Order Continuation 的按阶数几何缓存；这里是"在给定参考点集上
-算全部单元 Jacobian"这一族（坍缩/原生 x 四面体/棱柱，以及两段拼接与
-细点度量的恒定性校验）。纯搬家，逻辑未改。
+算全部单元 Jacobian"这一族（原生四面体/棱柱、两段拼接与细点度量的恒定性校验）。
 """
 
 from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
 
-from ..curved_mapping.curved_mapping import (
-    CurvedMapping,
-    map_prism_to_physical,
-    map_tet_to_physical,
-)
 
 if TYPE_CHECKING:
     from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-
-
-def compute_jacobians_at_ref_points(
-    mesh: "HighOrderMesh", mapper: CurvedMapping, ref_pts: np.ndarray, want_scaled_quality: bool
-) -> Optional[Dict[str, np.ndarray]]:
-    """在给定的参考点集 ref_pts 上，对全部单元算一遍精确 Jacobian
-    （逐单元循环，共用给同一 CurvedMapping 实例）——从 build_order_geometry
-    拆出来，供体积项去混叠（超过-积分）在 FINE 参考点集上复用
-    同一套逻辑，而不是另写一份（CurvedMapping.compute_jacobian 对
-    tet/prism 走解析精确公式，不依赖构造时传的 顺序，见该类文档，
-    因此同一个 mapper 实例可以安全地在不同参考点集上反复调用）。
-    """
-    from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
-
-    n_prisms = mesh.n_prism_cells
-    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
-    n_total = n_prisms + n_tets
-    if n_total == 0:
-        return None
-
-    # 预分配直写（2026-08-26，P2 专项 OOM 修复）：原实现先把逐单元的
-    # (n_ref,)/(n_ref,3,3) 小数组累积进三个 Python 列表（79 万单元→79 万个
-    # 独立小数组，仅对象开销就上百 MB），再 np.concatenate——拼接期间小数组
-    # 列表与完整拼接副本同时驻留，峰值直接翻倍；P2 过积分点集（64 pts/单元）
-    # 下仅 inv_jacs 就 3.6GB/份→峰值 ~7.3GB，叠加尚未清理的旧阶数几何缓存与
-    # 求解器状态，79 万单元生产网格 P1→P2 切换时分配失败崩溃（两次独立复现）。
-    # 改为预分配单块大数组逐单元就地写入：峰值降为结果单份 + 单元级瞬态，
-    # 数值与原实现逐位一致（写入顺序/拼接顺序都是 prism 在前、tet 在后）。
-    n_ref = ref_pts.shape[0]
-    all_dets = np.empty(n_total * n_ref)
-    all_inv_jacs = np.empty((n_total * n_ref, 3, 3))
-    all_scaled_quality = np.empty(n_total * n_ref) if want_scaled_quality else None
-
-    def _fill_cell(i, cell_nodes, cell_type):
-        phys_pts = (map_prism_to_physical if cell_type == "prism"
-                    else map_tet_to_physical)(ref_pts, cell_nodes)
-        jac_data = mapper.compute_jacobian(
-            phys_pts, cell_id=i, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_pts
-        )
-        lo, hi = i * n_ref, (i + 1) * n_ref
-        all_dets[lo:hi] = jac_data["det_jacs"].ravel()
-        all_inv_jacs[lo:hi] = jac_data["inv_jacs"].reshape(-1, 3, 3)
-        if want_scaled_quality:
-            all_scaled_quality[lo:hi] = compute_scaled_jacobian_quality(
-                jac_data["jacobians"], jac_data["det_jacs"]
-            ).ravel()
-
-    if mesh._fixed_prism_conn is not None and n_prisms > 0:
-        for i in range(n_prisms):
-            _fill_cell(i, mesh._node_coords[mesh._fixed_prism_conn[i]], "prism")
-
-    if mesh._fixed_tet_conn is not None and n_tets > 0:
-        for i in range(n_tets):
-            _fill_cell(n_prisms + i, mesh._node_coords[mesh._fixed_tet_conn[i]], "tet")
-
-    result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
-    if want_scaled_quality:
-        result["scaled_quality"] = all_scaled_quality
-    return result
 
 
 def _require_positive_det(det_per_cell: np.ndarray, cell_offset: int, cell_kind: str) -> None:
@@ -237,8 +172,7 @@ def _combine_prism_and_tet_jacobians(
 ) -> Optional[Dict[str, np.ndarray]]:
     """把只算了棱柱部分（native 四面体分支专用，见 `build_order_geometry`）
     的 jacobians 与单独算好的 native 四面体部分按 prism-在前/tet-在后
-    的既有顺序拼接——与 `compute_jacobians_at_ref_points` 一次性算全部
-    单元时的拼接顺序保持一致，下游（`mesh.jacobians["det_jacs"].reshape
+    的既有顺序拼接，下游（`mesh.jacobians["det_jacs"].reshape
     (n_cells, n_sps)` 等）不需要关心这里是分两段算的。"""
     if prism_part is None:
         return tet_part
@@ -247,45 +181,6 @@ def _combine_prism_and_tet_jacobians(
     result = {}
     for key in prism_part:
         result[key] = np.concatenate([prism_part[key], tet_part[key]])
-    return result
-
-
-def _compute_prism_only_jacobians(
-    mesh: "HighOrderMesh", mapper: CurvedMapping, ref_pts: np.ndarray, want_scaled_quality: bool
-) -> Optional[Dict[str, np.ndarray]]:
-    """`compute_jacobians_at_ref_points` 的棱柱专属子集——四面体部分走
-    `compute_native_tet_jacobians`（native 单纯形基），两部分分别算好
-    再按 prism-在前/tet-在后拼接，见 `build_order_geometry`。逻辑与
-    `compute_jacobians_at_ref_points` 的棱柱分支逐行一致，只是提取出来
-    单独调用，不是重新实现一遍。
-    """
-    from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
-
-    n_prisms = mesh.n_prism_cells
-    if mesh._fixed_prism_conn is None or n_prisms == 0:
-        return None
-    n_ref = ref_pts.shape[0]
-    all_dets = np.empty(n_prisms * n_ref)
-    all_inv_jacs = np.empty((n_prisms * n_ref, 3, 3))
-    all_scaled_quality = np.empty(n_prisms * n_ref) if want_scaled_quality else None
-
-    for i in range(n_prisms):
-        cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
-        phys_pts = map_prism_to_physical(ref_pts, cell_nodes)
-        jac_data = mapper.compute_jacobian(
-            phys_pts, cell_id=i, cell_type="prism", cell_nodes=cell_nodes, ref_cube_sps=ref_pts
-        )
-        lo, hi = i * n_ref, (i + 1) * n_ref
-        all_dets[lo:hi] = jac_data["det_jacs"].ravel()
-        all_inv_jacs[lo:hi] = jac_data["inv_jacs"].reshape(-1, 3, 3)
-        if want_scaled_quality:
-            all_scaled_quality[lo:hi] = compute_scaled_jacobian_quality(
-                jac_data["jacobians"], jac_data["det_jacs"]
-            ).ravel()
-
-    result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
-    if want_scaled_quality:
-        result["scaled_quality"] = all_scaled_quality
     return result
 
 

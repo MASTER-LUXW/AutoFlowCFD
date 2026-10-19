@@ -14,122 +14,13 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 
-def _lagrange_basis_matrix_1d(old_nodes: np.ndarray, new_nodes: np.ndarray) -> np.ndarray:
-    """构造 1D Lagrange 基函数求值矩阵 L，形状 (len(new_nodes), len(old_nodes))，
-    满足 L[i, j] = l_j(new_nodes[i])，其中 l_j 是穿过 old_nodes 的唯一
-    次数为 len(old_nodes)-1 的 Lagrange 基多项式（在 old_nodes[j] 处取值
-    1，在其余 old_nodes[k]（k!=j）处取值 0）。
-
-    用 barycentric Lagrange 插值公式（Berrut & Trefethen 2004）而不是
-    构造/求解 Vandermonde 矩阵，数值稳定性更好且是标准做法：
-        w_j = 1 / prod_{k!=j} (x_j - x_k)
-        l_j(y) = (w_j / (y - x_j)) / sum_k (w_k / (y - x_k))
-    当 y 精确等于某个 x_m 时用 Kronecker delta 直接短路（避免除以零，
-    也保证节点自身处的取值精确为 0/1 而不是浮点噪声）。
-
-    old_nodes 只有 1 个点（P0 阶段）时退化为常数基函数 l_0(y)=1，
-    与 barycentric 公式本身在 n=1 时的极限行为一致（分子分母是同一个
-    非零标量的比值，恒为 1），不需要特殊分支。
-    """
-    n_old = len(old_nodes)
-    n_new = len(new_nodes)
-    L = np.zeros((n_new, n_old))
-
-    # barycentric 权重 w_j = 1 / prod_{k!=j}(x_j - x_k)
-    diffs = old_nodes[:, None] - old_nodes[None, :]  # (n_old, n_old)
-    np.fill_diagonal(diffs, 1.0)  # 避免自身对自身除以 0，对角本来就不参与连乘
-    w = 1.0 / np.prod(diffs, axis=1)  # (n_old,)
-
-    for i, y in enumerate(new_nodes):
-        exact = np.isclose(y, old_nodes, rtol=0.0, atol=1e-13)
-        if np.any(exact):
-            L[i, :] = 0.0
-            L[i, np.argmax(exact)] = 1.0
-            continue
-        terms = w / (y - old_nodes)  # (n_old,)
-        L[i, :] = terms / np.sum(terms)
-    return L
-
-
-def _build_linear_interp_matrix_3d(old_sps_1d: np.ndarray, new_sps_1d: np.ndarray) -> np.ndarray:
-    """构造把 old_sps_1d 张量积网格上的节点值精确 Lagrange 多项式延拓
-    （prolongation）到 new_sps_1d 张量积网格上的算子矩阵 W，形状
-    (new_n_sps, old_n_sps)，满足 new_values = W @ old_values。
-
-    真实 bug 修复（2026-09-02）：此前这里用 `scipy.interpolate.
-    RegularGridInterpolator(method='linear')` 在 old SPs 之间做分段
-    多线性插值——这不是对 old SPs 所隐含的那个次数为 old_order 的
-    Lagrange 多项式的精确求值，而是一个更低阶（分段线性）的近似。
-    对 old_order<=1（P0->P1、P1->P2 转换）old 方向每维只有 1~2 个点，
-    分段线性恰好与真正的 Lagrange 多项式（常数/线性）重合，误差不可见；
-    但对 old_order>=2（P2->P3 等本项目实际会用到的转换，见
-    `interpolate_to_new_order` 文档）old 方向每维有 3+ 个点，分段线性
-    插值与真正的二次/更高次 Lagrange 多项式在非节点位置系统性不同——
-    引入了真实的、此前未被识别的插值误差，而不只是"不是 L2 投影但足够
-    好"。
-
-    Order Continuation 只会从低阶向高阶单调推进（`run_order_continuation`
-    里 `orders = list(range(starting_order, original_order+1))`，
-    `target_p` 严格递增，从未反向调用），意味着 new 方向的张量积多项式
-    空间（次数 new_order）严格包含 old 方向的多项式空间（次数
-    old_order <= new_order）——old SPs 上的节点值所唯一确定的那个
-    次数为 old_order 的多项式，可以在 new 多项式空间里被精确表示、
-    不需要近似。因此这里改为精确的 Lagrange 基函数求值矩阵
-    （`_lagrange_basis_matrix_1d`）而不是数值插值——新节点上的值就是
-    旧多项式的精确解析求值，不引入任何近似误差（浮点舍入级之外）。
-    这比"L2 投影"更强：L2 投影是"在新空间里找最接近旧函数的多项式"，
-    但当旧函数本来就精确落在新空间里时，L2 投影的解就是旧函数本身——
-    这里直接算的正是这个精确解，不需要通过求积/投影方程迂回得到，
-    同时自动保证任意阶矩（含单元积分/质量）精确守恒，不只是"近似
-    守恒"。
-
-    参考空间是张量积（Gauss-Legendre 节点各方向独立），且几何映射
-    （参考单元->物理单元的 Jacobian）不随解的多项式阶数变化，只依赖
-    单元几何——因此参考空间的精确多项式延拓等价于物理空间的精确延拓，
-    不需要额外的物理空间求积权重修正。
-
-    只需要对每个 1D 方向构造一次 Lagrange 基矩阵（与本函数替换前一样，
-    在阶数切换时只算一次、供全部单元和全部变量共用），然后用 Kronecker
-    积把 3 个独立方向的 1D 矩阵组装成完整的 3D 张量积矩阵——3D 张量积
-    基函数 phi_{a,b,c}(x,y,z)=l_a(x)*l_b(y)*l_c(z) 在新节点
-    (new_x_i,new_y_j,new_z_k) 处的取值就是 L[i,a]*L[j,b]*L[k,c]，与
-    `new_pts`/`basis_flat` 沿用的 C-order（meshgrid(indexing='ij') 后
-    ravel）嵌套索引约定完全一致，用 `np.kron` 三次组装即可，不需要
-    重新推导索引映射。
-    """
-    L = _lagrange_basis_matrix_1d(old_sps_1d, new_sps_1d)
-    return np.kron(np.kron(L, L), L)
-
-
 def interpolate_to_new_order(solver: Any, new_order: int):
-    """
-    将解从当前阶数插值到新的阶数（Order Continuation核心逻辑）。
+    """把解从当前阶数延拓到新阶数（Order Continuation 升阶/降阶）。
 
-    真正实现（2026-09-02 修复）：对每个守恒变量做逐张量积方向的精确
-    Lagrange 多项式延拓（`_build_linear_interp_matrix_3d`，內部现在是
-    `_lagrange_basis_matrix_1d` 的 3D Kronecker 积，不再是分段线性
-    近似插值，见该函数文档"真实 bug 修复"一节）。由于 Order
-    Continuation 只单调升阶（`run_order_continuation` 里 `target_p`
-    严格递增），旧 SPs 隐含的次数为 old_order 的多项式精确落在新的
-    （次数 new_order>=old_order）张量积多项式空间里——这里做的是这个
-    多项式在新节点上的精确解析求值，不是近似插值，也不需要通过求积/
-    投影方程迂回：任意阶矩（含单元积分量）在浮点舍入误差范围内精确
-    守恒，比"L2 投影"这个目标更强（L2 投影解的是"新空间里最接近旧
-    函数的多项式"这个更弱的问题，只有当旧函数本来就精确落在新空间时
-    两者才重合——这里正是这个精确重合的情形，直接算解析解而不必假装
-    只能近似）。此前文档声称"L2投影...保持积分守恒"但实现只是分段线性
-    插值、二者不符；此前更正版文档反过来又声称"不是 L2 投影、不保证
-    守恒、真正的 L2 投影是独立后续工作"——这个更正本身也只对了一半：
-    实现确实此前不是 L2 投影，但"真正的 L2 投影是独立后续工作"这个
-    结论是不必要的，本次直接用精确多项式延拓一次性解决，不需要另开
-    一个"实现 L2 投影"的后续任务。
-
-    性能说明：插值算子矩阵（`_build_linear_interp_matrix_3d`）只依赖
-    新旧 SPs 的参考坐标、与单元/变量无关，本函数只构造一次、向量化
-    应用到全部单元和全部场（U、k/omega、壁面距离），取代了此前"每个
-    单元每个变量各自构造一次 RegularGridInterpolator"的纯 Python 循环
-    ——数值结果逐位不变（见 `_build_linear_interp_matrix_3d` 文档字符串
-    的验证说明），只是实现方式从循环换成矩阵乘法。
+    延拓算子是旧阶数的模态多项式在新阶数解点上的求值（`fr/order_interp.py`，原生四面体 / 原生棱柱各一份）：升阶时
+    旧多项式精确落在新空间里，延拓是精确的（任意阶矩在舍入误差内守恒）。算子只依赖阶数，一次构造、向量化作用到
+    全部单元与全部场（U、湍流输运量、涡粘）。2026-10-19 删除只对坍缩棱柱基成立的一维 Lagrange 张量积插值
+    （`_build_linear_interp_matrix_3d`，删除坍缩棱柱基后再无调用方）。
 
     Args:
         solver: FRSolver 实例

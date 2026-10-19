@@ -45,7 +45,7 @@ clip_crosscheck.py` 完整推导）又发现两个独立真实 bug，其中第�
 足够大时都会分歧：
 
 4. `gpu_gradients.py::compute_physical_gradient_gpu` 四面体分支此前
-   无条件用 `ops_data['D_3d_tet']`（坍缩坐标微分算子），从未按是否
+   无条件用 `ops_data['D_native_tet_padded']`（坍缩坐标微分算子），从未按是否
    存在 `D_native_tet_padded` 分派——只影响 `tet_basis_mode="native"`，
    本文件不覆盖（见 native 专属测试文件）。
 5. GPU 粘性残差路径当年缺少 CPU 侧那一步"残差量级离群清零"（旧称

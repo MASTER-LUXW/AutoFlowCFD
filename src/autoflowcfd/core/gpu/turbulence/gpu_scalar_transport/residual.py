@@ -89,10 +89,10 @@ def scalar_convection_volume_divergence_gpu(cp, scalar_field, rho, velocity, mes
     div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
     if n_prism > 0:
         div_F[:n_prism] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None])[..., 0]
+            ops_data['D_native_prism_padded'], F_tilde[:n_prism, :, :, None])[..., 0]
     if n_cells > n_prism:
         # native 四面体 D 矩阵分派（gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）
-        D_tet_op = ops_data['D_native_tet_padded'] if 'D_native_tet_padded' in ops_data else ops_data['D_3d_tet']
+        D_tet_op = ops_data['D_native_tet_padded']
         div_F[n_prism:] = gpu_contract_shared_operator_2axis(D_tet_op, F_tilde[n_prism:, :, :, None])[..., 0]
     return div_F
 
@@ -158,15 +158,11 @@ def compute_scalar_diffusion_residual_gpu(
         div_G = cp.zeros((n_cells, n_sps), dtype=cp.float64)
         if n_prism > 0:
             div_G[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_prism'], G_tilde[:n_prism, :, :, None]
+                ops_data['D_native_prism_padded'], G_tilde[:n_prism, :, :, None]
             )[..., 0]
         if n_cells > n_prism:
             # native 四面体 D 矩阵分派（2026-09-03 补齐，同上）。
-            D_tet_op = (
-                ops_data['D_native_tet_padded']
-                if 'D_native_tet_padded' in ops_data
-                else ops_data['D_3d_tet']
-            )
+            D_tet_op = ops_data['D_native_tet_padded']
             div_G[n_prism:] = gpu_contract_shared_operator_2axis(
                 D_tet_op, G_tilde[n_prism:, :, :, None]
             )[..., 0]

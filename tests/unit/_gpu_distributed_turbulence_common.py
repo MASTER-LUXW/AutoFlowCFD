@@ -53,7 +53,7 @@ def _prepare_compact_mesh_data(mesh, ops, compact_global_ids):
     mesh_data = {
         'det_jacs': det_jacs, 'inv_jacs': inv_jacs, 'adj_j': adj_j,
         'n_cells': len(compact_global_ids), 'n_prism': None,  # 调用方会覆盖 n_prism
-        'D_3d_prism': ops.D_3d_prism, 'D_3d_tet': ops.D_3d_tet,
+        'D_native_prism_padded': ops.D_native_prism_padded, 'D_native_tet_padded': ops.D_native_tet_padded,
     }
     # 补齐生产 GPU 路径会上传、替身容易漏掉的键，见
     # _gpu_standin_helpers 模块文档。本文件算子与网格数据在同一个

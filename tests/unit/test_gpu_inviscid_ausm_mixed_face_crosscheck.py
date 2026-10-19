@@ -78,9 +78,9 @@ def _patch_gpu_modules(monkeypatch):
             monkeypatch.setattr(m, "gpu_available", True)
 
 
-def _make_mesh(order, tet_basis_mode="native"):
+def _make_mesh(order):
     from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-    return _build_synthetic_mixed_mesh(order, tet_basis_mode=tet_basis_mode)
+    return _build_synthetic_mixed_mesh(order)
 
 
 def _cross_check(U, mesh, mach_ref=0.2):

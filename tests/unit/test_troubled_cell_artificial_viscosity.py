@@ -227,7 +227,7 @@ def test_single_gpu_path_matches_cpu(monkeypatch):
     inv = mesh.jacobians["inv_jacs"].reshape(n, ns, 3, 3)
     mesh_data = {"det_jacs": det, "inv_jacs": inv, "adj_j": det[..., None, None] * inv,
                  "n_cells": n, "n_prism": mesh.n_prism_cells}
-    ops_data = {"D_3d_prism": solver.ops.D_3d_prism, "D_3d_tet": solver.ops.D_3d_tet}
+    ops_data = {"D_native_prism_padded": solver.ops.D_native_prism_padded, "D_native_tet_padded": solver.ops.D_native_tet_padded}
     complete_gpu_standin(mesh, solver.ops, ops_data, mesh_data)
     stub = SimpleNamespace(
         mesh=mesh, mesh_data=mesh_data, ops_data=ops_data, current_order=1,
@@ -325,7 +325,7 @@ def test_multi_gpu_path_matches_single_machine(monkeypatch, rank):
     md = {"det_jacs": det, "inv_jacs": inv, "adj_j": det[..., None, None] * inv,
           "cell_volumes": np.asarray(adapter.cell_volumes), "n_cells": n_c,
           "n_prism": int(dist_fc.base_flat.n_prism),
-          "D_3d_prism": solver.ops.D_3d_prism, "D_3d_tet": solver.ops.D_3d_tet}
+          "D_native_prism_padded": solver.ops.D_native_prism_padded, "D_native_tet_padded": solver.ops.D_native_tet_padded}
     complete_gpu_standin(mesh, solver.ops, md, md, compact_ids=dist_fc.compact_global_ids)
     stub = SimpleNamespace(
         U_gpu=U[part.local_cells], gpu_halo=_FakeHaloExchange(U[native_ids]),

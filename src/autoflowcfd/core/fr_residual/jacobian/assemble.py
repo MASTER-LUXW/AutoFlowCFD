@@ -79,7 +79,7 @@ def _segments(ctx, n_real_prism, n_real_tet):
     oi = get_overintegration_context(mesh, ops)
     if oi is None:
         raise ValueError("解析 Jacobian 只用于 P>=1（P0 没有过积分几何，走差分装配）")
-    D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
+    D_sp = {0: np.asarray(ops.D_native_prism_padded), 1: np.asarray(ops.D_native_tet_padded)}
     out = []
     for kind, ((lo, hi, nf, det_f, inv_f, c2f, D_f, f2c), (K_all, combo)) in enumerate(
             zip(oi["segs"], oi["lifted_div"])):
@@ -179,7 +179,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
         cross_offset = np.zeros((0, 2, 3), dtype=np.int64)
         cross_data = np.zeros(0, dtype=np.float32)
         cross_col = cross_offset
-    D_prism = np.ascontiguousarray(np.asarray(ctx.ops.D_3d_prism)[:npr, :npr])
+    D_prism = np.ascontiguousarray(np.asarray(ctx.ops.D_native_prism_padded)[:npr, :npr])
     D_tet = np.ascontiguousarray(np.asarray(ctx.ops.D_native_tet_padded)[:nte, :nte])
     for color in range(flat.n_colors):
         faces = flat.color_face_indices[color]

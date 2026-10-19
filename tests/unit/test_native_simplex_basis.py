@@ -9,52 +9,34 @@ import pytest
 from autoflowcfd.fr.native_tet.basis import (
     restricted_tet_modes,
     simplex3d_value,
-    simplex3d_grad,
-    rst_to_abc,
     build_native_tet_operators,
 )
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.grid.curved_mapping.curved_mapping import batched_det_inv_3x3, tet_barycentric
 
 
-def test_generate_fr_operators_default_unaffected_by_tet_basis_mode_field():
-    """2026-09-03 更正：坍缩坐标四面体基已删除（见 fr/operators.py
-    模块文档"删除 collapsed 相关内容"一节），`generate_fr_operators`
-    不再接受 `tet_basis_mode` 参数——四面体恒为 native，`tet_basis_mode`
-    字段恒为 "native"，`D_native_tet` 等字段恒非 None（此前"默认
-    collapsed、native 字段为 None"的行为已不存在，本测试更新为验证
-    新的恒定行为）。"""
+def test_operator_container_has_only_the_native_fields():
+    """算子容器只有原生基字段与显式解点宽度 `n_sps`：张量积 `D_1d/D_3d`、别名 `D_3d_tet/D_3d_prism`、恒为 "native"
+    的 `tet_basis_mode` 于 2026-10-19 删除（两个名字指同一对象时，消费点各写一种兜底）。"""
     ops = generate_fr_operators(2)
-    assert ops.tet_basis_mode == "native"
-    assert ops.D_native_tet is not None
-    assert ops.ref_native_tet is not None
-    assert ops.n_native_sps_tet is not None
-    assert ops.face_extrap_by_op is not None
-    assert ops.face_lift_by_op is not None
-    assert ops.D_native_tet_padded is not None
-    # D_3d_tet 别名到 D_native_tet_padded（不再是独立的坍缩坐标矩阵）
-    assert ops.D_3d_tet is ops.D_native_tet_padded
-    assert ops.D_3d_tet.shape == (27, 27, 3)
+    for gone in ("D_1d", "D_3d", "D_3d_tet", "D_3d_prism", "tet_basis_mode"):
+        assert not hasattr(ops, gone), gone
+    assert ops.n_sps == ops.D_native_tet_padded.shape[0] == ops.D_native_prism_padded.shape[0]
 
 
 def test_generate_fr_operators_native_mode_populates_expected_fields():
-    """2026-09-03 更正：native 现在是唯一实现，不再需要显式请求——
-    `generate_fr_operators(order)` 恒填充这些字段；`D_3d_tet` 不再是
-    独立的坍缩坐标算子，而是 `D_native_tet_padded` 的别名（见
-    fr/operators.py 模块文档）。"""
+    """`generate_fr_operators(order)` 恒填充原生四面体字段，填充版本是零填充块对角。"""
     order = 2
     ops = generate_fr_operators(order)
-    assert ops.tet_basis_mode == "native"
     expected_n = (order + 1) * (order + 2) * (order + 3) // 6
     assert ops.D_native_tet.shape == (expected_n, expected_n, 3)
     assert ops.ref_native_tet.shape == (expected_n, 3)
     assert ops.n_native_sps_tet == expected_n
-    assert ops.D_3d_tet is ops.D_native_tet_padded  # 别名，不再是独立坍缩坐标算子
     n1d = order + 1
     for code in range(6, 10):
         assert ops.native_face_extrap(code).shape == (n1d * n1d, expected_n)
 
-    n_sps_global = n1d ** 3
+    n_sps_global = ops.n_sps
     assert ops.D_native_tet_padded.shape == (n_sps_global, n_sps_global, 3)
     np.testing.assert_array_equal(
         ops.D_native_tet_padded[:expected_n, :expected_n, :], ops.D_native_tet
@@ -71,9 +53,7 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 棱柱的过积分阶数与细点数按棱柱基分档，走唯一入口（2026-09-20）：
     # 坍缩档受条件数上限 3 约束、细点数 `(oo+1)^3`；原生档上限 6、细点数
     # `(oo+1)^2(oo+2)/2`。此前这里复制了坍缩档那条公式。
-    from autoflowcfd.fr.overintegration_order import (
-        overintegration_order, prism_n_fine,
-    )
+    from autoflowcfd.fr.overintegration_order import overintegration_order
 
     over_order = overintegration_order(order)
     # 细网格轴取 native **真实**细点数、不再填充到 (over_order+1)^3
@@ -87,7 +67,6 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 坍缩基条件数上限约束，那条上限的代价实测 P2 3400 倍、P3 18600 倍，
     # 见 tests/unit/test_overintegration_cap_cost.py）。所以这里不能再用
     # 棱柱的 over_order 去推四面体的细点数。
-    from autoflowcfd.fr.overintegration_order import overintegration_order
     over_order_tet = overintegration_order(order)
     n_fine_native = (
         (over_order_tet + 1) * (over_order_tet + 2) * (over_order_tet + 3) // 6
@@ -98,15 +77,6 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     assert ops.overint_D_fine_tet.shape == (n_fine_native, n_fine_native, 3)
     assert ops.overint_interp_c2f_tet.shape == (n_fine_native, n_sps_global)
     assert ops.overint_restrict_f2c_tet.shape == (n_sps_global, n_fine_native)
-
-
-def test_generate_fr_operators_rejects_unknown_tet_basis_mode():
-    """2026-09-03 更正：`tet_basis_mode` 参数已删除（见 fr/operators.py
-    模块文档），传它现在是一个普通的 TypeError（unexpected keyword
-    argument），不再是 ValueError——这本身就是本次删除是否彻底的验证：
-    调用方不应该还能传这个参数进来伪装出一个"被拒绝的模式"。"""
-    with pytest.raises(TypeError):
-        generate_fr_operators(2, tet_basis_mode="bogus")
 
 
 def test_restricted_tet_modes_count_matches_minimal_pkd_dimension():

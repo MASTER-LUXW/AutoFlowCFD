@@ -186,7 +186,7 @@ def compute_scalar_diffusion_residual(
     # 内存修复，2026-09-01，理由与 compute_scalar_convection_residual
     # 体积项分块同一处文档：cube_demo 79万单元 P2+SST 组合内存峰值实测
     # 约需 37GB，超过常见 32GB 工作站配置）。
-    _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+    _tet_op_D = ops.D_native_tet_padded
     # 性能优化（2026-09-13，与对流项体积项同一次剖析、同一手法）：整条
     # "度量×扩散通量→散度"链换成 `contravariant_flux_from_metric` +
     # `scalar_volume_divergence_kernel` 两个 numba prange kernel，取代
@@ -207,7 +207,7 @@ def compute_scalar_diffusion_residual(
         if n_prism > 0:
             scalar_volume_divergence_kernel(
                 np.ascontiguousarray(G_tilde[:n_prism]),
-                np.ascontiguousarray(ops.D_3d_prism), div_G[:n_prism],
+                np.ascontiguousarray(ops.D_native_prism_padded), div_G[:n_prism],
             )
         if n_cells > n_prism:
             scalar_volume_divergence_kernel(

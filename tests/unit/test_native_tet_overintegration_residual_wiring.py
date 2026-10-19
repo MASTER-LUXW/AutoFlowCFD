@@ -48,7 +48,7 @@ def test_native_overintegration_wired_into_operators_by_default():
     """构造 native 网格时（order>=1），`mesh.jacobians_fine` 必须自动
     非 None（过积分默认启用，不需要用户额外配置）——回归防护：确保
     这条自动接入不会被未来的改动意外破坏。"""
-    mesh = _build_synthetic_mixed_mesh(2, "native")
+    mesh = _build_synthetic_mixed_mesh(2)
     assert mesh.jacobians_fine is not None
     assert mesh.n_sps_per_cell_fine > 0
 
@@ -73,7 +73,7 @@ def test_native_overintegration_runs_end_to_end_without_blowing_up(order):
     证据，本文件只负责确认"接入生产管线后不出错、量级合理"，不重复
     断言一个在这份具体网格上根本不成立的改善倍数。
     """
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     Q = _make_couette_Q(mesh)
     U = primitive_to_conserved(Q)

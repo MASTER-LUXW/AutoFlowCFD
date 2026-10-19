@@ -52,7 +52,7 @@ class _FakeCupy:
 @pytest.fixture()
 def dist_fc_native():
     order = 2
-    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
     fc = mesh.face_connectivity

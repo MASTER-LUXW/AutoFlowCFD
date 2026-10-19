@@ -94,15 +94,13 @@ def _coarse_convection_div(scalar_field, rho, velocity, mesh, ops):
     inv = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     rho_u = rho[:, :, None] * velocity
     rho_u_tilde = contravariant_flux_from_metric(det, inv, rho_u[..., None])[..., 0]
-    tet_op = (ops.D_native_tet_padded
-              if getattr(ops, "D_native_tet_padded", None) is not None
-              else ops.D_3d_tet)
+    tet_op = ops.D_native_tet_padded
     div = np.empty((n_cells, n_sps))
     if n_prism > 0:
         scalar_convection_volume_kernel(
             np.ascontiguousarray(scalar_field[:n_prism]),
             np.ascontiguousarray(rho_u_tilde[:n_prism]),
-            np.ascontiguousarray(ops.D_3d_prism), div[:n_prism])
+            np.ascontiguousarray(ops.D_native_prism_padded), div[:n_prism])
     if n_cells > n_prism:
         scalar_convection_volume_kernel(
             np.ascontiguousarray(scalar_field[n_prism:]),

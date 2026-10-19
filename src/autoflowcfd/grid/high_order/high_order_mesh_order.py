@@ -7,12 +7,11 @@ AutoFlowCFD V2.0 - HighOrderMesh 的阶数相关几何构建 (G-01/G-03, CL-02)
 `mesh: HighOrderMesh` 为第一参数，HighOrderMesh 上保留同名薄委托
 方法，调用方式不变。
 """
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict
 
 import numpy as np
 from loguru import logger
 
-from ..curved_mapping.curved_mapping import CurvedMapping, map_prism_to_physical
 from autoflowcfd.fr.operators import generate_fr_operators
 
 if TYPE_CHECKING:
@@ -22,30 +21,9 @@ if TYPE_CHECKING:
 from .order_jacobians import (
     _combine_prism_and_tet_jacobians,
     build_fine_metrics,
-    _compute_prism_only_jacobians,
     compute_native_prism_jacobians,
     compute_native_tet_jacobians,
 )
-
-
-def generate_reference_cube_sps(mesh: "HighOrderMesh", order: Optional[int] = None) -> np.ndarray:
-    """生成计算立方体 [-1,1]^3 内的张量积 Gauss-Legendre SPs 坐标。
-
-    四面体、棱柱共用同一套计算立方体坐标（Duffy 坍缩坐标的计算域）；
-    单元类型差异完全体现在 curved_mapping 的物理映射函数中，这里不再
-    像旧版本那样对四面体/棱柱分别生成不同的"参考点"。
-
-    Args:
-        order: 目标阶数；None 时使用 mesh.order（当前活动阶数）。
-            Order Continuation 需要在切换到某个阶数*之前*为该阶数生成
-            SPs，此时 mesh.order 还是旧阶数，必须显式传入。
-    """
-    from autoflowcfd.fr.operators import gauss_legendre
-
-    n_points_1d = (order + 1) if order is not None else mesh.n_points_1d
-    sps_1d, _ = gauss_legendre(n_points_1d)
-    xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
 
 
 def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndarray]:
@@ -66,54 +44,25 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     （`_combine_prism_and_tet_jacobians`）。
 
     Returns:
-        {"sps_coords", "jacobians", "ref_cube_sps", "jacobians_fine",
-        "n_sps_per_cell_fine"}
+        {"sps_coords", "jacobians", "jacobians_fine", "n_sps_per_cell_fine"}
     """
-    n_points_1d = order + 1
-    n_sps_per_cell = n_points_1d**3
+    n_sps_per_cell = generate_fr_operators(order).n_sps
     sps_coords = np.zeros((mesh.n_cells, n_sps_per_cell, 3))
-    mapper = CurvedMapping(order)
-
-    ref_cube_sps = generate_reference_cube_sps(mesh, order)
     n_prisms = mesh.n_prism_cells
     n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
 
-    # 棱柱的解点位置与度量用原生基（见 `fr/native_prism/__init__.py`）：原生基的节点不是张量积立方体点，把原生
-    # 微分算子套到坍缩节点采样的场上不会报错、只会给出错的导数，所以算子
-    # 与几何**必须一起**切换。
-    # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。保留这个局部名而不是
-    # 把下面几处 `if prism_native:` 一并摊平：它在本函数里同时充当"原生档
-    # 要额外构造的那几样东西"的作用域标记，摊平会让 coarse/fine 两段共用
-    # 的那批 import 失去显式边界。
-    prism_native = True
+    # 棱柱的解点位置与度量用原生基（见 `fr/native_prism/__init__.py`）：原生微分算子必须配原生节点上采样的场
+    from autoflowcfd.fr.native_prism.basis import build_native_prism_nodes, map_native_prism_to_physical
 
-    ref_native_prism = None
-    if prism_native:
-        # 原生档要用到的三样东西一次导入（下面 coarse 的 sps_coords/
-        # Jacobian 与再下面 fine 的细点几何都在同一个 `prism_native`
-        # 守卫下使用它们）。
-        from autoflowcfd.fr.native_prism.basis import (
-            build_native_prism_nodes,
-            map_native_prism_to_physical,
-        )
-
-        ref_native_prism = build_native_prism_nodes(order)
-
+    ref_native_prism = build_native_prism_nodes(order)
     if mesh._fixed_prism_conn is not None and n_prisms > 0:
-        if prism_native:
-            n_native_prism = ref_native_prism.shape[0]
-            for i in range(n_prisms):
-                cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
-                phys = map_native_prism_to_physical(ref_native_prism, cell_nodes)
-                sps_coords[i, :n_native_prism] = phys
-                # 填充行复制真实 SP #0（有限、物理上合法的占位值，与
-                # 四面体那条同一个约定——不能留 np.zeros 默认值，那对应
-                # 原点、可能被后处理/可视化误当成真实几何位置）。
-                sps_coords[i, n_native_prism:] = phys[0]
-        else:
-            for i in range(n_prisms):
-                cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
-                sps_coords[i] = map_prism_to_physical(ref_cube_sps, cell_nodes)
+        n_native_prism = ref_native_prism.shape[0]
+        for i in range(n_prisms):
+            cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
+            phys = map_native_prism_to_physical(ref_native_prism, cell_nodes)
+            sps_coords[i, :n_native_prism] = phys
+            # 填充行复制真实 SP #0（有限、物理上合法的占位值，不能留 np.zeros——那对应原点）
+            sps_coords[i, n_native_prism:] = phys[0]
 
     if n_tets > 0:
         from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, map_native_tet_to_physical
@@ -129,14 +78,8 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
             # 那对应原点，可能被后处理/可视化误当成真实几何位置）。
             sps_coords[n_prisms + i, n_native:] = phys_native[0]
 
-    if n_prisms == 0:
-        prism_jacobians = None
-    elif prism_native:
-        prism_jacobians = compute_native_prism_jacobians(
-            mesh, ref_native_prism, n_sps_per_cell, want_scaled_quality=True)
-    else:
-        prism_jacobians = _compute_prism_only_jacobians(
-            mesh, mapper, ref_cube_sps, want_scaled_quality=True)
+    prism_jacobians = (compute_native_prism_jacobians(mesh, ref_native_prism, n_sps_per_cell, want_scaled_quality=True)
+                       if n_prisms > 0 else None)
     tet_jacobians = compute_native_tet_jacobians(mesh, order, n_sps_per_cell, want_scaled_quality=True)
     jacobians = _combine_prism_and_tet_jacobians(prism_jacobians, tet_jacobians)
 
@@ -174,7 +117,7 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
 
         if n_prisms == 0:
             prism_jacobians_fine = None
-        elif prism_native:
+        else:
             ref_fine_prism = build_native_prism_nodes(over_order)
             if ref_fine_prism.shape[0] != n_sps_per_cell_fine:
                 raise ValueError(
@@ -185,15 +128,6 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
             prism_jacobians_fine = compute_native_prism_jacobians(
                 mesh, ref_fine_prism, n_sps_per_cell_fine,
                 want_scaled_quality=False)
-        else:
-            from autoflowcfd.fr.operators import gauss_legendre
-
-            fine_1d, _ = gauss_legendre(over_order + 1)
-            xf, yf, zf = np.meshgrid(fine_1d, fine_1d, fine_1d, indexing="ij")
-            ref_cube_sps_fine = np.column_stack(
-                [xf.ravel(), yf.ravel(), zf.ravel()])
-            prism_jacobians_fine = _compute_prism_only_jacobians(
-                mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False)
 
         # 直边四面体的 Jacobian 逐单元常数：每单元只算一份（见 `build_fine_metrics`）
         tet_jacobians_fine = compute_native_tet_jacobians(mesh, order, 1, want_scaled_quality=False)
@@ -207,10 +141,19 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     return {
         "sps_coords": sps_coords,
         "jacobians": jacobians,
-        "ref_cube_sps": ref_cube_sps,
         "jacobians_fine": jacobians_fine,
         "n_sps_per_cell_fine": n_sps_per_cell_fine,
     }
+
+
+_ORDER_FIELDS = ("n_points_1d", "n_sps_per_cell", "sps_coords", "jacobians", "operators", "face_flux_points",
+                 "cell_face_misalignment", "jacobians_fine", "n_sps_per_cell_fine")
+
+
+def cache_active_order(mesh: "HighOrderMesh") -> None:
+    """把网格当前活动阶数的全部阶数相关几何记进按阶数缓存（网格加载与 `set_order` 共用这一份字段清单）。"""
+    mesh._order_geometry_cache[mesh.order] = {f: getattr(mesh, f) for f in _ORDER_FIELDS}
+    mesh._active_order = mesh.order
 
 
 def set_order(mesh: "HighOrderMesh", order: int) -> None:
@@ -236,53 +179,31 @@ def set_order(mesh: "HighOrderMesh", order: int) -> None:
         # mesh.jacobians / mesh.operators，必须先落地才能调用。
         mesh.order = order
         mesh.n_points_1d = order + 1
-        mesh.n_sps_per_cell = mesh.n_points_1d**3
+        mesh.operators = generate_fr_operators(order)
+        mesh.n_sps_per_cell = mesh.operators.n_sps
         mesh.sps_coords = geom["sps_coords"]
         mesh.jacobians = geom["jacobians"]
-        mesh._ref_cube_sps = geom["ref_cube_sps"]
         mesh.jacobians_fine = geom["jacobians_fine"]
         mesh.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
-        mesh.operators = generate_fr_operators(order)
 
-        face_flux_points = None
-        cell_face_misalignment = None
+        mesh.face_flux_points = None
+        mesh.cell_face_misalignment = None
         if mesh.face_connectivity is not None:
             from autoflowcfd.fr.face_flux_points.merge import build_face_flux_points
 
             logger.info(f"Order continuation: building Flux Points geometry for P{order}...")
-            face_flux_points = build_face_flux_points(mesh.face_connectivity, mesh)
-            mesh.face_flux_points = face_flux_points
+            mesh.face_flux_points = build_face_flux_points(mesh.face_connectivity, mesh)
             logger.info(f"Order continuation: Flux Points geometry built for P{order}")
 
             if mesh.jacobians is not None:
                 from autoflowcfd.core.fr_operators.troubled_cell import precompute_cell_face_misalignment
 
-                cell_face_misalignment = precompute_cell_face_misalignment(mesh)
-                mesh.cell_face_misalignment = cell_face_misalignment
+                mesh.cell_face_misalignment = precompute_cell_face_misalignment(mesh)
 
-        mesh._order_geometry_cache[order] = {
-            "n_points_1d": mesh.n_points_1d,
-            "n_sps_per_cell": mesh.n_sps_per_cell,
-            "sps_coords": mesh.sps_coords,
-            "jacobians": mesh.jacobians,
-            "ref_cube_sps": mesh._ref_cube_sps,
-            "operators": mesh.operators,
-            "face_flux_points": face_flux_points,
-            "cell_face_misalignment": cell_face_misalignment,
-            "jacobians_fine": mesh.jacobians_fine,
-            "n_sps_per_cell_fine": mesh.n_sps_per_cell_fine,
-        }
+        cache_active_order(mesh)
+        return
 
-    cached = mesh._order_geometry_cache[order]
     mesh.order = order
-    mesh.n_points_1d = cached["n_points_1d"]
-    mesh.n_sps_per_cell = cached["n_sps_per_cell"]
-    mesh.sps_coords = cached["sps_coords"]
-    mesh.jacobians = cached["jacobians"]
-    mesh._ref_cube_sps = cached["ref_cube_sps"]
-    mesh.operators = cached["operators"]
-    mesh.face_flux_points = cached["face_flux_points"]
-    mesh.cell_face_misalignment = cached["cell_face_misalignment"]
-    mesh.jacobians_fine = cached["jacobians_fine"]
-    mesh.n_sps_per_cell_fine = cached["n_sps_per_cell_fine"]
+    for field, value in mesh._order_geometry_cache[order].items():
+        setattr(mesh, field, value)
     mesh._active_order = order

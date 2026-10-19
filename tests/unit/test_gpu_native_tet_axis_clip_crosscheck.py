@@ -40,7 +40,7 @@ fr_gpu` 与 CPU 参考实现 `compute_inviscid_residual_fr` 交叉验证到
 修复**：axis-clip 崩溃解决后，粘性残差与 CPU 交叉验证仍有真实数值
 偏差（P1 ~9%，P2 更大）。逐项定位：
 1. `gpu_gradients.py::compute_physical_gradient_gpu` 四面体分支此前
-   无条件用 `ops_data['D_3d_tet']`（坍缩坐标微分算子），从未像
+   无条件用 `ops_data['D_native_tet_padded']`（坍缩坐标微分算子），从未像
    `compute_volume_term_gpu` 那样按是否存在 `D_native_tet_padded`
    分派——`tet_basis_mode="native"` 时四面体的物理梯度因此用了完全
    错误的参考空间微分算子（棱柱不受影响，两种模式下都用同一个
@@ -107,7 +107,7 @@ class TestNativeTetAxisClipFix:
         )
         from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
 
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+        mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
         rng = np.random.default_rng(order * 4000 + 3)
 
@@ -148,7 +148,7 @@ class TestNativeTetAxisClipFix:
         from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
         from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+        mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
         rng = np.random.default_rng(order * 4000 + 3)
 

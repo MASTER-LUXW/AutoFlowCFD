@@ -168,7 +168,7 @@ class TestGPUGradients:
         mesh_data = {'inv_jacs': inv_jacs, 'n_prism': 0}
         # 简单的微分矩阵（全零 → 参考空间梯度为零）
         D_3d_tet = cupy.zeros((n_sps, n_sps, 3))
-        ops_data = {'D_3d_tet': D_3d_tet}
+        ops_data = {'D_native_tet_padded': D_3d_tet}
         grad = compute_physical_gradient_gpu(field, mesh_data, ops_data)
         np.testing.assert_allclose(cupy.asnumpy(grad), 0.0, atol=1e-14)
 

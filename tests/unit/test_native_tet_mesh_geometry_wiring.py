@@ -32,17 +32,9 @@ class _MockCells:
         self.connectivity = connectivity
 
 
-def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str = "native") -> HighOrderMesh:
+def _build_synthetic_mixed_mesh(order: int) -> HighOrderMesh:
     """与 test_fr_residual_inviscid.py::_build_synthetic_mixed_mesh 同一个
-    合成网格构造（2 个共享面的四面体 + 2 个共享侧面的棱柱）。
-
-    tet_basis_mode: 四面体坍缩坐标基已删除（2026-09-03，见 `fr/
-    operators.py` 模块文档），只接受 "native"（或默认省略）。"""
-    if tet_basis_mode != "native":
-        raise ValueError(
-            f"tet_basis_mode={tet_basis_mode!r} 已不再支持——四面体坍缩坐标基"
-            "已删除，只剩 native 一种实现（见 fr/operators.py 模块文档）。"
-        )
+    合成网格构造（2 个共享面的四面体 + 2 个共享侧面的棱柱）。"""
     nodes = np.array(
         [
             [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
@@ -74,9 +66,7 @@ def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str = "native") -> H
 
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_native_mesh_loads_without_crashing_and_operators_are_native(order):
-    mesh = _build_synthetic_mixed_mesh(order, "native")
-    assert mesh.tet_basis_mode == "native"
-    assert mesh.operators.tet_basis_mode == "native"
+    mesh = _build_synthetic_mixed_mesh(order)
     assert mesh.operators.D_native_tet_padded is not None
     assert mesh.operators.face_lift_by_op is not None
 
@@ -85,7 +75,7 @@ def test_native_mesh_loads_without_crashing_and_operators_are_native(order):
 def test_native_face_connectivity_codes_are_translated(order):
     """四面体侧的 cube face code 必须落在 native 范围 [6,9]，棱柱侧
     完全不受影响（仍然是 [0,5]）——见 with_native_face_codes 文档。"""
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     fc = mesh.face_connectivity
 
@@ -100,7 +90,7 @@ def test_native_face_connectivity_codes_are_translated(order):
 
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_native_sps_coords_real_rows_match_map_native_tet_to_physical(order):
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     n_tets = mesh.n_cells - n_prisms
     ref_native, _ = build_native_tet_operators(order)
@@ -123,7 +113,7 @@ def test_native_sps_coords_real_rows_match_map_native_tet_to_physical(order):
 
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_native_det_jacs_are_constant_and_match_reference_and_prism_unaffected(order):
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     n_tets = mesh.n_cells - n_prisms
     n_sps = mesh.n_sps_per_cell
@@ -138,7 +128,7 @@ def test_native_det_jacs_are_constant_and_match_reference_and_prism_unaffected(o
     # 棱柱部分与再次独立构造的同一个网格逐位一致（棱柱坍缩坐标构造是
     # 确定性的，不依赖四面体侧——这里不再有"collapsed 模式"可对比，
     # 四面体基已删除，验证退化为可重复性检查）。
-    mesh_again = _build_synthetic_mixed_mesh(order, "native")
+    mesh_again = _build_synthetic_mixed_mesh(order)
     det_jacs_again = mesh_again.jacobians["det_jacs"].reshape(mesh_again.n_cells, n_sps)
     np.testing.assert_allclose(det_jacs[:n_prisms], det_jacs_again[:n_prisms], atol=1e-12)
 
@@ -149,7 +139,7 @@ def test_native_cell_volumes_match_independent_tetrahedron_volume_formula(order)
     `V=|det([p1-p0,p2-p0,p3-p0])|/6` 独立吻合（不复用 compute_native_
     tet_jacobian 本身，另一条完全独立的公式）——同时验证棱柱体积与
     坍缩坐标网格逐位一致（不受 native 分支影响）。"""
-    mesh = _build_synthetic_mixed_mesh(order, "native")
+    mesh = _build_synthetic_mixed_mesh(order)
     n_prisms = mesh.n_prism_cells
     n_tets = mesh.n_cells - n_prisms
 
@@ -161,7 +151,7 @@ def test_native_cell_volumes_match_independent_tetrahedron_volume_formula(order)
         # get_cell_volume（单元级别接口）必须给出同样的值
         assert mesh.get_cell_volume(cell_id) == pytest.approx(expected_volume, rel=1e-10)
 
-    mesh_again = _build_synthetic_mixed_mesh(order, "native")
+    mesh_again = _build_synthetic_mixed_mesh(order)
     np.testing.assert_allclose(
         mesh.cell_volumes[:n_prisms], mesh_again.cell_volumes[:n_prisms], rtol=1e-10
     )

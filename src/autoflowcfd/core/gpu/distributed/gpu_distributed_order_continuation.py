@@ -121,7 +121,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     solver.n_compact = compact_mesh_view.n_cells
     solver.ops_data = {k: v for k, v in solver.mesh_data.items()}
 
-    n_sps = solver.ops.D_3d.shape[0]
+    n_sps = solver.ops.n_sps
     with cp.cuda.Device(solver.device_id):
         solver._perm_gpu = cp.asarray(solver.dist_flat_face.perm)
         solver._inv_perm_gpu = cp.asarray(solver.dist_flat_face.inv_perm)

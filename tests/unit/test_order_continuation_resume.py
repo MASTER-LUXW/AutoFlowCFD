@@ -62,7 +62,7 @@ def _fake_solver(current_order, target_order, resumed):
     solver = SimpleNamespace(
         order=target_order,
         current_order=current_order,
-        ops=SimpleNamespace(D_3d=np.zeros((n_sps, n_sps))),
+        ops=SimpleNamespace(n_sps=n_sps),
         mesh=mesh,
         state=SimpleNamespace(U=U, n_cells=2, n_vars=7),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
@@ -95,7 +95,7 @@ def _fake_solver(current_order, target_order, resumed):
 
 def _fake_generate_ops(p, flux_point_type='radau'):
     n = _n_sps(p)
-    return SimpleNamespace(D_3d=np.zeros((n, n)))
+    return SimpleNamespace(n_sps=n)
 
 
 class TestResumeSkipsP0Reinit:

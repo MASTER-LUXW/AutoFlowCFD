@@ -107,7 +107,7 @@ def mixed_mesh_and_ops_native():
     这两个 kernel 内部的 native/collapsed 分派逻辑。"不支持"的表述已经
     过时，本次更新为"已验证支持"。"""
     order = 2
-    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
     assert mesh.n_prism_cells == 2
     assert mesh.n_cells == 4

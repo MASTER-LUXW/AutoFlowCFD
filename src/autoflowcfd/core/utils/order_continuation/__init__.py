@@ -17,8 +17,6 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
 """
 
 from .interp import (  # noqa: F401
-    _build_linear_interp_matrix_3d,
-    _lagrange_basis_matrix_1d,
     interpolate_to_new_order,
     interpolate_to_new_order_checked,
 )
