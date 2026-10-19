@@ -1,8 +1,8 @@
-"""GMRES 停滞提前终止（`implicit/gmres.py` 模块文档同名一节）。"""
+"""GMRES 停滞提前终止（`implicit/krylov/gmres.py` 模块文档同名一节）。"""
 
 import numpy as np
 
-from autoflowcfd.core.time_integration.implicit.gmres import STAGNATION_WINDOW, _stagnated, gmres_right
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import STAGNATION_WINDOW, _stagnated, gmres_right
 
 
 def _identity(v):

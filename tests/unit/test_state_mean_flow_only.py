@@ -90,7 +90,7 @@ def test_checkpoint_with_wrong_mesh_is_still_rejected():
 
 
 def test_newton_step_rejects_a_state_with_extra_columns():
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import step_mean_flow_newton
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import step_mean_flow_newton
 
     with pytest.raises(ValueError, match="5 个守恒变量"):
         step_mean_flow_newton(None, None, np.zeros((8, 7)), None, None, red=None, cell_is_prism=None,

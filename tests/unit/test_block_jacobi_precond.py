@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""单元块 Jacobi 预处理（`core/time_integration/implicit/block_jacobi.py`）。
+"""单元块 Jacobi 预处理（`core/time_integration/implicit/blocks/block_jacobi.py`）。
 
 判据：
 1. 距离 1 着色合法（面相邻单元不同色）；
@@ -16,13 +16,13 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.time_integration.implicit import block_budget as bb
-from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
-from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
-from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
-from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
-from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
-from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
+from autoflowcfd.core.time_integration.implicit.blocks import block_budget as bb
+from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
+from autoflowcfd.core.time_integration.implicit.blocks.cell_block_inverse import CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.coloring import greedy_cell_coloring
+from autoflowcfd.core.time_integration.implicit.newton.jfnk import step_newton_krylov
+from autoflowcfd.core.time_integration.implicit.blocks.preconditioner import PseudoTransientDiagonal
 
 N_SPS, NV = 8, 5
 N_REAL_P, N_REAL_T = 6, 4
@@ -153,7 +153,7 @@ def test_apply_accumulates_stored_inverse_in_float64_and_accepts_column_views():
 def test_block_diagonal_combination_reads_column_views_without_modifying_input():
     """平均流 / 湍流两块的组合（`coupled_step.py::_BlockDiagonal`）不复制输入：各块拿到列切片、输入不变，
     结果等于各块分别作用在连续副本上。"""
-    from autoflowcfd.core.time_integration.implicit.coupled_step import _BlockDiagonal
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import _BlockDiagonal
 
     rng = np.random.default_rng(13)
     n = 40
@@ -303,9 +303,9 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
 def test_stale_blocks_are_refreshed_within_the_step():
     """复用的 J_cc 在本步的过时预算（基线 + 一次装配折合的迭代数）内解不到容差时，
     当场重装配再解，而不是把整步的 GMRES 预算烧完、等下一步才刷新。"""
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
-    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
-    from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
+    from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
+    from autoflowcfd.core.time_integration.implicit.newton.jfnk import step_newton_krylov
+    from autoflowcfd.core.time_integration.implicit.newton.physicality import ScaledFieldRowLimits
 
     rng = np.random.default_rng(5)
     n = 60
@@ -379,7 +379,7 @@ def test_budget_follows_available_memory(monkeypatch):
     """预算 = 可用内存 − Krylov 基 − 残差求值工作数组 − 余量；可用内存少时降到单份而不是照样选最贵的档。
 
     cube_demo 粗网格 SA P2：写死的 11 GiB 选了平均流两份（9.12 GiB），第 2 步 GMRES 时进程 29.4 GB 内存不足。"""
-    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import krylov_basis_bytes
     from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
     import autoflowcfd.core.utils.system_memory as sm
 
@@ -423,7 +423,7 @@ def test_restart_is_shortened_only_as_far_as_needed_to_fit_every_cache(monkeypat
     长度、退回对角预处理。Newton 步的重启长度按规划给出的上限截断。
 
     cube_demo 粗网格 SA P2：规划时可用 17.9 GiB，重启 60 时平均流单份之后湍流差 0.08 GiB 退回对角预处理。"""
-    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import krylov_basis_bytes, krylov_restart
     from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
     import autoflowcfd.core.utils.system_memory as sm
 

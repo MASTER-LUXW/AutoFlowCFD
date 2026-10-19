@@ -7,7 +7,7 @@
    `open_boundary_face`）：此前所有非壁面边界一律零梯度，来流湍流只存在
    于初场。判据：均匀流、全场 `k = 0.5*k_inf` 时，来流边界单元必须收到
    正的 `dk/dt`（被来流值补给），且 `k = k_inf` 时来流单元的输运残差为零。
-2. **耦合残差**（`time_integration/implicit/coupled_step.py::CoupledResidual`）：
+2. **耦合残差**（`time_integration/implicit/newton/coupled_step.py::CoupledResidual`）：
    湍流列在真实行上就是输运方程本身（壁面 omega 只由扩散残差的面 Dirichlet 施加，
    2026-09-30 删除了壁面单元全部解点的强约束行，见 `fr_solver/turbulence/implicit.py`
    "omega 壁面条件"），平均流列就是 `Gamma R`；求值不得把试探场泄漏进求解器状态。
@@ -128,7 +128,7 @@ class TestCoupledResidual:
         零填充槽位的湍流列为零；试探求值不泄漏进求解器状态。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
-        from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledResidual
+        from autoflowcfd.core.time_integration.implicit.newton.coupled_step import CoupledResidual
         from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
         from autoflowcfd.fr.native_padding import real_row_mask
 
@@ -215,7 +215,7 @@ def test_nk_sst_channel_converges_coupled_p3():
 
     2026-10-02：湍流对流体积项改成一致的对流形式后，分离式在这里进入 4 步一周期的
     极限环（块 Gauss-Seidel 外迭代失稳），改为平均流与湍流紧耦合 Newton
-    （`time_integration/implicit/coupled_step.py`）。收敛解在出口与壁面交界的贴壁解点上
+    （`time_integration/implicit/newton/coupled_step.py`）。收敛解在出口与壁面交界的贴壁解点上
     有 k 的负欠冲（实测最小 -0.27 = -2 k_inf，约为场内峰值 7.1 的 3.8%）：远场出口的
     幽灵态是均匀来流剖面，与无滑移壁面在角点处不相容。此前 k 全场为正只是因为守恒形式
     的伪源 `-k div_vol(rho u)` 恰好在那里为正。按约定被输运的 k 可以欠冲、realizability

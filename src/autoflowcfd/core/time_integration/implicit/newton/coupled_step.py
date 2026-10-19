@@ -59,8 +59,8 @@ from loguru import logger
 from autoflowcfd.core.utils.array_module import array_module
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
-from .block_budget import plan_block_memory
-from .block_jacobi import BlockJacobiCache
+from ..blocks.block_budget import plan_block_memory
+from ..blocks.block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
 from .jfnk import step_newton_krylov

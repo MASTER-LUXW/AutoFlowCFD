@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""块预处理刷新判据的确定性代价模型（`time_integration/implicit/refresh_cost.py`）。
+"""块预处理刷新判据的确定性代价模型（`time_integration/implicit/blocks/refresh_cost.py`）。
 
 2026-09-26 起刷新判据按实测墙钟耗时之比决定"一次装配折合多少次迭代"，同一输入跨进程的 Newton 轨迹
 因此不可逐位复现（SST 黄金轨迹 P2 段在两个结果间切换）；2026-10-04 改为按块类型与阶数查实测标定表、
@@ -9,8 +9,8 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
-from autoflowcfd.core.time_integration.implicit.refresh_cost import (
+from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.blocks.refresh_cost import (
     ANALYTIC_ASSEMBLY_ITERS, FD_EVAL_ITERS, REFRESH_SLACK_MIN, assembly_cost_iters, block_kind,
 )
 
@@ -39,7 +39,7 @@ def test_missing_calibration_is_an_error_not_a_guess():
 
 def test_cache_threshold_uses_the_table_after_a_build():
     """装配之后刷新阈值 = 基线 + 查表值（与耗时无关）。"""
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
+    from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
 
     cip = np.ones(4, dtype=bool)
     cache = BlockJacobiCache(cell_is_prism=cip, colors=np.zeros(4, dtype=np.int64),

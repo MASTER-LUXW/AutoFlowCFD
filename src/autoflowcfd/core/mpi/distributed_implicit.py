@@ -2,10 +2,10 @@
 
 隐式步的算法本身只有一份，这里只回答"分布式上用哪一套求值件"：
 
-* 平均流 Newton 步（层流）：`time_integration/implicit/mean_flow_step.py::
+* 平均流 Newton 步（层流）：`time_integration/implicit/newton/mean_flow_step.py::
   step_mean_flow_newton`，归约对象换成 `core/mpi/reductions.py::
   MPIReductions`（GMRES 内积、残差 RMS、线搜索与物理性限幅都是全局量）；
-* 平均流 + k-omega 紧耦合：`time_integration/implicit/coupled_step.py::step_coupled_newton`，
+* 平均流 + k-omega 紧耦合：`time_integration/implicit/newton/coupled_step.py::step_coupled_newton`，
   本文件提供湍流求值件适配器 `DistributedTurbulenceBackend` 与耦合适配器
   `DistributedCoupledBackend`；
 * 块 Jacobi 着色：`global_cell_colors`；P0 差分装配耦合块用的距离 2 着色与本地
@@ -13,7 +13,7 @@
 
 ## 着色必须全局一致
 
-着色有限差分装配（`implicit/block_jacobi.py`）同时扰动同色的全部单元，
+着色有限差分装配（`implicit/blocks/block_jacobi.py`）同时扰动同色的全部单元，
 依据是"同色单元不是面邻居"。分布式下 rank A 的单元与 rank B 的单元可以
 是面邻居（彼此的 halo），而残差求值里 halo 交换会把 A 上的扰动带进 B 的
 残差——所以同色不相邻必须对**全局**邻接关系成立。各 rank 各自对本地邻接
@@ -25,7 +25,7 @@
 * 完全分布式加载：只有 root 持有全局网格，root 算一次、随紧凑包下发
   （`distributed_mesh_loader/package.py` 的 `cell_colors`）。
 
-P0 的差分装配同时截取面邻居耦合块（`implicit/cell_blocks.py`），要的是距离 2
+P0 的差分装配同时截取面邻居耦合块（`implicit/blocks/cell_blocks.py`），要的是距离 2
 着色（同色单元既不相邻、也不共享面邻居），同一个理由也必须对全局邻接成立，来源
 与上面相同（完全分布式加载随包下发 `cell_colors_d2`）。块 ILU 只用两端都在本
 rank 的耦合块（rank 间按块 Jacobi 式分解，与解析装配 `select_rows` 同一个近似）。
@@ -54,7 +54,7 @@ from autoflowcfd.core.mpi.distributed_turbulence import (
     set_view_fields,
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
-from autoflowcfd.core.time_integration.implicit.coloring import (
+from autoflowcfd.core.time_integration.implicit.blocks.coloring import (
     CouplingGraph, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
 )
 from autoflowcfd.core.turbulence.transport import prepare_convection_geometry

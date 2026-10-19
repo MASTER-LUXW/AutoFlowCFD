@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 湍流输运方程隐式步的解析单元块 Jacobian。
 
-冻结平均流下的湍流残差（紧耦合 Newton 残差的湍流子系统，`time_integration/implicit/coupled_step.py`）
+冻结平均流下的湍流残差（紧耦合 Newton 残差的湍流子系统，`time_integration/implicit/newton/coupled_step.py`）
 
     R_t,v = -[S_v + conv_v + diff_v] / rho          v = 0 .. nv-1（模型的 Newton 未知量）
 

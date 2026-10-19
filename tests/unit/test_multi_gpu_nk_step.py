@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """多 GPU 分布式 `step()` 的隐式分支接线：隐式稳态（NEWTON_KRYLOV）与双时间步（DUAL_TIME）。
 
-隐式步的算法（`implicit/mean_flow_step.py`）已由单机与 CPU 分布式的对照测试
+隐式步的算法（`implicit/newton/mean_flow_step.py`）已由单机与 CPU 分布式的对照测试
 覆盖；这里只验证多 GPU 分支自己的接线：Newton 步真的被调用、试探态经
 `self.U_gpu` 临时写入再恢复、跨步状态落在求解器上、SER 律拿到 Newton 诊断。
 
@@ -46,7 +46,7 @@ def _stub(n_local, n_sps, target):
     from autoflowcfd.core.gpu.distributed.gpu_distributed.timestep import _MultiGPUTimeStepMixin
     from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
     s = types.SimpleNamespace()
     s.partition = types.SimpleNamespace(n_local_cells=n_local, rank=0, n_ranks=1)

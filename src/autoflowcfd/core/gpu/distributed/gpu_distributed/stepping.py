@@ -141,7 +141,7 @@ class _MultiGPUSteppingMixin:
             dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
 
         dual_time = self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
-        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/physical_time.py）
+        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/newton/physical_time.py）
         is_newton = dual_time or self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         if is_newton:
             # 隐式步的块结构：local 单元（原生排列）的类型掩码与当前阶数
@@ -152,7 +152,7 @@ class _MultiGPUSteppingMixin:
 
         # 湍流（算子分裂，每个 step 开始时一次，用当前——上一步末尾——的状态，
         # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt。隐式步 +
-        # 带输运方程的湍流模型时湍流与平均流在下面紧耦合求解（time_integration/implicit/coupled_step.py，
+        # 带输运方程的湍流模型时湍流与平均流在下面紧耦合求解（time_integration/implicit/newton/coupled_step.py，
         # 适配器见 gpu_distributed_implicit.py），这里只取当前状态的涡粘供残差监控。
         from autoflowcfd.core.turbulence.registry import has_transport_equations
 
@@ -208,16 +208,16 @@ class _MultiGPUSteppingMixin:
         nk_info = None
         if is_newton:
             # 隐式步：与单机 CPU/GPU、CPU 分布式同一个实现（带输运方程的湍流模型时紧耦合
-            # implicit/coupled_step.py，否则 implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色
+            # implicit/newton/coupled_step.py，否则 implicit/newton/mean_flow_step.py），归约跨 rank，块 Jacobi 着色
             # 全局一致。稳态一步一个 Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步
-            # （implicit/physical_time.py）
+            # （implicit/newton/physical_time.py）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
             from autoflowcfd.core.mpi.reductions import MPIReductions
-            from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
                 step_mean_flow_newton,
             )
 
@@ -226,7 +226,7 @@ class _MultiGPUSteppingMixin:
             coupled = None
             if coupled_nk:
                 from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuCoupledBackend
-                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+                from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
 
                 coupled = MultiGpuCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
 
@@ -250,7 +250,7 @@ class _MultiGPUSteppingMixin:
                 return info
 
             if dual_time:
-                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
                     advance_physical_step, previous_newton_state, store_newton_state,
                 )
 
@@ -277,6 +277,6 @@ class _MultiGPUSteppingMixin:
 
         self.residual_history.append(residual_norm)
         self.iteration += 1
-        if not dual_time:        # 双时间步的伪时间 CFL 在内迭代里更新（implicit/physical_time.py）
+        if not dual_time:        # 双时间步的伪时间 CFL 在内迭代里更新（implicit/newton/physical_time.py）
             self._update_cfl_controller(residual_norm, newton_info=nk_info)
         return residual_norm

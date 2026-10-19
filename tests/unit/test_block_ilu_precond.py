@@ -1,4 +1,4 @@
-"""单元块 D-ILU 预处理（`implicit/block_ilu.py`）。
+"""单元块 D-ILU 预处理（`implicit/blocks/block_ilu.py`）。
 
 1. 作用正确：与按定义稠密构造的 `M = (D~ + L) D~^{-1} (D~ + U)` 的逆逐位对照
    （多色序、只修正对角块）；
@@ -9,12 +9,12 @@ import numpy as np
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
-from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
-from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
-from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
-from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
-from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
-from autoflowcfd.core.time_integration.implicit.jacobian_vector import MatrixFreeJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.cell_block_inverse import CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.coloring import greedy_cell_coloring
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
+from autoflowcfd.core.time_integration.implicit.krylov.jacobian_vector import MatrixFreeJacobian
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit.test_mean_flow_analytic_jacobian import (
@@ -148,7 +148,7 @@ def _serial_solve(inv, diag_off, s, x, n_sps):
 def test_asymmetric_coupling_wavefronts_have_no_same_level_dependencies_and_solve_is_exact():
     """耦合模式不对称时：前代与回代读到的邻居都在更早的层（分层按对称化结构，`block_ilu.rcm_wavefronts`），
     并行解与按名次顺序的串行解逐位相同、重复作用逐位相同。修复前按单侧行分层，回代有同层读写冲突。"""
-    from autoflowcfd.core.time_integration.implicit.block_ilu import factor_block_ilu, solve_block_ilu
+    from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import factor_block_ilu, solve_block_ilu
 
     rng = np.random.default_rng(5)
     s, diag, diag_off = _asymmetric_structure(rng)

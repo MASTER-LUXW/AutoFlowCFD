@@ -31,7 +31,7 @@ class PositivityLimiter:
         W: `(n_cells, n_sps)` 守恒权重（解点插值型求积权重 x det J，补零槽位为 0），
             单元均值的精确求积。
         norm_weights: `(n_cells, n_sps)` Newton 全局化残差范数的逐行权重：单元体积
-            （`W` 的单元内和）在真实解点上均分，补零槽位为 0（`implicit/globalization.py::ResidualNorm`）。
+            （`W` 的单元内和）在真实解点上均分，补零槽位为 0（`implicit/newton/globalization.py::ResidualNorm`）。
             不能直接用 `W`：原生基 P2/P3 的插值型权重有零与负值（P2 棱柱 18 个解点中
             9 个为 0，P2 四面体 4 个为 -1/15，P3 四面体 20 个中 12 个为 0），加权平方和
             只是半范数——那些解点上的残差对接受判据与 SER 不可见，负权重还能让它变小。
@@ -94,13 +94,13 @@ class PositivityLimiter:
         """隐式 Newton 步的物理性限幅，在**与本限制器同一个点集**上求值（解点 +
         面通量点 + 过积分细点），返回逐行 `alpha`（同一单元的行取单元内最小值）。
 
-        规则本身是 `implicit/jfnk.py::density_pressure_row_limits`（rho 与 p 单步
+        规则本身是 `implicit/newton/jfnk.py::density_pressure_row_limits`（rho 与 p 单步
         相对变化对数对称不超过 50%），这里只把求值点从解点扩到全部通量求值点：
         Newton 步从可容许态出发、每个点都限相对变化，就不会走进任何求值点上
         rho、p 非正的状态。此前只看解点，plate_demo 锐边贴壁单元解点都正常而一个
         细点 rho 被逐步推到 7e-10、p<0，体积通量在那里奇异，平均流从此每步被拒。
         """
-        from autoflowcfd.core.time_integration.implicit.physicality import density_pressure_row_limits
+        from autoflowcfd.core.time_integration.implicit.newton.physicality import density_pressure_row_limits
 
         xp = self.xp
         n_var = u0_flat.shape[1]

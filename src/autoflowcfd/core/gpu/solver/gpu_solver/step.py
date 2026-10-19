@@ -12,14 +12,14 @@ from functools import partial
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
-from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
     newton_step_ok,
     step_mean_flow_newton,
 )
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.registry import has_transport_equations
 from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
-from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
 
 
 class _GPUSolverStepMixin:
@@ -58,7 +58,7 @@ class _GPUSolverStepMixin:
         # 一份；两者的分工与 CPU 侧 step.py 完全一致。
         dual_time = scheme == TimeIntegrationScheme.DUAL_TIME
         # 隐式步（稳态 Newton-Krylov，或双时间步的隐式内迭代）里带输运方程的湍流模型与平均流紧耦合
-        # 求解（time_integration/implicit/coupled_step.py），这里只取当前状态的涡粘供残差监控；
+        # 求解（time_integration/implicit/newton/coupled_step.py），这里只取当前状态的涡粘供残差监控；
         # 其余情形湍流按算子分裂在当前状态下更新。步长先取（粘性 CFL 用上一步的涡粘，与 CPU step.py
         # 同一时序）
         coupled_nk = (scheme in (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
@@ -148,9 +148,9 @@ class _GPUSolverStepMixin:
         nk_info = None
         if scheme in (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME):
             # 隐式步，与 CPU 共用同一个实现：带输运方程的湍流模型时平均流与湍流紧耦合
-            # （implicit/coupled_step.py），否则只解平均流（implicit/mean_flow_step.py），这里只提供
+            # （implicit/newton/coupled_step.py），否则只解平均流（implicit/newton/mean_flow_step.py），这里只提供
             # GPU 的残差、归约（cupy）与面相邻关系。稳态一步一个 Newton 步；双时间步每个物理步做若干个
-            # 带 BDF 物理时间项的 Newton 步（implicit/physical_time.py）。
+            # 带 BDF 物理时间项的 Newton 步（implicit/newton/physical_time.py）。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors, gpu_coupling_graph
             from autoflowcfd.core.fr_residual.jacobian.backend import (
@@ -185,7 +185,7 @@ class _GPUSolverStepMixin:
                 return info
 
             if dual_time:
-                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
                     advance_physical_step, previous_newton_state, store_newton_state,
                 )
 
@@ -231,7 +231,7 @@ class _GPUSolverStepMixin:
 
         # 自适应 CFL：按物理残差更新（与 CPU 侧 step.py 同一时序——在残差
         # 范数算出来之后、返回之前）
-        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/physical_time.py）
+        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/newton/physical_time.py）
         if self._cfl_controller is not None and not dual_time:
             if nk_info is not None:
                 # SER 看 Newton 所解系统的 ||Gamma R||，并区分物理暂态与步失败

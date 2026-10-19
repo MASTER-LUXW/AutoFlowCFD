@@ -173,7 +173,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
     reset_dual_time_history(self)
     # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
     reset_newton_state(self)
 

@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 解析单元块装配器的后端适配（全部后端共用）。
 
-块 Jacobi / 块 ILU 缓存（`time_integration/implicit/block_jacobi.py`）每个 Newton
+块 Jacobi / 块 ILU 缓存（`time_integration/implicit/blocks/block_jacobi.py`）每个 Newton
 步向装配器要一次块：`assembler(u0_flat, r0_flat)`，`u0/r0` 是 Newton 行（本 rank
 的单元、Newton 变量 5 个）上的状态与残差，数组模块可以是 numpy 或 cupy。装配
 在主机上做（`assemble.py` 是 numpy + numba），结果是主机 float32 数组，由缓存

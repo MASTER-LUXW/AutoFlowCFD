@@ -8,11 +8,11 @@
 
 import numpy as np
 
-from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
-from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
 import pytest
 
-from autoflowcfd.core.time_integration.implicit import block_jacobi as BJ
+from autoflowcfd.core.time_integration.implicit.blocks import block_jacobi as BJ
 from tests.unit.test_block_ilu_precond import _setup
 
 
@@ -83,7 +83,7 @@ def test_reassembly_discards_the_factorization(cache_and_counter):
 
 def test_reused_factorization_still_solves_the_exact_system(cache_and_counter):
     """复用的（dtau 略过时的）分解仍是合法预处理子：右预处理 GMRES 收敛到同一个解。"""
-    from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
+    from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
 
     cache, calls, n, _ = cache_and_counter
     dtau_old, dtau_new = np.full(n, 1e-6), np.full(n, 1.8e-6)

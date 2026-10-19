@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""inexact-Newton 的 forcing term：Eisenstat-Walker choice 1（`implicit/forcing.py`，2026-10-05 由 choice 2 改）。
+"""inexact-Newton 的 forcing term：Eisenstat-Walker choice 1（`implicit/newton/forcing.py`，2026-10-05 由 choice 2 改）。
 
 choice 2 只看上一步残差掉了多少，湍流平板 SA P3 收敛末段把 eta 收紧到 1e-3、GMRES 每步 253 次，而非线性
 残差每步只降 3~29 倍（远小于 1/eta）。choice 1 按线性模型与真实残差的吻合程度定 eta：吻合时收紧，
@@ -8,7 +8,7 @@ choice 2 只看上一步残差掉了多少，湍流平板 SA P3 收敛末段把 
 
 import pytest
 
-from autoflowcfd.core.time_integration.implicit.forcing import (
+from autoflowcfd.core.time_integration.implicit.newton.forcing import (
     _ETA_MAX, _ETA_MIN, _EW_PHI, EisenstatWalkerForcing,
 )
 

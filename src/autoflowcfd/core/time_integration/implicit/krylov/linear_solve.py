@@ -7,11 +7,11 @@
 
 from typing import Optional
 
-from .forcing import _ETA_MIN
-from .globalization import ResidualNorm
+from ..newton.forcing import _ETA_MIN
+from ..newton.globalization import ResidualNorm
 from .gmres import FlexibleSplit, basis_itemsize, gmres_right
 from .jacobian_vector import MatrixFreeJacobian
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 #: GMRES 重启长度的**下限**。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
 #: 峰值内存：P2 下 79 万单元一个基向量 1.2 GB，大问题只能取小值。

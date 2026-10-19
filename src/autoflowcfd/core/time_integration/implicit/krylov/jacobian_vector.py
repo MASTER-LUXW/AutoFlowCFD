@@ -68,7 +68,7 @@ from typing import Callable
 
 import numpy as np
 
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 #: `sqrt(eps_mach)`，一阶 Fréchet 差分的最优步长量级（截断误差
 #: `O(eps)` 与舍入误差 `O(eps_mach/eps)` 在此处平衡）。

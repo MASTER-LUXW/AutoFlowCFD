@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""预处理矩阵的对角位移（`core/time_integration/implicit/precond_shift.py`）与线性求解失败后的补救
+"""预处理矩阵的对角位移（`core/time_integration/implicit/blocks/precond_shift.py`）与线性求解失败后的补救
 （`BlockJacobiCache.recover`）。
 
 判据：
@@ -12,12 +12,12 @@
 
 import numpy as np
 
-from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
-from autoflowcfd.core.time_integration.implicit import precond_shift as ps
-from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
-from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
-from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
-from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
+from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.blocks import precond_shift as ps
+from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
+from autoflowcfd.core.time_integration.implicit.newton.jfnk import step_newton_krylov
+from autoflowcfd.core.time_integration.implicit.newton.physicality import ScaledFieldRowLimits
 
 NV = 2
 
@@ -158,7 +158,7 @@ class _CountingPreconditioner:
         return None
 
     def preconditioner(self, dtau, n_var):
-        from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
+        from autoflowcfd.core.time_integration.implicit.blocks.preconditioner import PseudoTransientDiagonal
 
         return PseudoTransientDiagonal(dtau, n_var)
 
@@ -175,7 +175,7 @@ def test_recovery_is_only_attempted_when_the_direction_is_untrusted():
 
     2026-10-13 以前只要没到容差就补救：cube_demo SA P1 稳态 CFL 3e4~1e5 的十几步里第一次求解 200 次到
     0.14~0.3，仍重装配再解 200 次。"""
-    from autoflowcfd.core.time_integration.implicit.globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL
+    from autoflowcfd.core.time_integration.implicit.newton.globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL
 
     rng = np.random.default_rng(0)
     n = 120
@@ -210,8 +210,8 @@ def test_recovery_is_only_attempted_when_the_direction_is_untrusted():
 
 def test_block_diagonal_reports_only_the_nonlinear_block():
     """平均流块线性、湍流块非线性时只把湍流列标为非线性，`apply_linear` 只给平均流列；两块同类时不分列。"""
-    from autoflowcfd.core.time_integration.implicit.coupled_step import _BlockDiagonal
-    from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import _BlockDiagonal
+    from autoflowcfd.core.time_integration.implicit.blocks.preconditioner import PseudoTransientDiagonal
 
     class _Flex(PseudoTransientDiagonal):
         flexible = True

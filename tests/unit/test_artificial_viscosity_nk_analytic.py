@@ -39,7 +39,7 @@ def _solver():
 
 def _run(monkeypatch, force_difference: bool, n_steps: int = 4):
     from autoflowcfd.core.fr_residual.jacobian import backend
-    from autoflowcfd.core.time_integration.implicit import mean_flow_step
+    from autoflowcfd.core.time_integration.implicit.newton import mean_flow_step
 
     if force_difference:
         monkeypatch.setattr(backend, "unsupported_reason", lambda **kw: "测试：强制差分装配")

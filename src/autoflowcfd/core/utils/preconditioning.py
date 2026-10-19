@@ -280,7 +280,7 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用：这里的推进只是到达 R=0 的路径，
     Gamma 只改路径、不改不动点。DUAL_TIME 不启用（请求了也只打一条日志说明），显式格式的时间精确推进同样
     不启用（`time_integration/time_accurate.py::configure_time_stepping`）：
-    * DUAL_TIME 的内迭代是带 BDF 物理时间项的 Newton 步（`time_integration/implicit/physical_time.py`），
+    * DUAL_TIME 的内迭代是带 BDF 物理时间项的 Newton 步（`time_integration/implicit/newton/physical_time.py`），
       对角上的 `a0/dt` 已经让系统良态，伪时间项只是步被拒时的回退手段，不需要 Gamma；"整体残差乘 Gamma"
       会把物理时间导数项一起乘掉，解的就不是 BDF 方程了；
 

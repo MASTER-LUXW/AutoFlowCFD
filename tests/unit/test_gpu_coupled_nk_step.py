@@ -3,7 +3,7 @@
 GpuCoupledBackend`、`gpu/solver/gpu_solver/step.py`）；SST（棱柱槽道）与 SA-neg（四面体槽道，含
 壁面解点的强 Dirichlet）各验一遍。
 
-紧耦合步本身（`time_integration/implicit/coupled_step.py`）CPU 与 GPU 共用；这里验 GPU 这一侧：
+紧耦合步本身（`time_integration/implicit/newton/coupled_step.py`）CPU 与 GPU 共用；这里验 GPU 这一侧：
 试探状态写进 `U_gpu` 并更新原始变量、湍流求值走 GPU 求值件（`GPUTurbulenceSST` / 数组模块为替身的
 `SAModel`，与 `GPUFRSolver` 的 `_prepare/_evaluate/_finalize_turbulence_*_gpu`）、解析块 Jacobian 的
 GPU 部件（`gpu_linearization_parts`）、快照还原、步后收尾。
@@ -153,7 +153,7 @@ def pair(request):
 def test_coupled_residual_matches_cpu(pair):
     from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
     from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
-    from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledResidual
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import CoupledResidual
     from autoflowcfd.fr.native_padding import real_row_mask
 
     cpu, gpu = pair

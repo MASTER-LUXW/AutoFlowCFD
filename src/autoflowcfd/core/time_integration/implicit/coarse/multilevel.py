@@ -45,9 +45,9 @@ V(1,1) 发散（ILU 的 Richardson 迭代谱半径大于 1），W 循环 145 次
 
 import numpy as np
 
-from ..block_ilu import BlockCouplingStructure, BlockILUPreconditioner, factor_block_ilu, solve_block_ilu
-from ..gmres import gmres_right
-from ..preconditioner import PseudoTransientDiagonal
+from ..blocks.block_ilu import BlockCouplingStructure, BlockILUPreconditioner, factor_block_ilu, solve_block_ilu
+from ..krylov.gmres import gmres_right
+from ..blocks.preconditioner import PseudoTransientDiagonal
 from .galerkin import assembled_matvec, galerkin_coarse_matrix, prolong, restrict
 
 #: 最粗层未知量上限：不超过它就做稀疏直接解（plate_demo P0 实测 8e3 量级的 LU 分解

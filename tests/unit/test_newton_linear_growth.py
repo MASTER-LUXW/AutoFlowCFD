@@ -1,4 +1,4 @@
-"""隐式稳态步的"线性预测放大倍数"诊断（2026-10-10，`implicit/mean_flow_step.py::note_linear_growth`）。
+"""隐式稳态步的"线性预测放大倍数"诊断（2026-10-10，`implicit/newton/mean_flow_step.py::note_linear_growth`）。
 
 伪瞬态 Newton 步解 `(I/dtau + J) dU = -R`，线性化残差 `R + J dU = -dU/dtau`。`J` 的特征值实部为正（定常解线性
 稳定）时 `||dU/dtau|| / ||R|| <= 1` 的量级；有实部为负、量级约 `1/dtau` 的特征值时这个比值明显大于 1——
@@ -12,7 +12,7 @@ import pytest
 from loguru import logger
 
 from autoflowcfd.core.time_integration.implicit import step_newton_krylov
-from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
     UNSTABLE_LINEAR_GROWTH, UNSTABLE_STEPS_BEFORE_WARNING, note_linear_growth, reset_newton_state,
 )
 from tests.unit._implicit_jfnk_common import _N, _NV, _SCALES
@@ -74,7 +74,7 @@ def test_unlimited_columns_are_left_out_of_the_relative_change_limit():
     """SA-neg 的 nu_tilde 对任意实数值都良态（`SAModel.NEWTON_UNLIMITED_COLUMNS`）：不做相对变化限幅。
     湍流/非湍流界面上它只有来流量级，限幅会把界面推进需要的几十倍增长压到百分之几（cube_demo P1 每步约
     3000 行）。SST 的 k / ln omega 仍然限幅。"""
-    from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
+    from autoflowcfd.core.time_integration.implicit.newton.physicality import ScaledFieldRowLimits
     from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
     from autoflowcfd.core.turbulence.sa.model import SAModel
     from autoflowcfd.core.turbulence.sst.unknowns import _SSTTransportedMixin
@@ -99,7 +99,7 @@ def test_unlimited_columns_are_left_out_of_the_relative_change_limit():
 def test_coupled_stale_budget_charges_the_cost_of_rebuilding_both_block_sets():
     """紧耦合步的过时预算 = 基线迭代数 + 两套块的松弛之和（`refresh` 把两套一起重装配）。此前取两套各自
     预算的较小者：湍流块松弛 3、平均流块松弛 8 时，GMRES 比基线多 4 次就整套重装配。"""
-    from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledBlockPreconditioner
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import CoupledBlockPreconditioner
 
     def cache(baseline, slack, stale=True):
         return SimpleNamespace(baseline_iters=baseline, refresh_slack=slack,

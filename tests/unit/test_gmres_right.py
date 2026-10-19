@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""后端无关的重启右预处理 GMRES（`core/time_integration/implicit/gmres.py`）。
+"""后端无关的重启右预处理 GMRES（`core/time_integration/implicit/krylov/gmres.py`）。
 
 判据：
 1. 非对称系统上解到指定容差，且容差是**真实**线性残差 `||b - A x||`；
@@ -14,7 +14,7 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.time_integration.implicit.gmres import (
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import (
     SINGLE_BASIS_MIN_RTOL, basis_itemsize, gmres_right, projected_remaining,
 )
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
@@ -130,7 +130,7 @@ def test_basis_precision_follows_the_tolerance_and_sets_the_restart_length():
 
     cube_demo SA P1 的尺寸（1109.8 万个未知量、灵活模式）：双精度被压在下限 30，单精度 60——同一个 CFL 1500
     的线性系统 GMRES(30) 198 次、GMRES(60) 46 次。"""
-    from autoflowcfd.core.time_integration.implicit.linear_solve import GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart
 
     assert basis_itemsize(0.1) == 4 and basis_itemsize(SINGLE_BASIS_MIN_RTOL) == 4
     assert basis_itemsize(0.5 * SINGLE_BASIS_MIN_RTOL) == 8 and basis_itemsize(0.0) == 8
@@ -260,7 +260,7 @@ class _HalfFlexible:
 def test_partial_flexible_matches_full_flexible(rtol, restart):
     """只为非线性分量存预处理向量（线性分量在更新解时现算）与整份存储是同一个 FGMRES：迭代数相同、解一致
     （双精度基到舍入、单精度基到真实残差满足容差），返回的残差是真实残差。"""
-    from autoflowcfd.core.time_integration.implicit.gmres import FlexibleSplit
+    from autoflowcfd.core.time_integration.implicit.krylov.gmres import FlexibleSplit
 
     A, b, _ = _system(80, 11, spread=3.0)
     full = gmres_right(lambda v: A @ v, b, _HalfFlexible(A, 50, 3), rtol=rtol, restart=restart, max_iter=2000,
@@ -276,7 +276,7 @@ def test_partial_flexible_matches_full_flexible(rtol, restart):
 
 def test_restart_length_follows_the_flexible_fraction():
     """重启长度按需要存预处理向量的分量占比分内存：不灵活 1 份、整体灵活 2 份、6 列里 1 列非线性 7/6 份。"""
-    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import krylov_basis_bytes, krylov_restart
 
     red = LocalReductions()
     n = 16_080_000                                    # cube_demo 粗网格 P2 SA 的真实分量数（6 列）

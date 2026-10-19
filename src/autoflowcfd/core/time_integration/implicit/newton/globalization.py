@@ -9,7 +9,7 @@ from typing import Callable, Tuple
 
 import numpy as np
 
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 #: 残差接受判据：允许一步之后 `||R||` 相对恶化的上限。
 #:

@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 多 GPU 分布式的隐式稳态（NK）湍流适配器与紧耦合 Newton 适配器。
 
-紧耦合 Newton 的算法只有一份（`time_integration/implicit/coupled_step.py`）；本文件只回答
+紧耦合 Newton 的算法只有一份（`time_integration/implicit/newton/coupled_step.py`）；本文件只回答
 "多 GPU 上用哪一套求值件"——`gpu_distributed_init/turb_source.py` 的
 prepare / evaluate / finalize / write-back 与平均流的 `_compute_total_residual_gpu`，归约用跨
 rank 的 `MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全局一致着色
@@ -129,7 +129,7 @@ class _MultiGpuTurbulenceCompactState:
 
 
 class MultiGpuCoupledBackend:
-    """`MultiGPUDistributedSolver` 的耦合 Newton 适配器（`time_integration/implicit/coupled_step.py`
+    """`MultiGPUDistributedSolver` 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py`
     模块文档"后端适配器"）。平均流残差与湍流视图都读 `U_gpu`（local、5 个变量），试探状态写进去；
     halo 交换是集体调用，各 rank 求值次数一致（全局归约决定）。`nu_av_compact`：本步冻结的人工
     扩散系数（compact 排列，未启用时 None）；`coarse_ctx`：两套块共用的全局粗校正通信上下文。"""

@@ -138,7 +138,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 版本同一处处理，理由同该文档。
     reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态随阶数失效（理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
     reset_newton_state(solver)
 

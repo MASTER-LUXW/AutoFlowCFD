@@ -75,8 +75,8 @@ from typing import Callable, Tuple
 
 import numpy as np
 
-from . import vector_ops
-from .reductions import LocalReductions
+from .. import vector_ops
+from ..reductions import LocalReductions
 
 
 #: Krylov 基按单精度存的线性容差下限（模块文档"基向量单精度存储"）：float32 的舍入约 6e-8，容差比它高

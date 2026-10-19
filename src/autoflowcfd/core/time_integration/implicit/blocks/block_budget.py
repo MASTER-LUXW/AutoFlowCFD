@@ -154,9 +154,9 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
     """
     from autoflowcfd.core.utils.system_memory import available_bytes
 
-    from .forcing import _ETA_MIN
-    from .gmres import basis_itemsize
-    from .linear_solve import krylov_basis_bytes, krylov_restart
+    from ..newton.forcing import _ETA_MIN
+    from ..krylov.gmres import basis_itemsize
+    from ..krylov.linear_solve import krylov_basis_bytes, krylov_restart
 
     cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
     n_prism = int(cell_is_prism.sum())

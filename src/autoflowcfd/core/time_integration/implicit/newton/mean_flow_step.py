@@ -24,11 +24,11 @@ from typing import Callable, Optional
 import numpy as np
 from loguru import logger
 
-from .block_budget import plan_block_memory
-from .block_jacobi import BlockJacobiCache
+from ..blocks.block_budget import plan_block_memory
+from ..blocks.block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .jfnk import step_newton_krylov
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 # 平均流守恒变量个数（唯一来源在状态容器；coupled_step 从这里取）
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS  # noqa: E402,F401

@@ -11,7 +11,7 @@
 
 from typing import Optional
 
-from ..block_ilu import BlockILUPreconditioner, flatten_cell_blocks
+from ..blocks.block_ilu import BlockILUPreconditioner, flatten_cell_blocks
 from .global_coarse import CoarseCommContext, CrossRankCoupling, GlobalCoarseCorrection, GlobalCoarseSpace
 from .multilevel import MultilevelPreconditioner, preconditioner_hierarchy
 

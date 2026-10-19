@@ -53,14 +53,14 @@ import numpy as np
 
 from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
 from .forcing import EisenstatWalkerForcing
-from .jacobian_vector import MatrixFreeJacobian
-from .block_jacobi import BlockJacobiCache
-from .gmres import basis_itemsize
-from .linear_solve import GMRES_MAX_ITER, _RealRows, _solve_direction, krylov_restart
+from ..krylov.jacobian_vector import MatrixFreeJacobian
+from ..blocks.block_jacobi import BlockJacobiCache
+from ..krylov.gmres import basis_itemsize
+from ..krylov.linear_solve import GMRES_MAX_ITER, _RealRows, _solve_direction, krylov_restart
 from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
-from .preconditioner import PseudoTransientDiagonal
+from ..blocks.preconditioner import PseudoTransientDiagonal
 from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm, accept_step
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 #: 单次 `step_newton_krylov` 调用里允许缩小 `dtau` 重试的档数
 #: （每档 `dtau_control.FAIL_SHRINK`，即 4 倍）。

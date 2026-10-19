@@ -46,7 +46,7 @@ DUAL_TIME_PSEUDO_CFL_START = 1.0e4
 
 def controller_class_for(time_scheme):
     """该时间格式用哪一类 CFL 律：Newton-Krylov 稳态与双时间步（内迭代是同一个 Newton-Krylov 步，
-    `implicit/physical_time.py`）用 SER（`ser.py` 模块文档写了为什么显式那套控制器在隐式上是错的），
+    `implicit/newton/physical_time.py`）用 SER（`ser.py` 模块文档写了为什么显式那套控制器在隐式上是错的），
     其余用显式控制器。"""
     if scheme_from_name(time_scheme) in IMPLICIT_SCHEMES:
         return SERCFLController

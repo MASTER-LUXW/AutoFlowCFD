@@ -47,7 +47,7 @@ class TimeIntegrationScheme(Enum):
     SSP_RK3 = "ssp_rk3"
     DUAL_TIME = "dual_time"    # 双时间步长
     #: 矩阵自由 Newton-Krylov + 伪瞬态延拓（**唯一的真隐式格式**，
-    #: 2026-09-19 新增，见 `time_integration/implicit/jfnk.py`）。
+    #: 2026-09-19 新增，见 `time_integration/implicit/newton/jfnk.py`）。
     #: 只用于**稳态**求解：它把"收敛步数由 h_min 决定"这条显式格式的
     #: 固有约束换成"由非线性程度决定"。
     NEWTON_KRYLOV = "newton_krylov"
@@ -68,12 +68,12 @@ class TimeIntegrationScheme(Enum):
     # **2026-09-19 更新**：真正的隐式稳态求解器已实现，见
     # `NEWTON_KRYLOV` 与 `time_integration/implicit/`（矩阵自由
     # Newton-Krylov + 伪瞬态延拓 + inexact-Newton forcing term）。
-    # 预处理是单元块 Jacobi（`implicit/block_jacobi.py`，着色有限差分
+    # 预处理是单元块 Jacobi（`implicit/blocks/block_jacobi.py`，着色有限差分
     # 装配、跨 Newton 步复用；2026-09-25 替代了此前的逐 SP 对角形式——
     # 旧注释"每单元 n_sps*n_var 次残差求值、成本不可接受"漏掉了着色，
     # 真实次数与单元数无关）。CFL 律是 SER（`adaptive_cfl/ser.py`）。
     #
-    # DUAL_TIME 的内迭代同样是隐式 Newton-Krylov（`implicit/physical_time.py`）。
+    # DUAL_TIME 的内迭代同样是隐式 Newton-Krylov（`implicit/newton/physical_time.py`）。
     #
     # **2026-10-17 删除 IMEX_EULER**：它的"隐式"子步是以 U_new 为基点的阻尼 Picard 迭代——每次子迭代
     # 再走一步显式步，收敛到的是稳态而不是隐式 Euler 解，收敛时还返回了未经最后一次更新的值。时间
@@ -202,19 +202,19 @@ _SCHEME_TABLE = {
 
 
 #: 每一步解 Newton-Krylov 线性系统的格式：隐式稳态，以及双时间步（内迭代是带 BDF 物理时间项的同一个
-#: Newton 步，`implicit/physical_time.py`）。CFL 律、全局一致的块着色等按它判断
+#: Newton 步，`implicit/newton/physical_time.py`）。CFL 律、全局一致的块着色等按它判断
 IMPLICIT_SCHEMES = (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
 
 #: 稳态伪时间推进可选的格式：`solve steady --time-scheme`、`SteadyConfig.time_scheme`、`solve resume --time-scheme`
 #: 共用这一份
 STEADY_SCHEMES = (TimeIntegrationScheme.SSP_RK3, TimeIntegrationScheme.NEWTON_KRYLOV)
 
-#: 双时间步每个物理步的内迭代（带 BDF 物理时间项的 Newton 步，`implicit/physical_time.py`）次数上限的
+#: 双时间步每个物理步的内迭代（带 BDF 物理时间项的 Newton 步，`implicit/newton/physical_time.py`）次数上限的
 #: 默认值，全部后端与 CLI 的唯一来源。内迭代按收敛判据提前结束（下一个常量），通常 2~7 次
 DEFAULT_DUAL_TIME_STEPS = 20
 
 #: 双时间步每个物理步内迭代的收敛判据：BDF 方程的残差 `||G||` 相对该物理步第一次内迭代之前下降到这个
-#: 比例即停（`implicit/physical_time.py`）
+#: 比例即停（`implicit/newton/physical_time.py`）
 DEFAULT_DUAL_TIME_TOLERANCE = 1.0e-3
 
 #: 双时间步内迭代的另一个收敛判据：一个被完整接受的 Newton 步的更新量（按参考量归一的均方根，与残差
@@ -299,9 +299,9 @@ class TimeIntegrator:
         """
         if self.scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME 每个物理步是若干个带 BDF 物理时间项的 Newton 步，由各后端的 step() 经
-            # `implicit/physical_time.py::advance_physical_step` 推进，不经过这个显式积分器入口。
+            # `implicit/newton/physical_time.py::advance_physical_step` 推进，不经过这个显式积分器入口。
             raise ValueError(
-                "DUAL_TIME scheme 由隐式内迭代推进（implicit/physical_time.py），不经过通用的 step(...) 入口"
+                "DUAL_TIME scheme 由隐式内迭代推进（implicit/newton/physical_time.py），不经过通用的 step(...) 入口"
             )
 
         elif self.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
@@ -312,7 +312,7 @@ class TimeIntegrator:
             # `time_integration.implicit.step_newton_krylov(...)`。
             raise ValueError(
                 "NEWTON_KRYLOV scheme 需要守恒变量参考量级（Fréchet 差分的"
-                "无量纲化，见 implicit/jacobian_vector.py），这个通用 "
+                "无量纲化，见 implicit/krylov/jacobian_vector.py），这个通用 "
                 "step(...) 入口里没有；请直接调用 "
                 "time_integration.implicit.step_newton_krylov(...)"
             )

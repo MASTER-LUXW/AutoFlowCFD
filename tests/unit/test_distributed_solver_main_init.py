@@ -235,7 +235,7 @@ class TestDistributedStepMatchesSingleMachine:
 
 class TestDistributedDualTimeStepping:
     """DUAL_TIME 的分布式接线：每个物理步是带 BDF 物理时间项的 Newton 步（与单机同一个实现，
-    `time_integration/implicit/physical_time.py`），上一时间层跨步保存。带湍流模型的对照见
+    `time_integration/implicit/newton/physical_time.py`），上一时间层跨步保存。带湍流模型的对照见
     `test_dual_time_newton.py`。"""
 
     _KW = dict(mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0)

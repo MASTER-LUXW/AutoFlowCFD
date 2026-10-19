@@ -14,10 +14,10 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend, single_machine_cell_colors
-from autoflowcfd.core.time_integration.implicit.coupled_step import (
+from autoflowcfd.core.time_integration.implicit.newton.coupled_step import (
     TURB_COLUMNS, CoupledResidual, SubsystemResidual,
 )
-from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 from tests.validation._channel_mesh import (

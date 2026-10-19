@@ -30,7 +30,7 @@
 
 import numpy as np
 
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 

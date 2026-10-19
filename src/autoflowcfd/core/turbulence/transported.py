@@ -2,7 +2,7 @@
 
 ## 为什么要有它（2026-10-04）
 
-紧耦合 Newton（`time_integration/implicit/coupled_step.py`）、四个后端的耦合适配器、湍流解析
+紧耦合 Newton（`time_integration/implicit/newton/coupled_step.py`）、四个后端的耦合适配器、湍流解析
 块 Jacobian、分布式视图此前都把"湍流未知量 = (k, ln omega)"写死：每个后端各自把
 `k_field`、`log_omega(omega_field)` 拼成第 6、7 列，各自按 `omega_from_log(.., omega_max)` 写回，
 各自列一遍要在试探求值后恢复的模型缓存。引入第二个输运模型（SA-neg，一个未知量）时这些都要
@@ -12,7 +12,7 @@
 
     TRANSPORTED_FIELDS   被输运场的属性名（物理量形式，例如 ("k_field", "omega_field")）
     NEWTON_LOG_COLUMNS   Newton 未知量里取对数的列（物理性限幅按对数量处理，见
-                         `time_integration/implicit/physicality.py::ScaledFieldRowLimits`）
+                         `time_integration/implicit/newton/physicality.py::ScaledFieldRowLimits`）
     NEWTON_UNLIMITED_COLUMNS  Newton 更新不做相对变化限幅的列：模型对该未知量的任意实数值都良态时列出
                          （SA-neg 的 nu_tilde），默认空（全部限幅）
     CACHED_ATTRS         源项求值刷新的模型缓存（涡粘等）：试探求值之后必须恢复，否则

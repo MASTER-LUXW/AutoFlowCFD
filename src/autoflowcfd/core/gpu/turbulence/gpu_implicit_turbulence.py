@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 单机 GPU 的隐式稳态（NK）湍流适配器与紧耦合 Newton 适配器。
 
-紧耦合 Newton 的算法只有一份：`core/time_integration/implicit/coupled_step.py`。本文件
+紧耦合 Newton 的算法只有一份：`core/time_integration/implicit/newton/coupled_step.py`。本文件
 只回答"GPU 上用哪一套求值件"——`GPUFRSolver` 上与 CPU `source.py` 两个求值件一一对应的
 `_prepare_turbulence_inputs_gpu` / `_evaluate_turbulence_rates_gpu`，以及平均流的 GPU 残差。湍流适配器接口见
 `core/fr_solver/turbulence/implicit.py` 模块文档"后端"一节。
@@ -73,7 +73,7 @@ class GpuTurbulenceBackend:
 
 
 class GpuCoupledBackend:
-    """单机 GPU 的耦合 Newton 适配器（`time_integration/implicit/coupled_step.py` 模块文档
+    """单机 GPU 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py` 模块文档
     "后端适配器"）。平均流残差以试探状态为参数；湍流求值读 `Q_gpu`，所以试探状态同样写进
     `U_gpu` 并更新原始变量。`nu_av`：本步冻结的人工扩散系数（未启用时 None）。"""
 
@@ -204,7 +204,7 @@ def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu, des=None):
 
 def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):
     """单机 GPU 的 P0 差分耦合图：设备端面相邻关系拷回主机（一次性）。"""
-    from autoflowcfd.core.time_integration.implicit.coloring import coupling_graph_from_faces
+    from autoflowcfd.core.time_integration.implicit.blocks.coloring import coupling_graph_from_faces
 
     return coupling_graph_from_faces(np.asarray(cp.asnumpy(flat_face_gpu.owner_cell)),
                                      np.asarray(cp.asnumpy(flat_face_gpu.neighbor_cell)), int(n_cells))
@@ -212,7 +212,7 @@ def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):
 
 def gpu_cell_colors(cp, flat_face_gpu, n_cells: int) -> np.ndarray:
     """单机 GPU 的块 Jacobi 着色：设备端面相邻关系拷回主机做贪心着色（一次性）。"""
-    from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
+    from autoflowcfd.core.time_integration.implicit.blocks.coloring import greedy_cell_coloring
 
     return greedy_cell_coloring(np.asarray(cp.asnumpy(flat_face_gpu.owner_cell)),
                                 np.asarray(cp.asnumpy(flat_face_gpu.neighbor_cell)), int(n_cells))

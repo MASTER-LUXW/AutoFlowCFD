@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """单机 GPU 的 NEWTON_KRYLOV 分支接线（`gpu/solver/gpu_solver/step.py`）。
 
-隐式步本身（`implicit/mean_flow_step.py`）CPU 与 GPU 共用；本文件验的是
+隐式步本身（`implicit/newton/mean_flow_step.py`）CPU 与 GPU 共用；本文件验的是
 GPU 这一侧的接线：残差拼装（含 GPU 版低马赫预处理从试探态自己推原始
 变量）、只解 5 个平均流变量、块 Jacobi 的面相邻关系来源、跨步状态、SER
 用 Newton 信息更新。

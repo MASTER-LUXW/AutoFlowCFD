@@ -192,8 +192,8 @@ class _SolverSetupMixin:
         reset_dual_time_history(self)
 
         # NEWTON_KRYLOV（隐式稳态）跨步状态：含义与换阶失效的理由见
-        # `time_integration/implicit/mean_flow_step.py`（模块文档与 reset_newton_state）
-        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+        # `time_integration/implicit/newton/mean_flow_step.py`（模块文档与 reset_newton_state）
+        from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
         reset_newton_state(self)
         

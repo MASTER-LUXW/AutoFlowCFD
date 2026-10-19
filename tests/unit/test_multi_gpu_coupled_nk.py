@@ -3,7 +3,7 @@
 MultiGpuCoupledBackend` 与 `MultiGpuTurbulenceBackend`）；SST（棱柱槽道）与 SA-neg（四面体槽道，含壁面
 解点）各验一遍。
 
-紧耦合步本身（`time_integration/implicit/coupled_step.py`）各后端共用；这里验多 GPU 这一侧：试探
+紧耦合步本身（`time_integration/implicit/newton/coupled_step.py`）各后端共用；这里验多 GPU 这一侧：试探
 状态写进 `U_gpu`、湍流求值走真实的 compact 视图件（`gpu_distributed_init/turb_source.py` 的
 `_prepare_turbulence_view_distributed` / `_sync_turbulence_view` / `_evaluate_turbulence_rates_distributed`
 / `_write_back_turbulence_distributed`）、湍流解析块在
@@ -53,7 +53,7 @@ def _multi_gpu_standin(single, dist):
     from autoflowcfd.core.gpu.distributed.gpu_distributed.residual import _MultiGPUResidualMixin
     from autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source import _GPUDistributedTurbSourceMixin
     from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
     from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
     n, n_sps = single.turb_model.transported_fields()[0].shape
@@ -117,7 +117,7 @@ def pair(request):
     single.step(1e-6)                       # 一个耦合步，让平均流也非均匀
     # 两侧从同样干净的跨步状态出发（块缓存、forcing 历史、dtau 缩放）：预热步留下的状态会让
     # 单机复用过时的块，两侧的 Newton 步因此不可比
-    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
     reset_newton_state(single)
     g = _multi_gpu_standin(single, dist)
@@ -132,7 +132,7 @@ def _cell_is_prism(single):
 
 def test_coupled_residual_matches_single_machine(pair):
     from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
-    from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledResidual
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import CoupledResidual
     from autoflowcfd.fr.native_padding import real_row_mask
 
     single, g = pair
@@ -163,7 +163,7 @@ def test_multi_gpu_coupled_steps_match_single_machine(pair):
     直接继承右端项的差，是有界的浮点传播而不是累积的不一致。容差平均流 1e-7、湍流 2e-6；接线
     错误给出的是 O(1) 的差。"""
     from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
-    from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
 
     single, g = pair
     dtau = np.asarray(single._compute_local_time_step()).reshape(-1)

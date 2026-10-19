@@ -228,7 +228,7 @@ class _MultiGPUSetupMixin:
         # 物理步，退化为 BDF1，与单机 GPU `gpu_solver.py` 同一个约定。
         reset_dual_time_history(self)
         # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
-        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+        from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
         reset_newton_state(self)
 

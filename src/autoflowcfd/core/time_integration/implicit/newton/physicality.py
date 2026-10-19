@@ -8,7 +8,7 @@
 
 import numpy as np
 
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 
 #: 物理性限幅允许的单步最大相对**下降**（对 `rho` 与 `p`，湍流的 `k`/`omega`）；
 #: 增长按对数对称给出：单步 `u_new/u in [1-c, 1/(1-c)]`，c=0.5 即"最多减半、

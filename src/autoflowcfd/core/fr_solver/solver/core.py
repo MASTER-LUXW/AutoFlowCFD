@@ -104,7 +104,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 （WALL/SLIP_WALL->WALL, VELOCITY_INLET->INLET, PRESSURE_OUTLET->OUTLET,
                 SYMMETRY->SYMMETRY, FARFIELD->FARFIELD；缺类型、类型不认识、或边界面不属于任何组都直接报错）
             dual_time_inner_iter: DUAL_TIME 方案每个物理步的内迭代（带 BDF 物理时间项的 Newton 步）
-                次数上限，按收敛判据提前结束（`time_integration/implicit/physical_time.py`）。
+                次数上限，按收敛判据提前结束（`time_integration/implicit/newton/physical_time.py`）。
             n_threads: numba 并行 kernel（无粘/粘性残差界面项，见
                 core/fr_residual_inviscid_kernel.py、
                 core/fr_viscous_flux_kernel.py 模块文档"多核并行"一节）

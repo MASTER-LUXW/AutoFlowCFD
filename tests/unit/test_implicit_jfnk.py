@@ -16,7 +16,7 @@ from autoflowcfd.core.time_integration.implicit import (
     EisenstatWalkerForcing,
     step_newton_krylov,
 )
-from autoflowcfd.core.time_integration.implicit import jacobian_vector as JV
+from autoflowcfd.core.time_integration.implicit.krylov import jacobian_vector as JV
 
 from tests.unit._implicit_jfnk_common import _DTAU_PURE_NEWTON, _N, _NV, _SCALES, _linear_system, _rms
 
@@ -254,7 +254,7 @@ class TestFrechetEpsScaling:
 
         # 两者都必须远低于 inexact-Newton 的容差下限（否则差分误差就会
         # 成为收敛的限制因素）
-        from autoflowcfd.core.time_integration.implicit.forcing import (
+        from autoflowcfd.core.time_integration.implicit.newton.forcing import (
             _ETA_MIN,
         )
         v = _SCALES[None, :] * np.random.default_rng(3).normal(

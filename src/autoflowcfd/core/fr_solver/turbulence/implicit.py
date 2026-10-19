@@ -17,7 +17,7 @@
 ## 做法：与平均流紧耦合的 PTC-Newton
 
 `(k, w)`（`w = ln omega`，见 `core/turbulence/sst/log_omega.py`）与平均流 5 个守恒变量
-进同一个 Newton 系统（`time_integration/implicit/coupled_step.py` 模块文档：为什么分离式
+进同一个 Newton 系统（`time_integration/implicit/newton/coupled_step.py` 模块文档：为什么分离式
 不行、残差与预处理如何组合）。湍流这一半：
 
 * `R_t = -(dk/dt, dw/dt)` 与显式路径**同一套**源项与输运求值（`source.py::
@@ -80,7 +80,7 @@ def _current_order(solver) -> int:
 def single_machine_cell_colors(solver) -> np.ndarray:
     """单机块 Jacobi 着色：残差本身用的同一份展平面几何上的贪心距离 1 着色。"""
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
+    from autoflowcfd.core.time_integration.implicit.blocks.coloring import greedy_cell_coloring
 
     ffg = get_flat_face_geometry(solver.mesh, solver.ops)
     return greedy_cell_coloring(ffg.owner_cell, ffg.neighbor_cell, int(solver.mesh.n_cells))
@@ -89,7 +89,7 @@ def single_machine_cell_colors(solver) -> np.ndarray:
 def single_machine_coupling_graph(solver):
     """单机 P0 差分耦合图（距离 2 着色 + 模板单元对），同一份展平面几何。"""
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    from autoflowcfd.core.time_integration.implicit.coloring import coupling_graph_from_faces
+    from autoflowcfd.core.time_integration.implicit.blocks.coloring import coupling_graph_from_faces
 
     ffg = get_flat_face_geometry(solver.mesh, solver.ops)
     return coupling_graph_from_faces(ffg.owner_cell, ffg.neighbor_cell, int(solver.mesh.n_cells))
@@ -145,7 +145,7 @@ class CpuTurbulenceBackend:
 
 
 class CpuCoupledBackend:
-    """单机 CPU 的耦合 Newton 适配器（`time_integration/implicit/coupled_step.py` 模块文档
+    """单机 CPU 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py` 模块文档
     "后端适配器"）。`nu_av`：本步冻结的人工扩散系数（未启用时 None）。"""
 
     __slots__ = ("solver", "turb", "red", "cell_is_prism", "order", "n_sps", "scales_mean", "positivity",

@@ -1,4 +1,4 @@
-"""双时间步的隐式内迭代（2026-10-10，`time_integration/implicit/physical_time.py`）。
+"""双时间步的隐式内迭代（2026-10-10，`time_integration/implicit/newton/physical_time.py`）。
 
 每个物理步解 BDF 方程 `G(U) = R(U) + (a0 U - b)/dt = 0`：平均流与带输运方程的湍流模型紧耦合，内迭代是
 带物理时间项的 Newton-Krylov 步。此前内迭代是显式伪时间推进（平均流 `dual.py`、湍流
@@ -22,7 +22,7 @@ import pytest
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.base import DUAL_TIME_UPDATE_FLOOR
 from autoflowcfd.core.time_integration.implicit import step_newton_krylov
-from autoflowcfd.core.time_integration.implicit.physical_time import (
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
     BdfTerm, advance_physical_step, inner_iteration_suffix, previous_newton_state, store_newton_state,
 )
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
@@ -418,7 +418,7 @@ def test_inner_iterations_stop_with_an_error_when_the_linear_solves_keep_failing
     """`a0/dt + J` 不定（dt 大于不稳定模态的时间尺度）时线性求解解不动：连续失败 3 次就报错并指向 dt，
     不把内迭代次数烧完、也不带着没解出来的状态进下一个物理步。cube_demo SA P1 dt=1e-3 的实测是每次内迭代
     GMRES 200 次、线性残差 1.0、1220 s。"""
-    from autoflowcfd.core.time_integration.implicit.physical_time import MAX_CONSECUTIVE_LINEAR_FAILURES
+    from autoflowcfd.core.time_integration.implicit.newton.physical_time import MAX_CONSECUTIVE_LINEAR_FAILURES
 
     calls = []
 

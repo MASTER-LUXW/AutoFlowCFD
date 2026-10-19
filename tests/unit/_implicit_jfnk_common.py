@@ -40,7 +40,7 @@ def _step_limited_system(delta, seed=7):
     """`R` 在"离基态超过 `delta`（无量纲 RMS 位移）"之外整体放大 1e6 倍。
 
     用途：造出一个**方向不可信、但缩小 `dtau` 就可信**的情形，这正是
-    PTC 缩 `dtau` 存在的理由（`implicit/dtau_control.py`）。
+    PTC 缩 `dtau` 存在的理由（`implicit/newton/dtau_control.py`）。
 
     为什么用一个不连续的"远支"而不是某个光滑强非线性：要钉住的是
     "一步被残差判据拒绝之后会不会缩 `dtau` 重试"这条**控制逻辑**，

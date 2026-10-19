@@ -21,8 +21,8 @@ from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.utils.order_continuation.policy import (
     PhaseGate, update_phase_baseline, uses_order_continuation,
 )
-from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
-from autoflowcfd.core.time_integration.implicit.physical_time import inner_iteration_suffix
+from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_monitor_suffix
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import inner_iteration_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.core.utils import order_continuation
@@ -344,7 +344,7 @@ class _SolverSolveMixin(SolveLoopMixin):
 
         if new_order == 0:
             order_continuation._reset_state_to_p0(self, 1)
-            from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
             reset_dual_time_history(self)
             reset_newton_state(self)

@@ -14,8 +14,8 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.time_integration.implicit.globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm
-from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+from autoflowcfd.core.time_integration.implicit.newton.globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm
+from autoflowcfd.core.time_integration.implicit.newton.jfnk import step_newton_krylov
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.time_integration.positivity.limiter import PositivityLimiter
 from autoflowcfd.fr.native_padding import real_sps_per_cell
@@ -75,7 +75,7 @@ def test_direction_from_a_failed_linear_solve_is_not_taken():
 
 def test_turbulence_residual_scale_is_the_field_magnitude():
     """湍流列的残差参考量级 = 场的体积加权 RMS（下限为模型尺度）；平均流列与对数列原样；零权重行不计。"""
-    from autoflowcfd.core.time_integration.implicit.coupled_step import residual_reference_scales
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import residual_reference_scales
 
     n = 8
     x0 = np.zeros((n, 7))

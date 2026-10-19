@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - TimeIntegrator 的格式分派。
 
-DUAL_TIME 的每个物理步由带 BDF 物理时间项的 Newton 步求解（`time_integration/implicit/physical_time.py`，
+DUAL_TIME 的每个物理步由带 BDF 物理时间项的 Newton 步求解（`time_integration/implicit/newton/physical_time.py`，
 BDF1/BDF2 方程的正确性见 `test_dual_time_newton.py`），不经过显式积分器。
 """
 

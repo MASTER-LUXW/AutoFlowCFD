@@ -222,6 +222,6 @@ class _MultiGPUTimeStepMixin:
         if newton_info is None:
             c.update(residual_norm)
         else:
-            from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_step_ok
+            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_step_ok
 
             c.update(newton_info["res_norm"], step_ok=newton_step_ok(newton_info))

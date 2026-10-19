@@ -13,11 +13,11 @@
 import numpy as np
 
 from autoflowcfd.core.fr_residual.jacobian.backend import select_rows
-from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure
-from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import BlockCouplingStructure
+from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
 from autoflowcfd.core.time_integration.implicit.coarse import CoarseCommContext, CoarsePreconditionerFactory
 from autoflowcfd.core.time_integration.implicit.coarse.galerkin import galerkin_coarse_matrix
-from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from tests.unit._thread_comm import ThreadComm
 from tests.unit.test_block_ilu_precond import _setup

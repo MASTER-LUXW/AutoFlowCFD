@@ -35,8 +35,8 @@ from typing import Callable
 import numpy as np
 from numba import njit, prange
 
-from ..block_ilu import coupling_csr
-from ..preconditioner import PseudoTransientDiagonal
+from ..blocks.block_ilu import coupling_csr
+from ..blocks.preconditioner import PseudoTransientDiagonal
 from .galerkin import coupling_triplets, coarse_triplets, prolong, restrict
 from .multilevel import COARSEST_DOF, _Level, preconditioner_hierarchy
 

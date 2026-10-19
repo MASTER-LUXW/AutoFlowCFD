@@ -82,7 +82,7 @@ from .cell_block_inverse import CellBlockJacobiPreconditioner, invert_blocks_in_
 from .cell_blocks import CellBlockJacobian
 from .precond_shift import block_diagonal_scale, shifted_dtau
 from .preconditioner import PseudoTransientDiagonal
-from .reductions import LocalReductions
+from ..reductions import LocalReductions
 from .refresh_cost import assembly_cost_iters, block_kind
 
 
@@ -172,7 +172,7 @@ class BlockJacobiCache:
         self.use_ilu = mode == "ilu"
         self.single_copy = mode == "single"
         self.disabled_reason = None
-        from .coarse import CoarsePreconditionerFactory
+        from ..coarse import CoarsePreconditionerFactory
         self._coarse = CoarsePreconditionerFactory(max(n_real_prism, n_real_tet) > 1, global_coarse)
         self.colors = np.asarray(colors, dtype=np.int64)
         if mode is None:

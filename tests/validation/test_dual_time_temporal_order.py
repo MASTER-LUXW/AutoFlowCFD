@@ -2,7 +2,7 @@
 
 等熵涡的特征时间（涡核切向速度 / 涡核尺度）约 2.5e-5 s。取三个物理时间步长推进到同一时刻，以最小步长的
 解为参考（空间离散相同，差值只含时间离散误差）。BDF2 是二阶：步长减半误差降到 1/4。每个物理步的 BDF 方程由
-带物理时间项的 Newton-Krylov 步求解（`time_integration/implicit/physical_time.py`），内迭代解到 1e-7。
+带物理时间项的 Newton-Krylov 步求解（`time_integration/implicit/newton/physical_time.py`），内迭代解到 1e-7。
 
 实测（2026-10-10，P2，20x20x1）：dt = 2e-5 / 1e-5 / 5e-6 对 1.25e-6 的参考解，x 速度平均误差
 1.56e-3 / 3.75e-4 / 8.75e-5，阶数 2.05 / 2.10；每个物理步 2~3 次内迭代。此前的显式内迭代在这个算例上

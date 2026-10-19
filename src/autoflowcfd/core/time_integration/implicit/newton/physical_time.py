@@ -127,7 +127,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
     Returns:
         `{"iterations", "initial", "final", "converged"}`（也记在 `solver._dual_time_inner`）。
     """
-    from ..base import DUAL_TIME_UPDATE_FLOOR
+    from ...base import DUAL_TIME_UPDATE_FLOOR
     from .mean_flow_step import LINEAR_SOLVE_MAX_REL_RESIDUAL, newton_step_ok
 
     max_inner = int(solver.time_integrator.dual_time_steps)

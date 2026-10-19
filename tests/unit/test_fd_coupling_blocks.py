@@ -1,4 +1,4 @@
-"""P0 差分装配同时截取面邻居耦合块（`implicit/cell_blocks.py` 的 `coupling_graph`）。
+"""P0 差分装配同时截取面邻居耦合块（`implicit/blocks/cell_blocks.py` 的 `coupling_graph`）。
 
 判据：
 1. 距离 2 着色的定义（同色单元既不相邻、也不共享面邻居）；
@@ -10,17 +10,17 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.time_integration.implicit.block_ilu import BlockILUPreconditioner
-from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
-from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
-from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
-from autoflowcfd.core.time_integration.implicit.coloring import (
+from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import BlockILUPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
+from autoflowcfd.core.time_integration.implicit.blocks.cell_block_inverse import CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.blocks.coloring import (
     coupling_graph_from_faces, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
 )
-from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
-from autoflowcfd.core.time_integration.implicit.jacobian_vector import MatrixFreeJacobian
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
+from autoflowcfd.core.time_integration.implicit.krylov.jacobian_vector import MatrixFreeJacobian
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit.test_mean_flow_analytic_jacobian import SCALES, _channel, _Residual, _state
 
@@ -131,7 +131,7 @@ def test_p0_cache_switches_to_block_ilu_and_beats_block_jacobi():
 def test_halo_pairs_capture_same_blocks_as_local_pairs():
     """跨 rank 单元对（分布式）的截取与 rank 内单元对同一机制：单机上把一半单元对改列为
     "halo"（列号就是单元号、颜色照抄全局着色），截到的块与按 rank 内单元对截到的逐位相同。"""
-    from autoflowcfd.core.time_integration.implicit.coloring import CouplingGraph
+    from autoflowcfd.core.time_integration.implicit.blocks.coloring import CouplingGraph
 
     mesh, res, u0, r0, fl = _p0_problem("prism")
     n = mesh.n_cells

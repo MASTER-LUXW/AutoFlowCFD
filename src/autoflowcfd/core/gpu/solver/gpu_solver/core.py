@@ -325,8 +325,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要）
         reset_dual_time_history(self)
 
-        # NEWTON_KRYLOV 跨步状态（含义见 time_integration/implicit/mean_flow_step.py）
-        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+        # NEWTON_KRYLOV 跨步状态（含义见 time_integration/implicit/newton/mean_flow_step.py）
+        from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
         reset_newton_state(self)
 

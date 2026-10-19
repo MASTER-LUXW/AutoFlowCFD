@@ -9,7 +9,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 
-from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
+from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
 from autoflowcfd.core.time_integration.implicit.coarse import (
     MultilevelPreconditioner, build_hierarchy, preconditioner_hierarchy,
 )
@@ -17,7 +17,7 @@ from autoflowcfd.core.time_integration.implicit.coarse.galerkin import (
     assembled_matvec, galerkin_coarse_matrix, prolong, restrict,
 )
 from autoflowcfd.core.time_integration.implicit.coarse.multilevel import _level_from_scipy
-from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
+from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
 from tests.unit.test_block_ilu_precond import _setup
 
 NV = 5

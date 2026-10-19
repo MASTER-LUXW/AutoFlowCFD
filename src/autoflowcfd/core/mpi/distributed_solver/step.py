@@ -178,7 +178,7 @@ class _DistributedStepMixin:
         # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式紧耦合
         # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 coupled_step.py 模块文档）。
         dual_time = self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
-        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/physical_time.py）
+        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/newton/physical_time.py）
         is_newton = dual_time or self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         dist_fc = self.dist_flat_face
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
@@ -216,7 +216,7 @@ class _DistributedStepMixin:
                       and has_transport_equations(self.turb_model_name))
         if coupled_nk:
             # 隐式步 + 带输运方程的湍流模型：湍流与平均流在下面紧耦合求解（单机同一个算法，
-            # time_integration/implicit/coupled_step.py；适配器见 distributed_implicit.py）。
+            # time_integration/implicit/newton/coupled_step.py；适配器见 distributed_implicit.py）。
             # 这里只取当前状态的涡粘供残差监控
             from autoflowcfd.core.mpi.distributed_implicit import DistributedTurbulenceBackend
 
@@ -311,16 +311,16 @@ class _DistributedStepMixin:
             residual0 = residual0_raw.reshape(n_local * n_sps, n_vars)
 
         if is_newton:
-            # 隐式步：与单机 CPU/GPU 同一个实现（带输运方程的湍流模型时紧耦合 implicit/coupled_step.py，
-            # 否则 implicit/mean_flow_step.py），归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局
+            # 隐式步：与单机 CPU/GPU 同一个实现（带输运方程的湍流模型时紧耦合 implicit/newton/coupled_step.py，
+            # 否则 implicit/newton/mean_flow_step.py），归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局
             # 一致着色里本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）。稳态一步一个
-            # Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步（implicit/physical_time.py）
+            # Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步（implicit/newton/physical_time.py）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
-            from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
                 step_mean_flow_newton,
             )
 
@@ -329,7 +329,7 @@ class _DistributedStepMixin:
             coupled = None
             if coupled_nk:
                 from autoflowcfd.core.mpi.distributed_implicit import DistributedCoupledBackend
-                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+                from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
 
                 coupled = DistributedCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
 
@@ -355,7 +355,7 @@ class _DistributedStepMixin:
                 return info
 
             if dual_time:
-                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
                     advance_physical_step, previous_newton_state, store_newton_state,
                 )
 
@@ -401,12 +401,12 @@ class _DistributedStepMixin:
         self.residual_history.append(residual_norm)   # 收敛历史在单步里记录（与其余后端一致）
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
-        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/physical_time.py）
+        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/newton/physical_time.py）
         if self._cfl_controller is not None and not dual_time:
             if is_newton:
                 # SER 看 Newton 实际在解的系统的全局残差 ||Gamma R||，并区分
                 # "残差上升但步被完整接受"与"步没被完整接受"（adaptive_cfl/ser.py）
-                from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_step_ok
+                from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_step_ok
 
                 self._cfl_controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info))
             else:
