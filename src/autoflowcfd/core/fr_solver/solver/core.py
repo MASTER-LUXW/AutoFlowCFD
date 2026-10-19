@@ -18,6 +18,7 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Any, Dict, Optional
 
 from autoflowcfd.core.fr_solver.state import FRState
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
@@ -47,13 +48,13 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  turb_model_name: str = "SST",
                  time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
                  initial_state: Optional[FRState] = None,
-                 rho_inf: float = 1.225, vel_inf: float = 33.33, p_inf: float = 101325.0,
+                 rho_inf: float = RHO_INF, vel_inf: float = VEL_INF, p_inf: float = P_INF,
                  # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向
                  # 硬编码成 +x 的行为**逐位相同**，默认路径数值不变。
                  # 约定与风轴系公式见 core/utils/flow_direction.py。
                  aoa_deg: float = 0.0, aos_deg: float = 0.0,
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
-                 mu_molecular: float = 1.8e-5,
+                 mu_molecular: float = MU_MOLECULAR,
                  dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,

@@ -6,6 +6,7 @@
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 from loguru import logger
 from autoflowcfd.core.turbulence.wall_model.treatment import (
     DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
@@ -163,14 +164,18 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 对新构造的 state 赋初值，conserved state 恒为全零。
         # 初场速度方向必须与边界 Q_free 用同一个来流方向（2026-09-17）
         from autoflowcfd.core.utils.flow_direction import freestream_velocity
+        # 来流缺省值的唯一定义在 core/freestream_defaults.py（与单机求解器构造参数同一份）
+        self.rho_inf = solver_kwargs.get('rho_inf', RHO_INF)
+        self.vel_inf = solver_kwargs.get('vel_inf', VEL_INF)
+        self.p_inf = solver_kwargs.get('p_inf', P_INF)
         _v0 = freestream_velocity(
-            solver_kwargs.get('vel_inf', 33.33),
+            self.vel_inf,
             solver_kwargs.get('aoa_deg', 0.0) or 0.0,
             solver_kwargs.get('aos_deg', 0.0) or 0.0)
         self.state.initialize_uniform(
-            rho=solver_kwargs.get('rho_inf', 1.225),
+            rho=self.rho_inf,
             u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
-            p=solver_kwargs.get('p_inf', 101325.0),
+            p=self.p_inf,
         )
 
         # 5. 初始化 halo 交换器（同样必须在面几何/halo 扩展之后构造，
@@ -210,9 +215,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 在这条路径上崩溃或静默退回内置缺省，BJ 越界判据（门控滤波的
         # 默认判据，其绝对地板必须用来流参考量级）正是其中一个。
         # 同一个语义只允许有一个事实来源、且两条后端不能有不同的可用性。
-        self.rho_inf = solver_kwargs.get('rho_inf', 1.225)
-        self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
-        self.p_inf = solver_kwargs.get('p_inf', 101325.0)
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
         self.freestream = {
             "rho_inf": self.rho_inf, "vel_inf": self.vel_inf,
@@ -225,7 +227,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 决定物理解的参数同样**无条件**设置（2026-09-25）：此前只在
         # SST/DDES/IDDES/WMLES 分支里设，于是 none/les 运行的分布式 checkpoint
         # 按替身缺省值写粘度与 Tu/VR（见 core/utils/checkpoint_physics.py）。
-        self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
+        self.mu_molecular = solver_kwargs.get('mu_molecular', MU_MOLECULAR)
         self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
         self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
         # 问题单元人工粘性（与单机 FRSolver 同名参数、同一实现；见

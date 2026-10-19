@@ -101,16 +101,17 @@ class _DistributedFromPackageMixin:
         # DistributedFRState.initialize_uniform 文档）——"完全分布式
         # 加载"路径同样从未初始化过 state，同一个根因。
         # 初场方向同上（2026-09-17）；aoa/aos 由 root 打进 package 的
-        # freestream 字典，见 distributed_mesh_loader.distributed_mesh_load_v2
+        # freestream 字典，见 distributed_mesh_loader.distributed_mesh_load_v2。来流三要素直接取键：包里恒有它们，
+        # 缺键说明打包有误，不能静默按缺省来流运行（2026-10-19 以前 .get(..., 33.33/1.225/101325)，I-46）
         from autoflowcfd.core.utils.flow_direction import freestream_velocity
         _v0 = freestream_velocity(
-            package['freestream'].get('vel_inf', 33.33),
+            package['freestream']['vel_inf'],
             package['freestream'].get('aoa_deg', 0.0) or 0.0,
             package['freestream'].get('aos_deg', 0.0) or 0.0)
         self.state.initialize_uniform(
-            rho=package['freestream'].get('rho_inf', 1.225),
+            rho=package['freestream']['rho_inf'],
             u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
-            p=package['freestream'].get('p_inf', 101325.0),
+            p=package['freestream']['p_inf'],
         )
         self.halo_exchange = HaloExchange(self.partition, n_sps, n_vars)
 

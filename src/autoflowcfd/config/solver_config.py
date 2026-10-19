@@ -18,6 +18,7 @@
 """
 
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 import dataclasses
 from dataclasses import dataclass
 from enum import Enum
@@ -131,7 +132,7 @@ class SolverConfig:
     checkpoint_interval: int = 100
     turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
     viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
-    mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
+    mu_molecular: float = MU_MOLECULAR  # 分子动力粘度 (Pa*s)，默认标准状态下空气
     artificial_viscosity_enabled: bool = False  # 问题单元人工粘性（熵残差判据），与 CLI --artificial-viscosity 对应
     artificial_viscosity_alpha: float = 1.0  # 人工粘性强度标定常数，与 CLI --av-alpha 对应
     wall_treatment: str = DEFAULT_WALL_TREATMENT  # RANS 近壁处理（resolved | auto），与 CLI --wall-treatment 对应
@@ -291,9 +292,9 @@ class SteadyConfig(SolverConfig):
     cfl_min: Optional[float] = None
     convergence_tol: float = DEFAULT_STEADY_TOL
     low_mach_precond: bool = True
-    rho_inf: float = 1.225
-    vel_inf: float = 33.33
-    p_inf: float = 101325.0
+    rho_inf: float = RHO_INF
+    vel_inf: float = VEL_INF
+    p_inf: float = P_INF
 
     def __post_init__(self):
         """验证稳态配置。"""
@@ -360,9 +361,9 @@ class TransientConfig(SolverConfig):
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None
     init_from_checkpoint: Optional[str] = None
-    rho_inf: float = 1.225
-    vel_inf: float = 33.33
-    p_inf: float = 101325.0
+    rho_inf: float = RHO_INF
+    vel_inf: float = VEL_INF
+    p_inf: float = P_INF
 
     def __post_init__(self):
         """验证瞬态配置。"""

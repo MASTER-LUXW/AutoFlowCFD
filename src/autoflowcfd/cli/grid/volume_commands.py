@@ -17,6 +17,7 @@ grid_commands.py 在模块加载末尾 `grid.add_command(...)` 注册，注册�
 import click
 import json
 from pathlib import Path
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
 from typing import Optional
 from loguru import logger
 
@@ -65,8 +66,8 @@ def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, 
               help="目标第一层 y+，按湍流平板关联式推出第一层高度（需 --ref-velocity 与 --ref-length）")
 @click.option("--ref-velocity", type=float, default=None, help="y+ 估计的参考速度 (m/s)")
 @click.option("--ref-length", type=float, default=None, help="y+ 估计的参考长度 (m)，例如车长/弦长")
-@click.option("--rho-inf", type=float, default=1.225, show_default=True, help="y+ 估计的密度 (kg/m^3)")
-@click.option("--mu-molecular", type=float, default=1.8e-5, show_default=True, help="y+ 估计的动力粘度 (Pa*s)")
+@click.option("--rho-inf", type=float, default=RHO_INF, show_default=True, help="y+ 估计的密度 (kg/m^3)")
+@click.option("--mu-molecular", type=float, default=MU_MOLECULAR, show_default=True, help="y+ 估计的动力粘度 (Pa*s)")
 def generate_volume(
     input_file: str,
     output: str,
@@ -83,8 +84,8 @@ def generate_volume(
     target_yplus: Optional[float] = None,
     ref_velocity: Optional[float] = None,
     ref_length: Optional[float] = None,
-    rho_inf: float = 1.225,
-    mu_molecular: float = 1.8e-5,
+    rho_inf: float = RHO_INF,
+    mu_molecular: float = MU_MOLECULAR,
 ) -> None:
     """从面网格 .nas 文件生成体网格并导出。
 

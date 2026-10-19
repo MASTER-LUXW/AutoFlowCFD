@@ -21,6 +21,7 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器（主类与装配顺序）
 """
 
 from typing import Optional
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
 
 from loguru import logger
 
@@ -63,10 +64,10 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         rank: Optional[int] = None,
         device_id: Optional[int] = None,
         time_scheme: str = "ssp_rk3",
-        mu_molecular: float = 1.8e-5,
-        rho_inf: float = 1.225,
-        vel_inf: float = 33.33,
-        p_inf: float = 101325.0,
+        mu_molecular: float = MU_MOLECULAR,
+        rho_inf: float = RHO_INF,
+        vel_inf: float = VEL_INF,
+        p_inf: float = P_INF,
         # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向硬编码
         # 成 +x 的行为逐位相同。约定见 core/utils/flow_direction.py。
         aoa_deg: float = 0.0,
