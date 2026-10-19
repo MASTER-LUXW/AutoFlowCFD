@@ -86,18 +86,17 @@ def _reference_cell_face_misalignment(mesh):
     # 固定为 +1，不使用复用槽位值。
     cell_misalign = np.zeros(mesh.n_cells)
     for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        if ffp.owner_is_primary:
+        if ffp_list.owner_is_primary[f]:
             owner_cell = int(fc.owner_cell[f])
-            side_o = 1.0 if int(fc.owner_cube_face[f]) >= 6 else ffp.owner_side
+            side_o = 1.0 if int(fc.owner_cube_face[f]) >= 6 else float(ffp_list.owner_side[f])
             d = own_dir(owner_adj_row[f], side_o)
-            misalign = 1.0 - np.sum(d * ffp.true_normal, axis=-1)
+            misalign = 1.0 - np.sum(d * ffp_list.true_normal[f], axis=-1)
             cell_misalign[owner_cell] = max(cell_misalign[owner_cell], float(misalign.max()))
-        if (not fc.is_boundary[f]) and ffp.neighbor_is_primary:
+        if (not fc.is_boundary[f]) and ffp_list.neighbor_is_primary[f]:
             neighbor_cell = int(fc.neighbor_cell[f])
-            side_n = 1.0 if int(fc.neighbor_cube_face[f]) >= 6 else ffp.neighbor_side
+            side_n = 1.0 if int(fc.neighbor_cube_face[f]) >= 6 else float(ffp_list.neighbor_side[f])
             d = own_dir(neighbor_adj_row[f], side_n)
-            misalign = 1.0 - np.sum(d * (-ffp.true_normal), axis=-1)
+            misalign = 1.0 - np.sum(d * (-ffp_list.true_normal[f]), axis=-1)
             cell_misalign[neighbor_cell] = max(cell_misalign[neighbor_cell], float(misalign.max()))
     return cell_misalign
 

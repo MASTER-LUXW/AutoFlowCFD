@@ -467,20 +467,20 @@ def inlet_outlet_mass_flux(solver, mesh, Lx: float, H: float, Lz: float):
 
     def flux_through(sel):
         total = 0.0
+        ffp = mesh.face_flux_points
         for f in bidx[sel]:
-            ffp = mesh.face_flux_points[f]
-            if not ffp.owner_is_primary:
+            if not ffp.owner_is_primary[f]:
                 continue
             owner = int(fc.owner_cell[f])
             oc = int(fc.owner_cube_face[f])
             # 统一访问器：原生面编码（四面体 [6,10)、棱柱 [10,15)）+ 三角形面的坍缩
             # 顶点槽位，生产路径与测试走同一份。
-            E = ops.native_face_extrap(oc, int(mesh.face_flux_points.owner_tri_slot[f]))
+            E = ops.native_face_extrap(oc, int(ffp.owner_tri_slot[f]))
             sl = slice(0, E.shape[1])
             rho = E @ Q[owner, sl, 0]
             vel = np.column_stack([E @ Q[owner, sl, c] for c in (1, 2, 3)])
-            n = ffp.true_normal
-            aw = ffp.true_area_weight
+            n = ffp.true_normal[f]
+            aw = ffp.true_area_weight[f]
             total += float(np.sum(rho * np.sum(vel * n, axis=1) * aw))
         return total
 

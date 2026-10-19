@@ -38,3 +38,11 @@ def test_new_face_flux_point_data_gets_its_own_geometry():
     mesh.set_order(2)
     f2 = face_kernels.get_flat_face_geometry(mesh, mesh.operators)
     assert f2 is not f1 and f2.n_fp != f1.n_fp
+
+
+def test_face_flux_point_data_is_flat_arrays_only():
+    """按面构造兼容对象的 `__getitem__`（及其无上限逐面缓存）已删除（I-36）：消费方一律读扁平数组。"""
+    mesh = _build_synthetic_mixed_mesh(1)
+    ffp = mesh.face_flux_points
+    assert not hasattr(type(ffp), "__getitem__") and not hasattr(ffp, "_cache")
+    assert ffp.true_normal.shape[0] == ffp.n_faces == len(ffp)

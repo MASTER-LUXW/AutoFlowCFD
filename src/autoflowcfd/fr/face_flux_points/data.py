@@ -9,7 +9,7 @@ from typing import Tuple
 
 import numpy as np
 
-from .geometry import CUBE_FACE_AXIS_SIDE, FaceFluxPointGeometry
+from .geometry import CUBE_FACE_AXIS_SIDE
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_CODES,
@@ -66,9 +66,9 @@ _AXIS_SIDE_TO_COLLAPSED_NAME = {
 class _KernelFaceData:
     """numba kernel 输出的 flat 数组容器，替代 180 万个 FaceFluxPointGeometry 对象。
 
-    残差计算路径（build_flat_face_geometry）直接读取 flat 数组，跳过逐面
-    对象创建。后处理代码（fr_coefficients、boundary 等）通过 __getitem__
-    按需创建 FaceFluxPointGeometry（仅边界面 ~39K 个，可忽略）。
+    全部消费方（残差、边界条件、后处理）直接读 flat 数组。2026-10-19（I-36）删除按面构造兼容对象的
+    `__getitem__`（连同无上限的逐面缓存与 `FaceFluxPointGeometry` 类）：生产已无消费方，它依赖的
+    owner_axis/side 语义随坍缩基删除而失效。
 
     混合分组字段（B-8，2026-08-25，见 face_flux_points/merge.py 同名段注释）：
     mixed_nb_partner/mixed_ow_partner：(n_faces,) int64，混合面内部记录 ->
@@ -96,76 +96,17 @@ class _KernelFaceData:
         'owner_tri_slot', 'neighbor_tri_slot',
         '_face_conn', '_sps_1d',
         '_owner_groups', '_neighbor_groups',
-        '_cache', '_p0_geometry', '_flat_geometry',
+        '_p0_geometry', '_flat_geometry',
     )
 
     def __init__(self, **kw):
         for k, v in kw.items():
             object.__setattr__(self, k, v)
-        self._cache = {}
         self._p0_geometry = None    # P0 面几何缓存（core/fr_residual/inviscid_p0.py::p0_face_geometry）
         self._flat_geometry = None  # 展平面几何缓存（core/fr_operators/face_kernels.py::get_flat_face_geometry）
 
     def __len__(self):
         return self.n_faces
-
-    def __getitem__(self, f):
-        """按需创建 FaceFluxPointGeometry（后处理代码兼容）。"""
-        cached = self._cache.get(f)
-        if cached is not None:
-            return cached
-        if f >= self.n_faces:
-            raise IndexError(f)
-        ffp = self._build_ffp(f)
-        self._cache[f] = ffp
-        return ffp
-
-    def _build_ffp(self, f):
-        """为第 f 个面构建 FaceFluxPointGeometry（按需，仅后处理使用）。"""
-        fc = self._face_conn
-
-        oa = int(self.owner_axis[f])
-        os_ = float(self.owner_side[f])
-        na = int(self.neighbor_axis[f])
-        ns_ = float(self.neighbor_side[f])
-        tn = self.true_normal[f]
-        taw = self.true_area_weight[f]
-        op = bool(self.owner_is_primary[f])
-        np_ = bool(self.neighbor_is_primary[f])
-
-        if fc.is_boundary[f]:
-            return FaceFluxPointGeometry(
-                owner_axis=oa, owner_side=os_,
-                neighbor_axis=-1, neighbor_side=0.0,
-                neighbor_sources=[], owner_sources=[],
-                true_normal=tn, true_area_weight=taw,
-                owner_is_primary=op, neighbor_is_primary=True,
-            )
-
-        # 从 flat 数组直接构建 sources（使用 src0 + src1 紧凑索引）
-        nb_sources = []
-        c0 = int(self.nb_src0_cell[f])
-        if c0 >= 0:
-            nb_sources.append((c0, self.nb_src0_tpl[self.nb_src0_tid[f]]))
-        idx1 = int(self.nb_src1_idx[f])
-        if idx1 >= 0:
-            nb_sources.append((int(self.nb_extra_cell[idx1]), self.nb_extra_mat[idx1]))
-
-        ow_sources = []
-        c0 = int(self.ow_src0_cell[f])
-        if c0 >= 0:
-            ow_sources.append((c0, self.ow_src0_tpl[self.ow_src0_tid[f]]))
-        idx1 = int(self.ow_src1_idx[f])
-        if idx1 >= 0:
-            ow_sources.append((int(self.ow_extra_cell[idx1]), self.ow_extra_mat[idx1]))
-
-        return FaceFluxPointGeometry(
-            owner_axis=oa, owner_side=os_,
-            neighbor_axis=na, neighbor_side=ns_,
-            neighbor_sources=nb_sources, owner_sources=ow_sources,
-            true_normal=tn, true_area_weight=taw,
-            owner_is_primary=op, neighbor_is_primary=np_,
-        )
 
 
 #: 棱柱的 3 个四边形侧面在立方体面整数编码中的取值 —— 只有这些面会被

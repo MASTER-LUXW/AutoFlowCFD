@@ -10,15 +10,10 @@ FP 外插，FP 按对角线解析分类分别匹配到正确的相邻单元。
 核心类和辅助函数位于 face_flux_points_data 模块。
 """
 
-from typing import List
-
 import numpy as np
 from loguru import logger
 
-from .geometry import (
-    CUBE_FACE_AXIS_SIDE,
-    FaceFluxPointGeometry,
-)
+from .geometry import CUBE_FACE_AXIS_SIDE
 from .basis_inverses import build_basis_inverses
 from ..native_padding import sps_width
 from .face_metrics import build_face_metrics
@@ -85,7 +80,7 @@ def _require_native_face_codes(face_conn: FRFaceConnectivity) -> None:
         raise ValueError(f"{bad} 个面记录的面编码不在原生区间 [{lo},{hi})：面连接关系没有翻译成原生面编码")
 
 
-def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFluxPointGeometry]:
+def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> _KernelFaceData:
     """为 face_conn 里的每个面预计算 Flux Points 几何（正确处理棱柱四边形
     侧面被拆分成 1~2 个真实相邻单元的情形，见模块文档）。"""
     from autoflowcfd.fr.operators import gauss_legendre
@@ -203,7 +198,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _owner_adj_row_exact = fm.owner_adj_row_exact
     _neighbor_adj_row_exact = fm.neighbor_adj_row_exact
 
-    # ---- 直接构建 flat 源数组（跳过 180 万 FaceFluxPointGeometry 对象创建）----
+    # ---- 直接构建 flat 源数组 ----
     # 内存说明（P3 阶数 OOM 排查，2026-08-21）：nb_src0_mat/ow_src0_mat 曾经
     # 各自独立 np.zeros((n_faces,n_fp,n_sps)) 分配、再从 kernel 输出的
     # _nb_interp/_ow_interp（同形状、同 dtype）逐元素拷贝进去——但真实数据

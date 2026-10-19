@@ -19,8 +19,7 @@ AutoFlowCFD - FR 单元-面 Flux Points 几何预计算：核心数值原语 (V2
 400 行限制。
 """
 
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 
@@ -84,61 +83,6 @@ ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，�
 # 原生四面体体积 Vandermonde 的 LU 分解缓存（键为阶数）：用 LU 分解 + lu_solve 而不是显式求逆——显式求逆会把
 # Vandermonde 的条件数直接乘进舍入误差（实测用显式逆重构常数场在 P3 残差 2.8e-8，lu_solve 精确到 0.0）。
 _V_SPS_LU_CACHE: Dict[tuple, tuple] = {}
-
-
-@dataclass
-class FaceFluxPointGeometry:
-    """单个物理面的 Flux Points 几何数据（owner 视角的 FP 网格为准）。
-
-    棱柱的四边形侧面（a=-1/a=+1/b=-1）在网格生成阶段（grid/mesh_gen/
-    face_extractor.py）恒定被三角化拆分成 2 个子面记录（哪怕相邻的也是
-    同一个棱柱的单一四边形邻居——这是网格生成器保证棱柱与四面体核心区
-    比特级保形的既有设计），因此同一个 (owner_cell, owner 立方体面) 可能
-    对应 1~2 个不同的真实相邻单元。owner/neighbor 双方各自的贡献
-    （自身原生 FP 网格外插 + 校正投影）必须只做一次，不能按拆分出的子面
-    记录数重复计入；跨单元求值也必须按每个 FP 物理位置精确匹配到它
-    *真正* 所属的那个相邻单元，而不是把整张四边形都指给其中一个。
-
-    因此本结构不再直接存一个 (n_fp, n_sps) 插值矩阵 + 单一 neighbor_cell，
-    而是存 sources 列表：每个元素是 (real_cell_id, (n_fp,n_sps) 矩阵)，
-    矩阵在不属于该 real_cell 的 FP 行上恒为 0——调用方对列表求和即可得到
-    正确的、按物理位置精确来源组装出的界面场，不管背后是 1 个还是 2 个
-    真实相邻单元。*_is_primary 标记这条 face_connectivity 记录是否是其
-    (cell, 立方体面) 分组里“负责触发一次自身外插+校正投影”的那条——非
-    primary 的记录只贡献跨单元插值信息（已经被合并进 primary 记录的
-    sources 里），本身不应再触发一次自身贡献，否则等价于重复计入。
-
-    Attributes:
-        owner_axis, owner_side: owner 单元被坍缩的计算方向与边界取值
-        neighbor_axis, neighbor_side: neighbor 单元侧同上；边界面时为 -1/0.0
-        neighbor_sources: List[(neighbor_cell_id, (n_fp,n_sps)矩阵)]，
-            对 owner 的 FP 网格各自贡献部分（或全部）行；边界面为空列表
-        owner_sources: List[(owner_cell_id, (n_fp,n_sps)矩阵)]，
-            对 neighbor 原生 FP 网格各自贡献部分（或全部）行；边界面/
-            neighbor_is_primary=False 时为空列表
-        true_normal: (n_fp, 3) 真实物理单位法向量（owner->neighbor / 边界面
-            指向域外），按 owner 顺序排列
-        true_area_weight: (n_fp,) 每个 FP 代表的物理面积权重，按 owner 顺序
-        owner_is_primary: 本记录是否负责 owner 侧的自身外插+校正投影
-        neighbor_is_primary: 本记录是否负责 neighbor 侧的自身外插+校正投影
-            （边界面恒为 True，但此时不产生 neighbor 侧计算）
-    """
-    __slots__ = (
-        'owner_axis', 'owner_side', 'neighbor_axis', 'neighbor_side',
-        'neighbor_sources', 'owner_sources', 'true_normal',
-        'true_area_weight', 'owner_is_primary', 'neighbor_is_primary',
-    )
-
-    owner_axis: int
-    owner_side: float
-    neighbor_axis: int
-    neighbor_side: float
-    neighbor_sources: List[tuple]
-    owner_sources: List[tuple]
-    true_normal: np.ndarray
-    true_area_weight: np.ndarray
-    owner_is_primary: bool
-    neighbor_is_primary: bool
 
 
 def face_ref_grid(n1d: int, axis: int, side: float, sps_1d: np.ndarray) -> np.ndarray:

@@ -39,7 +39,6 @@ X`（`geometry.py` 里的东西）。把 `face_flux_points/geometry.py` 搬成�
 from .geometry import (  # noqa: F401
     ACCEPT_STRICT_REL,
     CUBE_FACE_AXIS_SIDE,
-    FaceFluxPointGeometry,
     # 私有 LU 缓存：`tests/unit/test_native_tet_numba_kernel_parity.py` 直接从包根导入，复现 kernel 内部的插值矩阵构造
     _get_v_sps_lu_native,
     build_cross_interp,
@@ -50,7 +49,6 @@ from .geometry import (  # noqa: F401
 __all__ = [
     "ACCEPT_STRICT_REL",
     "CUBE_FACE_AXIS_SIDE",
-    "FaceFluxPointGeometry",
     "build_cross_interp",
     "face_ref_grid",
     "native_tet_face_points_physical",
