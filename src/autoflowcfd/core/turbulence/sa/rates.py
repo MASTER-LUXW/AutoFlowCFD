@@ -13,6 +13,7 @@
 壁面解点（`d == 0`）上三者都为零：那里施加强 Dirichlet `nu_tilde = 0`（`model.py` 模块文档）。
 """
 
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
@@ -46,7 +47,7 @@ def evaluate_sa_rates(model, transport, Q, grad_vel, d_wall, mu) -> TurbulenceRa
     off_wall = d_wall != 0.0
     raw = xp.where(off_wall, raw, 0.0)
     src = xp.where(off_wall, src, 0.0)
-    trans = xp.where(off_wall & xp.isfinite(trans), trans, 0.0)
+    trans = xp.where(off_wall, replace_nonfinite(model, trans, "SA 输运", xp), 0.0)
     return TurbulenceRates((raw,), (src,), (trans,))
 
 

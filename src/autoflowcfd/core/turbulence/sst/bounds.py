@@ -38,6 +38,7 @@ nu`，工程雷诺数下是 5e7 ~ 2e8。湍流平板（`tests/validation/_flat_p
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 
 #: 防止 0/负值进入 sqrt 与除法的绝对下限。
 ABS_FLOOR = 1e-12
@@ -190,7 +191,7 @@ def clip_to_bounds(model, xp) -> None:
     **不裁剪下界**，理由见模块文档。"""
     if model.k_max is None:
         raise RuntimeError("SST 模型的上界尚未设定（构造后必须调用 configure_sst_model）")
-    k = xp.where(xp.isfinite(model.k_field), model.k_field, 0.0)
-    w = xp.where(xp.isfinite(model.omega_field), model.omega_field, float(model.omega_inf))
+    k = replace_nonfinite(model, model.k_field, "SST k 场", xp)
+    w = replace_nonfinite(model, model.omega_field, "SST omega 场", xp, fill=float(model.omega_inf))
     model.k_field = xp.minimum(k, model.k_max)
     model.omega_field = xp.minimum(w, model.omega_max)

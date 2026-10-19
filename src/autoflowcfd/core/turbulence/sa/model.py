@@ -27,6 +27,7 @@
 import numpy as np
 
 from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX, report_viscosity_cap
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 from autoflowcfd.core.turbulence.transported import TransportedTurbulence
 from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
@@ -88,6 +89,8 @@ class SAModel(TransportedTurbulence):
         self.production_factor = 1.0
         self.wall_points = None
         self.viscosity_cap_activations = 0      # 涡粘比上限激活的累计解点数（limits.py::report_viscosity_cap）
+        self.nonfinite_count = 0                # 非有限值替换的累计解点数（nonfinite.py::replace_nonfinite）
+        self._nonfinite_reported = 0
         self._viscosity_cap_reported = 0
 
     # ---- TransportedTurbulence ----
@@ -142,7 +145,7 @@ class SAModel(TransportedTurbulence):
         source, damping, self.nu_t = map_cell_chunks(
             _pointwise_source, (self.nu_tilde_field, nu, d_wall, grad_vel), self.production_factor, xp, xp=xp)
         self._last_damping = damping
-        return xp.where(xp.isfinite(source), rho * source, 0.0)
+        return replace_nonfinite(self, rho * source, "SA 源项", xp)
 
     def update_fields(self, dt, sources, transports):
         """一步显式更新：源项点隐式阻尼（系数取最近一次源项求值），输运显式。"""
@@ -152,7 +155,7 @@ class SAModel(TransportedTurbulence):
         d_nt = sources[0] / (1.0 + dt * self._last_damping)
         if transports[0] is not None:
             d_nt = d_nt + transports[0]
-        d_nt = xp.where(xp.isfinite(d_nt), d_nt, 0.0)
+        d_nt = replace_nonfinite(self, d_nt, "SA nu_tilde 增量", xp)
         self.nu_tilde_field = self.nu_tilde_field + dt * d_nt
         self.apply_positivity_limiter()
 
@@ -161,7 +164,7 @@ class SAModel(TransportedTurbulence):
         把负值推回零（`constants.py` 模块文档），裁剪会让离散稳态在那些解点上无解。"""
         xp = self.xp
         nt = self.nu_tilde_field
-        nt = xp.where(xp.isfinite(nt), nt, self.nu_tilde_inf)
+        nt = replace_nonfinite(self, nt, "SA nu_tilde 场", xp, fill=self.nu_tilde_inf)
         report_viscosity_cap(self, int(xp.count_nonzero(nt > self.nu_tilde_max)), "SA nu_tilde")
         self.nu_tilde_field = xp.minimum(nt, self.nu_tilde_max)
         self._pin_wall_points()

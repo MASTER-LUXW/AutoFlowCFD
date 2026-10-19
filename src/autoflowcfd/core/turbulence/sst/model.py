@@ -78,8 +78,9 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         # 由求解器根据全局迭代步数控制，见 turbulence.py::_update_production_ramp。
         self.production_factor: float = 1.0
 
-        # 更新时出现非有限增量的累计解点数（`update.py::advance_k_log_omega` 计数告警）
-        self.nonfinite_increment_count: int = 0
+        # 非有限值替换的累计解点数（`nonfinite.py::replace_nonfinite`：源项、涡粘、增量、场恢复）
+        self.nonfinite_count: int = 0
+        self._nonfinite_reported: int = 0
         # 涡粘比上限激活的累计解点数（`limits.py::report_viscosity_cap`）
         self.viscosity_cap_activations: int = 0
         self._viscosity_cap_reported: int = 0

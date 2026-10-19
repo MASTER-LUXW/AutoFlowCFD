@@ -5,9 +5,9 @@
 """
 
 import numpy as np
-from loguru import logger
 
 from autoflowcfd.core.utils.array_module import array_module
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 
 from .bounds import clip_to_bounds
 from .log_omega import log_omega, omega_from_log
@@ -71,17 +71,10 @@ def advance_k_log_omega(model, dt, Sk, S_log_omega, transport_k, transport_log_o
         dk = dk + transport_k
     if transport_log_omega is not None:
         dw = dw + transport_log_omega
-    # 非有限增量（退化网格上源项/输运可能出现 inf-inf）：该点本步不更新，并计数告警（与正性限制器一样如实报告；
-    # 2026-10-19（I-45）以前静默归零）。累计数在 `model.nonfinite_increment_count`
-    finite_k = xp.isfinite(dk)
-    finite_w = xp.isfinite(dw)
-    n_bad = int(dk.size - xp.count_nonzero(finite_k)) + int(dw.size - xp.count_nonzero(finite_w))
-    if n_bad:
-        model.nonfinite_increment_count += n_bad
-        logger.warning(f"SST k/ln(omega) 增量出现 {n_bad} 个非有限值（这些解点本步不更新；累计 "
-                       f"{model.nonfinite_increment_count}）——检查退化单元或湍流输运")
-        dk = xp.where(finite_k, dk, 0.0)
-        dw = xp.where(finite_w, dw, 0.0)
+    # 非有限增量（退化网格上源项/输运可能出现 inf-inf）：该点本步不更新，并计数告警（`nonfinite.py`；
+    # 2026-10-19（I-45）以前静默归零）
+    dk = replace_nonfinite(model, dk, "SST k 增量", xp)
+    dw = replace_nonfinite(model, dw, "SST ln(omega) 增量", xp)
 
     model.k_field = model.k_field + dt * dk
     model.omega_field = omega_from_log(log_omega(omega_old, xp) + dt * dw, model.omega_max, xp)

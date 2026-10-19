@@ -12,6 +12,7 @@ DES/DDES/IDDES：k 方程破坏项的长度尺度在**同一次**求值里、用
 from typing import Tuple
 
 import numpy as np
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 
 from autoflowcfd.core.utils.array_module import array_module
 
@@ -151,9 +152,8 @@ class _SSTSourceMixin:
         Sk = Sk + Sk_amb
         S_omega = S_omega + S_omega_amb
 
-        # 源项 NaN/Inf 隔离：退化网格上 grad_k·grad_omega 等可能为 inf，
-        # 导致 inf-inf=NaN 传播。将非有限源项归零。
-        Sk = xp.where(xp.isfinite(Sk), Sk, 0.0)
-        S_omega = xp.where(xp.isfinite(S_omega), S_omega, 0.0)
+        # 源项 NaN/Inf 隔离：退化网格上 grad_k·grad_omega 等可能为 inf，导致 inf-inf=NaN 传播——替换为零并计数告警
+        Sk = replace_nonfinite(self, Sk, "SST k 源项", xp)
+        S_omega = replace_nonfinite(self, S_omega, "SST omega 源项", xp)
 
         return Sk, S_omega

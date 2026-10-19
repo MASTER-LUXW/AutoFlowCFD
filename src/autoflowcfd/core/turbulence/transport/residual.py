@@ -6,6 +6,7 @@
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 from typing import Tuple
 
 
@@ -171,21 +172,9 @@ def compute_turbulence_transport_residual(
         dw_dt_transport = (conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, np)) \
             / np.maximum(rho, 1e-10)
 
-    # 机制3（按 (cell,SP,变量) 粒度检测残差量级异常并清零）**已于
-    # 2026-09-19 整体删除**，本函数曾经在这里调用它。删除依据是真实网格
-    # （plate_demo_volume_les，179,237 单元，P1 + LES）上的消融对照：
-    # 机制3 触发 15 次、清零 729 个槽位，而残差轨迹与关掉它的那条只差
-    # ~1e-10 相对量，两条都在 146~148 步发散。完整记录见
-    # `fr_residual/inviscid.py` 同一处。
-    #
-    # 所以本函数现在只保留下面那道 isfinite 归零作为唯一防线 —— 那是
-    # 真正必要的（退化网格上梯度/Jacobian 会产生非有限值，非有限值一旦
-    # 进入 SST 的场更新就不可恢复），而"明显偏大但还是有限值"这一类
-    # 由机制3 处理的情形，实测它处理与不处理没有可观测差别。
-    # NaN/Inf 隔离（最后一道防线）：退化网格上梯度/Jacobian 可能产生非
-    # 有限值，归零后由 SST.update_fields 的二次防护和 positivity
-    # limiter 接管
-    dk_dt_transport = np.where(np.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
-    dw_dt_transport = np.where(np.isfinite(dw_dt_transport), dw_dt_transport, 0.0)
+    # 非有限值隔离：退化网格上梯度/Jacobian 可能产生非有限值，一旦进入场更新就不可恢复——替换为零并计数告警
+    # （`turbulence/nonfinite.py`；2026-10-19（I-48）以前静默归零）
+    dk_dt_transport = replace_nonfinite(turb, dk_dt_transport, "SST k 输运", np)
+    dw_dt_transport = replace_nonfinite(turb, dw_dt_transport, "SST ln(omega) 输运", np)
 
     return dk_dt_transport, dw_dt_transport
