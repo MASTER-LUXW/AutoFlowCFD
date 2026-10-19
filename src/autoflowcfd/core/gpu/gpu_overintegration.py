@@ -10,7 +10,6 @@ get_overintegration_context`，这里是同一份算子/细点度量在 GPU 上�
 互相 import 会造成不该有的方向依赖。
 """
 
-from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 #: 过积分算子键（两条上传路径 `array_manager.py` / `gpu_inviscid_volume.prepare_ops_data`
 #: 共用这一份名单）；缺任何一个就退回 coarse 路径。`overint_lifted_div_*` 是无粘体积
@@ -90,8 +89,11 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
     """GPU 侧过积分分段；任一算子/细点度量缺失则返回 None（退回 coarse）。
 
     与 CPU 端 `get_overintegration_context` 逐字对应。细点度量用上传好的
-    `adj_j_fine_prism`（逐细点）与 `adj_j_fine_tet`（逐单元，本函数广播到该段
-    自己的 `n_fine_tet`，见 `upload_fine_metrics_gpu`）。
+    `adj_j_fine_prism`（逐细点）与 `adj_j_fine_tet`（逐单元常数，`upload_fine_metrics_gpu`）。四面体段给出
+    `(n_tet, 1, 3, 3)` 的视图：消费方都是 `matmul(adj_seg, F)`（`F` 为 `(n, n_fine, 3, k)`），批维按广播规则
+    扩到细点轴，不物化 `(n_tet, n_fine_tet, 3, 3)`。2026-10-19（I-114）以前每次调用都 `ascontiguousarray(
+    broadcast_to(...))` 整段物化——每次残差求值（隐式下每次 J v）临时分配回逐细点上传时省下的显存（plate_demo
+    P3 约 4.7 GB）并整份写入。
 
     缺失的唯一正常情形是 `order == 0`：P0 是分片常数场、多项式导数恒为
     零，没有可去混叠的内容，细点几何与 overint 算子都不构造。
@@ -99,7 +101,7 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
     Returns:
         `((lo, hi, n_fine, adj_seg, c2f, D_fine, f2c), ...)` 两段（棱柱在前、
         四面体在后，与"棱柱在前"的单元存储顺序一致），或 None。每段自带
-        **自己的** `n_fine` 与已切好的细点度量。
+        **自己的** `n_fine` 与已切好的细点度量（棱柱 `(n_prism, n_fine, 3, 3)`，四面体 `(n_tet, 1, 3, 3)`）。
 
     `n_fine_tet` 从 `overint_D_fine_tet` 的**形状**推导（与 CPU 端同一个
     做法）——矩阵是单一事实来源，从形状推导在结构上不可能与它不同步。
@@ -121,13 +123,10 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
             f"{n_fine_prism}，而上传的棱柱细点度量是 {tuple(adj_prism.shape)}"
         )
     n_fine_tet = int(ops_data['overint_D_fine_tet'].shape[0])
-    xp = _array_module(adj_tet_cell)
-    # 显式物化而不是留一个 0 步长的广播视图：GPU 侧这一段是**整段**一次
-    # `matmul`（不像 CPU 端按 32768 单元分块后逐块 ascontiguousarray），
-    # 0 步长视图喂给 cuBLAS 的行为不该依赖库的内部处理。这是本次调用内的
-    # 临时量，不常驻显存。
-    adj_tet = xp.ascontiguousarray(
-        xp.broadcast_to(adj_tet_cell[:, None], (n_cells - n_prism, n_fine_tet, 3, 3)))
+    if tuple(adj_tet_cell.shape) != (n_cells - n_prism, 3, 3):
+        raise ValueError(f"四面体细点度量应为逐单元 {(n_cells - n_prism, 3, 3)}，收到 {tuple(adj_tet_cell.shape)}")
+    # 长度为 1 的细点轴（连续视图，不是 0 步长广播视图）：matmul 的批维广播在 cuBLAS 批处理之前完成
+    adj_tet = adj_tet_cell[:, None]
     return (
         (0, n_prism, n_fine_prism, adj_prism,
          ops_data['overint_interp_c2f_prism'],
