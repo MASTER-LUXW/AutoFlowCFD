@@ -115,7 +115,7 @@ class HaloExchange:
 
         if not part.neighbor_ranks:
             return extended_data
-        if not mpi_available:
+        if not mpi_available():
             raise RuntimeError(f"rank {part.rank} 有 {len(part.neighbor_ranks)} 个邻居 rank，但 MPI 不可用："
                                f"halo 单元收不到数据")
 

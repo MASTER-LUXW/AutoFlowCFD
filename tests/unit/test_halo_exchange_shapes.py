@@ -82,7 +82,7 @@ def test_exchange_any_cell_shape_two_ranks(monkeypatch):
 
     box = _Mailbox()
     local = threading.local()
-    monkeypatch.setattr(halo_mod, "mpi_available", True)
+    monkeypatch.setattr(halo_mod, "mpi_available", lambda require=False: True)
     monkeypatch.setattr(halo_mod, "get_comm", lambda: local.comm)
     monkeypatch.setattr(halo_mod, "get_mpi", lambda: _MPI)
 

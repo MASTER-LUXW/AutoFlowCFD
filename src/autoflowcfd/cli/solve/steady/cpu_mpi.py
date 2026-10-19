@@ -29,7 +29,7 @@ def _run_cpu_mpi(
     # CPU MPI "传统模式"：每个 rank 独立加载完整网格、进程内分区（root 用 METIS 分区后广播）。
     # 只有 root 持有完整网格的加载方式是 --fully-distributed（`distributed_mesh_load_v2`）。
     from autoflowcfd.core.mpi import mpi_available
-    if not mpi_available:
+    if not mpi_available(require=True):
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
         print("   pip install mpi4py")
         print("   mpirun -np {n_ranks} autoflowcfd solve steady ...")

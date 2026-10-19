@@ -43,7 +43,7 @@ def _check_cuda_aware_mpi() -> bool:
     直接判 True）得出真实结论，再用 Allreduce（逻辑与）确保所有 rank
     看到完全一致的结果，不允许任何 rank 各自猜测。
     """
-    if not mpi_available or not gpu_available:
+    if not mpi_available() or not gpu_available:
         return False
 
     cp = get_cupy()
@@ -128,7 +128,7 @@ class GPUHaloExchange:
         """
         if not gpu_available:
             raise RuntimeError("CuPy required for GPU halo exchange")
-        if not mpi_available:
+        if not mpi_available():
             raise RuntimeError("MPI required for halo exchange")
 
         cp = get_cupy()

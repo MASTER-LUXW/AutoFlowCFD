@@ -130,7 +130,7 @@ def _solve_transient_cpu_traditional(
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
     from autoflowcfd.core.mpi import mpi_available, is_root
-    if not mpi_available:
+    if not mpi_available(require=True):
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
         print("   pip install mpi4py")
         raise click.Abort()
@@ -219,7 +219,7 @@ def _solve_transient_fully_distributed(
     （2026-09-02 续接）：`time_scheme`/`dual_time_inner_iter` 随
     `distributed_mesh_load_v2` 一起塞进 package，见该函数模块文档。"""
     from autoflowcfd.core.mpi import mpi_available, is_root
-    if not mpi_available:
+    if not mpi_available(require=True):
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
         raise click.Abort()
 
@@ -311,7 +311,7 @@ def _solve_transient_multi_gpu(
         raise click.Abort()
 
     from autoflowcfd.core.mpi import mpi_available, is_root
-    if not mpi_available:
+    if not mpi_available(require=True):
         print("\n❌ MPI not available. Install mpi4py and run with mpirun.")
         raise click.Abort()
 

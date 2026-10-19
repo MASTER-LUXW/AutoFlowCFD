@@ -30,7 +30,7 @@ class _MultiGPUSetupMixin:
         """环境与参数校验、rank/网格/阶数、来流字典、GPU 设备与数组管理器。"""
         if not gpu_available:
             raise RuntimeError("CuPy required for multi-GPU solver")
-        if not mpi_available:
+        if not mpi_available(require=True):
             raise RuntimeError("MPI required for distributed solver")
 
         cp = get_cupy()

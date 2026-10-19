@@ -25,7 +25,7 @@ def allreduce_sum(local_value):
     Returns:
         全局求和结果（所有 rank 得到相同值）
     """
-    if not mpi_available:
+    if not mpi_available():
         return local_value
     comm = get_comm()
     if comm.Get_size() == 1:
@@ -40,7 +40,7 @@ def allreduce_sum(local_value):
 
 def allreduce_max(local_value):
     """全局最大值归约。"""
-    if not mpi_available:
+    if not mpi_available():
         return local_value
     comm = get_comm()
     if comm.Get_size() == 1:
@@ -55,7 +55,7 @@ def allreduce_max(local_value):
 
 def allreduce_min(local_value):
     """全局最小值归约。"""
-    if not mpi_available:
+    if not mpi_available():
         return local_value
     comm = get_comm()
     if comm.Get_size() == 1:
@@ -79,7 +79,7 @@ def allgather_array(local_array: np.ndarray) -> np.ndarray:
     Returns:
         global_array: (n_global,) 所有 rank 数据拼接
     """
-    if not mpi_available:
+    if not mpi_available():
         return local_array.copy()
     comm = get_comm()
     if comm.Get_size() == 1:
@@ -116,7 +116,7 @@ def allgather_array(local_array: np.ndarray) -> np.ndarray:
 
 def barrier():
     """MPI 同步屏障。所有 rank 到达后才继续。"""
-    if not mpi_available:
+    if not mpi_available():
         return
     comm = get_comm()
     if comm.Get_size() > 1:
@@ -128,44 +128,9 @@ def bcast_from_root(obj):
 
     支持 numpy 数组和 pickle 可序列化对象。
     """
-    if not mpi_available:
+    if not mpi_available():
         return obj
     comm = get_comm()
     if comm.Get_size() == 1:
         return obj
     return comm.bcast(obj, root=0)
-
-
-class MPITimer:
-    """MPI 感知的计时器。
-
-    使用 MPI.Wtime() 提供高精度计时，支持按 rank 记录并归约统计。
-    """
-
-    def __init__(self, name: str = ""):
-        self.name = name
-        self._start = None
-        self._elapsed = 0.0
-
-    def start(self):
-        if mpi_available:
-            self._start = get_mpi().Wtime()
-        else:
-            import time
-            self._start = time.perf_counter()
-
-    def stop(self) -> float:
-        if mpi_available:
-            self._elapsed = get_mpi().Wtime() - self._start
-        else:
-            import time
-            self._elapsed = time.perf_counter() - self._start
-        return self._elapsed
-
-    @property
-    def elapsed(self) -> float:
-        return self._elapsed
-
-    def allreduce_max_elapsed(self) -> float:
-        """所有 rank 中最大耗时（用于性能报告——取最慢 rank）。"""
-        return allreduce_max(self._elapsed)

@@ -58,7 +58,7 @@ def world(monkeypatch):
     for m in (cmod, gmod):
         monkeypatch.setattr(m, "get_comm", lambda: local.comm)
         monkeypatch.setattr(m, "get_mpi", lambda: _MPI)
-        monkeypatch.setattr(m, "mpi_available", True)
+        monkeypatch.setattr(m, "mpi_available", lambda require=False: True)
     monkeypatch.setattr(gmod, "gpu_available", True)
     monkeypatch.setattr(gmod, "get_cupy", lambda: NumpyAsCupy())
 
@@ -127,6 +127,6 @@ def test_inconsistent_recv_list_is_refused(world):
 
 def test_cpu_halo_without_mpi_but_with_neighbors_is_refused(monkeypatch, world):
     import autoflowcfd.core.mpi.halo as cmod
-    monkeypatch.setattr(cmod, "mpi_available", False)
+    monkeypatch.setattr(cmod, "mpi_available", lambda require=False: False)
     with pytest.raises(RuntimeError, match="MPI 不可用"):
         _cpu(world.parts[0]).exchange(np.zeros((world.parts[0].n_local_cells, 8, 5)))

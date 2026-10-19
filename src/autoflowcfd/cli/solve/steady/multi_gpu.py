@@ -32,7 +32,7 @@ def _run_multi_gpu(
         raise click.Abort()
 
     from autoflowcfd.core.mpi import mpi_available, is_root
-    if not mpi_available:
+    if not mpi_available(require=True):
         print("\n❌ MPI not available. Install mpi4py and run with mpirun.")
         raise click.Abort()
 
