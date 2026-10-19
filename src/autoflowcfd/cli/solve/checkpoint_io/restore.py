@@ -206,3 +206,5 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
     # P0 重新开始整个爬升——恢复等于白恢复，且悄悄发生、resume 不会报
     # 任何错误或警告。
     solver._resumed_from_checkpoint = True
+    # 湍流场被上界大面积截断时默认拒绝续算（`order_continuation/turbulence_reset.py`），`--reset-turbulence` 置真
+    solver._reset_turbulence_on_resume = False

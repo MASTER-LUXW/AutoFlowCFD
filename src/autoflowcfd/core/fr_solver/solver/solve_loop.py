@@ -101,6 +101,10 @@ class SolveLoopMixin:
         """每步日志末尾的后端信息（CPU 无；GPU 打印显存占用）。"""
         return ""
 
+    def owned_cell_is_prism(self) -> np.ndarray:
+        """本进程拥有的单元（与湍流场 / 残差的行顺序一致）是否为棱柱，主机布尔数组 `(n_cells,)`。单机：棱柱在前。"""
+        return np.arange(int(self.mesh.n_cells)) < int(self.mesh.n_prism_cells)
+
     def set_dual_time_history(self, U_prev_flat) -> None:
         """恢复 dual-time 的上一物理时间层（续算，见 `core/utils/checkpoint_time.py`）：CPU 后端存主机数组，
         GPU 后端覆盖为设备数组。形状 `(本 rank 单元数 * n_sps, n_vars)`。"""
@@ -226,6 +230,13 @@ class SolveLoopMixin:
         else:
             self.tau_accum = None
 
+        # 续算前检查湍流场（被上界大面积截断时拒绝续算，或按 --reset-turbulence 重置；两条循环共用，
+        # `order_continuation/turbulence_reset.py`）。2026-10-19（I-91）以前只在 Order Continuation 路径上检查。
+        if getattr(self, "_resumed_from_checkpoint", False):
+            from autoflowcfd.core.utils.order_continuation.turbulence_reset import check_resumed_turbulence
+
+            check_resumed_turbulence(self)
+
         report = is_root()
         if report:
             logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
@@ -327,6 +338,12 @@ class DistributedSolveLoopMixin(SolveLoopMixin):
 
     def _divergence_hint(self) -> str:
         return f"分布式路径：{self.n_ranks} 个 rank，残差是全域 allreduce 值（各 rank 一致，同时抛出）"
+
+    def owned_cell_is_prism(self) -> np.ndarray:
+        """本 rank 的 local 单元（原生排列）是否为棱柱（分布式 local 排列里棱柱 / 四面体交错）。"""
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+        return native_cell_is_prism(self.dist_flat_face)[:self.partition.n_local_cells]
 
 
 class _SolverSolveMixin(SolveLoopMixin):

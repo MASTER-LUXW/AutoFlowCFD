@@ -264,6 +264,8 @@ def rebuild_distributed_solver_from_checkpoint(
 
     solver.convergence_history = ConvergenceHistory.from_checkpoint(history, iteration)
     solver._resumed_from_checkpoint = True
+    # 湍流场被上界大面积截断时默认拒绝续算（`order_continuation/turbulence_reset.py`），`--reset-turbulence` 置真
+    solver._reset_turbulence_on_resume = False
     # 收尾气动系数用的参考面积（root 上；传统模式各 rank 都加载了体网格，完全分布式在 root 的 `_root_context`）
     from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area
 

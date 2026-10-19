@@ -188,8 +188,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 存到 self 上。后续任何需要重新推导来流湍流值的调用点（例如
         # `gpu_solver_order_continuation.py::gpu_solver_interpolate_to_
         # new_order` 的降阶重置分支、本次新增的 `distributed_order_
-        # continuation.py::_reset_turbulence_if_resumed_field_exploded`
-        # resume 安全重置）都会因为 `getattr(solver, '_turbulence_
+        # continuation/turbulence_reset.py::check_resumed_turbulence`
+        # resume 检查与重置）都会因为 `getattr(solver, '_turbulence_
         # intensity', 0.01)` 取不到真实值，静默退回默认值 Tu=0.01/
         # VR=5.0——用户配置了非默认湍流强度/粘性比的单机 GPU 算例，这些
         # 场景会重置成错误的来流湍流值而不报错。

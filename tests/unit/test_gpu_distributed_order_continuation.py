@@ -231,7 +231,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
     单机 `GPUFRSolver`，鸭子类型复用同一份实现，见
     `core/utils/order_continuation/run.py`：四个后端同一个循环）此前完全没有
     单机 CPU 早就有的"resume 时检测湍流场是否被上界大面积钳制"安全网，
-    见 `_reset_turbulence_if_resumed_field_exploded` 文档完整推导。
+    见 `check_resumed_turbulence` 文档完整推导。
 
     这里只需要验证被测函数本身只用 `.sum()`/`.size`/`>=`/`float(...)`
     这几个 numpy 与 CuPy 语义完全一致的数组 API（函数体内没有任何
@@ -253,6 +253,8 @@ class TestResumeCeilingFractionResetHeuristicGpu:
             mu_molecular=1.8e-5,
             _turbulence_intensity=0.01,
             _viscosity_ratio=5.0,
+            _reset_turbulence_on_resume=True,               # `solve resume --reset-turbulence`
+            owned_cell_is_prism=lambda: np.ones(n_cells, dtype=bool),
         )
         # 真实的 SST 模型类（与 GPUTurbulenceSST 同一个 TransportedTurbulence 接口），数组用 numpy
         k_inf, omega_inf = _set_freestream_turbulence(solver)
@@ -266,22 +268,22 @@ class TestResumeCeilingFractionResetHeuristicGpu:
 
     def test_healthy_high_turbulence_field_is_not_falsely_reset(self):
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         solver = self._make_solver_stub(k_value=38.11, omega_value=28459.5)
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        check_resumed_turbulence(solver)
 
         np.testing.assert_allclose(solver.turb_model_gpu.k_field, 38.11)
         np.testing.assert_allclose(solver.turb_model_gpu.omega_field, 28459.5)
 
     def test_genuinely_clamped_field_still_gets_reset(self):
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         solver = self._make_solver_stub(k_value=555.44, omega_value=1e6)
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        check_resumed_turbulence(solver)
 
         k_inf_expected = 1.5 * (33.33 * 0.01) ** 2
         assert not np.allclose(solver.turb_model_gpu.k_field, 555.44)
@@ -290,7 +292,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
 
     def test_partial_clamping_below_threshold_is_not_reset(self):
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         solver = self._make_solver_stub(k_value=1.0, omega_value=100.0, n_cells=100, n_sps=6)
 
@@ -298,6 +300,6 @@ class TestResumeCeilingFractionResetHeuristicGpu:
         n_clamp = max(1, int(0.05 * flat.size))
         flat[:n_clamp] = solver.turb_model_gpu.k_max
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        check_resumed_turbulence(solver)
 
         assert np.any(np.isclose(solver.turb_model_gpu.k_field, 1.0))

@@ -20,7 +20,6 @@ from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finit
 from autoflowcfd.core.mpi import is_root
 
 from .policy import PhaseGate, update_phase_baseline
-from .turbulence_reset import _reset_turbulence_if_resumed_field_exploded
 
 #: 非最终阶段至少走这么多步才允许提前升阶（避免过早提升）。
 MIN_ITER_BEFORE_TRANSITION = 20
@@ -59,7 +58,6 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         # 产生项渐变的进度已由恢复路径按 checkpoint 续接（`fr_solver/turbulence/init.py::
         # restore_production_ramp`）：渐变已完成时不再重置残差基准（否则丢掉刚恢复的阶段起始残差）
         solver._ramp_baseline_reset_done = bool(solver._turb_production_ramp_complete)
-        _reset_turbulence_if_resumed_field_exploded(solver)
     else:
         solver._ramp_baseline_reset_done = False
         if solver.current_order != 0:

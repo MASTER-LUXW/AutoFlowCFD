@@ -67,7 +67,7 @@ from .rebuild import cpu_traditional_interpolate_to_new_order  # noqa: F401
 # `core/utils/order_continuation`（2026-09-24 合并：此前单机内联一份、
 # 这里再写一份）。re-export 让既有导入一字不改。
 from autoflowcfd.core.utils.order_continuation import (  # noqa: F401
-    _reset_turbulence_if_resumed_field_exploded,
+    check_resumed_turbulence,
 )
 
 __all__ = [

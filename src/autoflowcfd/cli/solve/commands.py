@@ -127,6 +127,9 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
                    '早于 2026-10-09 的 dual-time checkpoint 没有记录，需要显式给出）')
 @click.option('--tol', type=float, default=field_default(SteadyConfig, 'convergence_tol'), show_default=True,
               help='相对收敛容差（与 solve steady --tol 同义）')
+@click.option('--reset-turbulence', is_flag=True,
+              help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（此前失控、未恢复）时，把湍流场重置为来流值再续算'
+                   '（平均流保留）。不给时这种 checkpoint 拒绝续算并报告')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
@@ -134,7 +137,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
-           gpu_device: Optional[int], dt: Optional[float], tol: float) -> None:
+           gpu_device: Optional[int], dt: Optional[float], tol: float, reset_turbulence: bool) -> None:
     """从检查点真正恢复并继续求解（不是只打印元信息）。
 
     重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
@@ -166,6 +169,8 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         dt: 时间步长覆盖（None 时沿用 checkpoint 记录的值，见 core/utils/checkpoint_time.py::resume_time_step）
         tol: 相对收敛容差
         low_mach_precond: 低马赫预处理覆盖（None 时沿用 checkpoint 记录）
+        reset_turbulence: 湍流场被上界大面积截断时重置为来流值（不给时拒绝续算，
+            `core/utils/order_continuation/turbulence_reset.py`）
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
@@ -177,7 +182,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, surface_mesh, threads, skip_quality_check,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, reset_turbulence=reset_turbulence,
             time_scheme=time_scheme, dt=dt, tol=tol, reference_area=reference_area,
             low_mach_precond=low_mach_precond,
         )
@@ -193,6 +198,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         gpu_device=0 if gpu_device is None else gpu_device,
         low_mach_precond=low_mach_precond,
     )
+    solver._reset_turbulence_on_resume = bool(reset_turbulence)
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
     # 求解 + 中间 checkpoint + 收尾写出：与 Python API 共用（checkpoint_io/resume_run.py）
@@ -230,6 +236,7 @@ def _resume_distributed(
     dt: Optional[float] = None,
     tol: float = field_default(SteadyConfig, "convergence_tol"),
     reference_area: Optional[float] = None,
+    reset_turbulence: bool = False,
     low_mach_precond: Optional[bool] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
@@ -269,6 +276,7 @@ def _resume_distributed(
         skip_quality_check=skip_quality_check, time_scheme=time_scheme,
         reference_area=reference_area, low_mach_precond=low_mach_precond,
     )
+    solver._reset_turbulence_on_resume = bool(reset_turbulence)
     input_file = metadata["input_file"]
     turbulence_model = metadata["turbulence_model"]
     resolved_surface_mesh = metadata.get("surface_mesh")

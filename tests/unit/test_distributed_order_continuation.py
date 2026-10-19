@@ -135,7 +135,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
     此前完全没有单机版早就有的"resume 时检测湍流场是否被上界大面积
     钳制、若是则重置到来流初值"安全网，见
     `distributed_order_continuation.py::
-    _reset_turbulence_if_resumed_field_exploded` 文档完整推导。直接
+    check_resumed_turbulence` 文档完整推导。直接
     测这个 helper 函数本身（不跑完整 `run_distributed_order_
     continuation` 迭代循环——那样后续真实物理 step() 会继续演化
     k_field/omega_field，让"重置前后是否等于 k_inf"这个断言变得不精确，
@@ -161,6 +161,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
         solver.turb_model.omega_field[:] = omega_value
         solver.turb_model.k_max = k_max
         solver.turb_model.omega_max = omega_max
+        solver._reset_turbulence_on_resume = False      # 恢复路径的缺省（`solve resume --reset-turbulence` 置真）
         return solver
 
     def test_healthy_high_turbulence_field_is_not_falsely_reset(self, mesh_p2_and_ops_order1):
@@ -168,26 +169,38 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
         只是钝体尾流健康发展的高湍流度场，钳制占比很低，不应该被
         重置。"""
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         mesh, ops = mesh_p2_and_ops_order1
         solver = self._make_solver_with_turb(mesh, ops, k_value=38.11, omega_value=28459.5)
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        check_resumed_turbulence(solver)
 
         np.testing.assert_allclose(solver.turb_model.k_field, 38.11)
         np.testing.assert_allclose(solver.turb_model.omega_field, 28459.5)
 
-    def test_genuinely_clamped_field_still_gets_reset(self, mesh_p2_and_ops_order1):
-        """100% 的单元都钉在上界——必须仍然触发重置，这个修复只是改
-        判据的统计口径（全局钳制比例），不是把安全网整个拆掉。"""
+    def test_genuinely_clamped_field_is_refused_without_the_reset_option(self, mesh_p2_and_ops_order1):
+        """100% 的解点钉在上界：默认拒绝续算（I-91：此前自动重置为来流值并继续，续算已不是原算例）。"""
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         mesh, ops = mesh_p2_and_ops_order1
         solver = self._make_solver_with_turb(mesh, ops, k_value=555.44, omega_value=1e6)
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        with pytest.raises(RuntimeError, match="--reset-turbulence"):
+            check_resumed_turbulence(solver)
+        np.testing.assert_allclose(solver.turb_model.k_field, 555.44)
+
+    def test_genuinely_clamped_field_is_reset_with_the_option(self, mesh_p2_and_ops_order1):
+        """`solve resume --reset-turbulence`：重置为来流值（平均流保留）。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            check_resumed_turbulence,
+        )
+        mesh, ops = mesh_p2_and_ops_order1
+        solver = self._make_solver_with_turb(mesh, ops, k_value=555.44, omega_value=1e6)
+        solver._reset_turbulence_on_resume = True
+
+        check_resumed_turbulence(solver)
 
         k_inf_expected = 1.5 * (33.33 * 0.01) ** 2
         assert not np.allclose(solver.turb_model.k_field, 555.44)
@@ -197,7 +210,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
     def test_partial_clamping_below_threshold_is_not_reset(self, mesh_p2_and_ops_order1):
         """只有少数 SP（低于10%）触及上界——不应该触发重置。"""
         from autoflowcfd.core.mpi.distributed_order_continuation import (
-            _reset_turbulence_if_resumed_field_exploded,
+            check_resumed_turbulence,
         )
         mesh, ops = mesh_p2_and_ops_order1
         solver = self._make_solver_with_turb(mesh, ops, k_value=1.0, omega_value=100.0)
@@ -209,7 +222,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
         n_clamp = max(1, int(0.05 * flat.size))
         flat[:n_clamp] = solver.turb_model.k_max
 
-        _reset_turbulence_if_resumed_field_exploded(solver)
+        check_resumed_turbulence(solver)
 
         # 未被重置：绝大多数元素应该还是原来的 1.0，不是被清零的 k_inf。
         assert np.any(np.isclose(solver.turb_model.k_field, 1.0))
