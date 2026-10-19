@@ -199,14 +199,14 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             max_iter=max_iter, dt=dt, tol=0.0,
             checkpoint_callback=periodic_checkpoint_callback(
                 checkpoint_interval, output_dir, input_file, turbulence_model, backend,
-                surface_mesh=surface_mesh, transient=True),
+                surface_mesh=surface_mesh),
             phase_max_iter=phase_max_iter,
             residual_drop_threshold=residual_drop_threshold)
         print(f"\n✅ Transient Simulation Finished: Steps={result.iterations}, Final Residual={result.final_residual:.6e}")
 
         # 6. 结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）与气动系数
         write_single_node_outputs(solver, output_dir, result.iterations, input_file, turbulence_model, backend,
-                                  surface_mesh=surface_mesh, transient=True)
+                                  surface_mesh=surface_mesh)
         _report_aerodynamic_coefficients(solver.host_view(), reference_area)
 
     except Exception as e:

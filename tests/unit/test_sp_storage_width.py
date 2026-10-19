@@ -5,7 +5,6 @@
 `load_checkpoint` 里截到新宽度（只去掉填充槽位）。
 """
 
-from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -49,7 +48,7 @@ def test_operators_use_the_width(order):
 def _write(tmp_path, fields, metadata):
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
-    mgr = CheckpointManager(config=SimpleNamespace(), output_dir=str(tmp_path), quiet=True)
+    mgr = CheckpointManager(output_dir=str(tmp_path), quiet=True)
     n_cells = next(iter(fields.values())).shape[0]
     path = mgr.save(solution=np.ones((n_cells, 5)), history=_HISTORY, iteration=7,
                     metadata=metadata, extra_fields=fields)
@@ -84,7 +83,7 @@ def test_legacy_checkpoint_is_cut_to_new_width(tmp_path, order):
     with h5py.File(path, "r+") as f:                    # 2026-10-19 之前写的 checkpoint 没有这个属性
         del f["metadata"].attrs["sp_layout"]
 
-    solution, _, iteration, meta = load_checkpoint(mgr, path)
+    solution, _, iteration, meta = load_checkpoint(path)
     out = meta["fields"]
     assert iteration == 7 and solution.shape == (3, 5)
     np.testing.assert_array_equal(out["U_sps"], fields["U_sps"][:, :w])
@@ -105,7 +104,7 @@ def test_new_checkpoint_records_layout_and_is_not_cut(tmp_path):
     with h5py.File(path, "r") as f:
         saved = f["metadata"].attrs["sp_layout"]
     assert (saved.decode() if isinstance(saved, bytes) else saved) == SP_LAYOUT
-    _, _, _, meta = load_checkpoint(mgr, path)
+    _, _, _, meta = load_checkpoint(path)
     np.testing.assert_array_equal(meta["fields"]["U_sps"], U)
 
 
@@ -116,7 +115,7 @@ def test_unknown_layout_is_refused(tmp_path):
     with h5py.File(path, "r+") as f:
         f["metadata"].attrs["sp_layout"] = np.string_("future_layout")
     with pytest.raises(Exception, match="解点存储布局"):
-        load_checkpoint(mgr, path)
+        load_checkpoint(path)
 
 
 def test_legacy_init_from_lifts_to_higher_order(tmp_path):
@@ -134,7 +133,7 @@ def test_legacy_init_from_lifts_to_higher_order(tmp_path):
     mgr, path = _write(tmp_path, {"U_sps": U}, {"order": 1, "n_sps_per_cell": 8})
     with h5py.File(path, "r+") as f:
         del f["metadata"].attrs["sp_layout"]
-    _, _, _, meta = load_checkpoint(mgr, path)
+    _, _, _, meta = load_checkpoint(path)
 
     out, ckpt_order = prolongate_checkpoint_fields(meta["fields"], 2, np.array([True]), None)
     assert ckpt_order == 1

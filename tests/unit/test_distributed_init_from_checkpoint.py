@@ -102,7 +102,6 @@ class TestRestoreDistributedStateFromCheckpoint:
     def test_turbulence_comes_from_model_fields_not_state_slots(self, mesh_and_ops, tmp_path):
         """fail 半边：单机 SST checkpoint 的 U_sps[...,5:7] 是从未更新的历史槽位（初值），真正的湍流场
         在 k_field/omega_field 字段里。此前分布式 --init-from 从槽位换算 k/omega。"""
-        import types
 
         from autoflowcfd.core.mpi.distributed_checkpoint import restore_distributed_state_from_checkpoint
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
@@ -115,8 +114,7 @@ class TestRestoreDistributedStateFromCheckpoint:
         omega_true = 100.0 + rng.uniform(0, 10.0, size=(n_cells, n_sps))
         stale = np.full((n_cells, n_sps, 2), 1e-3)          # 槽位里留着的初值
         U7 = np.concatenate([U5, stale], axis=-1)
-        config = types.SimpleNamespace(mode="steady", backend="cpu", order=mesh.order, turbulence="sst_kw")
-        saved_path = CheckpointManager(config, output_dir=str(tmp_path)).save(
+        saved_path = CheckpointManager(output_dir=str(tmp_path)).save(
             U7.mean(axis=1), {"iterations": [7]}, 7, metadata={"input_file": "dummy.nas", "order": mesh.order},
             extra_fields={"U_sps": U7, "k_field": k_true, "omega_field": omega_true})
 

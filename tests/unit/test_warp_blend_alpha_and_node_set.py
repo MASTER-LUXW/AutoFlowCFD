@@ -35,11 +35,10 @@ def test_only_p4_and_above_nodes_change(p, changes):
 
 
 def _write(tmp_path, U_sps):
-    from types import SimpleNamespace
 
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
-    mgr = CheckpointManager(config=SimpleNamespace(), output_dir=str(tmp_path), quiet=True)
+    mgr = CheckpointManager(output_dir=str(tmp_path), quiet=True)
     # 与生产写入端一致：`conserved` 是单元平均 (n_cells, n_vars)，逐解点状态在 `U_sps`
     path = mgr.save(solution=U_sps.mean(axis=1), extra_fields={"U_sps": U_sps}, history={"iterations": [1], "residuals": {"rho": [1.0]},
                                                 "coefficients": {}, "cfl_history": [0.03]}, iteration=3)
@@ -53,11 +52,11 @@ def test_node_set_is_recorded_and_p3_without_it_is_refused(tmp_path):
     with h5py.File(path, "r") as f:
         saved = f["metadata"].attrs["tet_node_set"]
     assert (saved.decode() if isinstance(saved, bytes) else saved) == TET_NODE_SET
-    load_checkpoint(mgr, path)
+    load_checkpoint(path)
     with h5py.File(path, "r+") as f:
         del f["metadata"].attrs["tet_node_set"]
     with pytest.raises(Exception, match="四面体节点集"):
-        load_checkpoint(mgr, path)
+        load_checkpoint(path)
 
 
 def test_p3_checkpoint_without_node_set_still_loads(tmp_path):
@@ -67,4 +66,4 @@ def test_p3_checkpoint_without_node_set_still_loads(tmp_path):
     mgr, path = _write(tmp_path, np.ones((2, 40, 5)))           # P3
     with h5py.File(path, "r+") as f:
         del f["metadata"].attrs["tet_node_set"]
-    load_checkpoint(mgr, path)
+    load_checkpoint(path)

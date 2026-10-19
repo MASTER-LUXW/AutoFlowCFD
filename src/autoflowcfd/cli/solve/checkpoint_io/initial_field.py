@@ -13,7 +13,6 @@ checkpoint 阶数可以低于求解器阶数（平均流与湍流场精确延拓
 四个分支里各写了一遍。
 """
 
-from types import SimpleNamespace
 
 from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
 
@@ -25,7 +24,7 @@ def start_single_node_from_checkpoint(solver, checkpoint_path: str) -> None:
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     print("\n🔄 从 checkpoint 加载初场...")
-    _, _, ckpt_iter, ckpt_meta = CheckpointManager(config=SimpleNamespace(), output_dir=".").load(checkpoint_path)
+    _, _, ckpt_iter, ckpt_meta = CheckpointManager().load(checkpoint_path)
     with solver.edit_host_state() as host:
         _, ckpt_order = restore_state_from_checkpoint(checkpoint_path, host, ckpt_meta)
     start_from_checkpoint_field(solver, ckpt_order)

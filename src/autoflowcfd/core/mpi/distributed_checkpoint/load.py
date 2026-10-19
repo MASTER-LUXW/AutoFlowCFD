@@ -40,20 +40,13 @@ def distributed_load_checkpoint(
         (U_local, metadata, iteration): 本 rank 的 local cells 数据 + 元数据 + 迭代数
     """
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
-    from types import SimpleNamespace
 
     rank = get_rank()
     n_ranks = get_size()
 
     # 1. Root rank 加载 checkpoint
     if rank == 0:
-        config = SimpleNamespace(
-            mode="steady",
-            backend="cpu",
-            order=solver.mesh.n_points_1d,
-            turbulence="sst_kw",
-        )
-        manager = CheckpointManager(config)
+        manager = CheckpointManager()
         solution, history, iteration, metadata = manager.load(checkpoint_path)
 
         # 提取完整状态
@@ -203,12 +196,10 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> T
 def _read_initial_fields(checkpoint_path: str, solver, names: tuple, is_prism_global, model):
     """root 上读取 checkpoint、精确延拓到求解器阶数，返回 `(U_global, turb_global, 产生项渐变进度, iteration,
     ckpt_order)`。"""
-    from types import SimpleNamespace
 
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
-    config = SimpleNamespace(mode="steady", backend="cpu", order=solver.mesh.n_points_1d, turbulence="sst_kw")
-    _solution, _history, ckpt_iter, metadata = CheckpointManager(config).load(checkpoint_path)
+    _solution, _history, ckpt_iter, metadata = CheckpointManager().load(checkpoint_path)
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:
         raise ValueError(

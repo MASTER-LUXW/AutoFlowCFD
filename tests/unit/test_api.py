@@ -186,16 +186,9 @@ class TestWritesResults:
         writers["save"].assert_called_once_with(vm, "case_a")
         cb_args = writers["callback"].call_args
         assert cb_args.args == (25, "case_a", "out/volume_mesh.pkl", "sa", "cpu")
-        assert cb_args.kwargs["transient"] is False
         assert solver.solve.call_args.kwargs["checkpoint_callback"] is writers["callback"].return_value
         final = writers["final"].call_args
         assert final.args == (solver, "case_a", 12, "out/volume_mesh.pkl", "sa", "cpu")
-
-    def test_transient_outputs_are_marked_transient(self, writers):
-        with patch(_GATE), patch(_FACTORY, return_value=_solver()):
-            create_api().run_transient(MagicMock(), max_iter=3)
-        assert writers["callback"].call_args.kwargs["transient"] is True
-        assert writers["final"].call_args.kwargs["transient"] is True
 
     def test_saved_mesh_is_the_volume_mesh_pickle(self, tmp_path):
         import pickle
@@ -236,9 +229,9 @@ class TestResume:
         assert kw["dt"] == 2.5e-4 and kw["tol"] == 0.0
         assert api.solver is solver and api.volume_mesh is vm      # 续算后可直接导出
         cb = writers["resume_callback"].call_args
-        assert cb.args[1] == str(tmp_path) and cb.kwargs["iteration_offset"] == 150 and cb.kwargs["transient"] is True
+        assert cb.args[1] == str(tmp_path) and cb.kwargs["iteration_offset"] == 150
         final = writers["resume_final"].call_args
-        assert final.args[2] == 150 + 7 and final.kwargs["transient"] is True
+        assert final.args[2] == 150 + 7
 
     def test_steady_resume_options_reach_the_rebuild(self, tmp_path, writers):
         _, solver, rebuild, _ = self._resume(tmp_path, S.NEWTON_KRYLOV, {}, max_iter=5, time_scheme="rk3",

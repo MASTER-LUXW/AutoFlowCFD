@@ -13,7 +13,6 @@ turbulence_model/backend/自由来流条件），据此重新走一遍
 完整的 (n_local_cells,n_sps,n_vars) 状态。
 """
 
-from types import SimpleNamespace
 from typing import Optional
 
 import click
@@ -80,9 +79,7 @@ def rebuild_distributed_solver_from_checkpoint(
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-    _solution, _history, iteration, metadata = CheckpointManager(
-        config=SimpleNamespace(), output_dir="."
-    ).load(checkpoint_path)
+    _solution, _history, iteration, metadata = CheckpointManager().load(checkpoint_path)
 
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:

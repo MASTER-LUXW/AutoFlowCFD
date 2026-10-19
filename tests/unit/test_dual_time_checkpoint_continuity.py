@@ -41,7 +41,7 @@ def _solver():
 def _checkpoint(solver, tmp_path, iteration):
     path = write_checkpoint(solver, str(tmp_path), iteration, "mesh.nas", order=1, turbulence_model="none",
                             backend="cpu", quiet=True)
-    _sol, _hist, _it, meta = CheckpointManager(SimpleNamespace(), output_dir=str(tmp_path)).load(path)
+    _sol, _hist, _it, meta = CheckpointManager().load(path)
     return meta
 
 

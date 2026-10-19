@@ -83,20 +83,16 @@ class TestCheckpointManagerConstructionIsPure:
             "h5py", reason="CheckpointManager 需要 h5py")
         assert h5py is not None
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        from autoflowcfd.config.solver_config import SteadyConfig
 
-        mgr = CheckpointManager(SteadyConfig(), output_dir=str(empty_cwd),
-                                checkpoint_interval=10, quiet=True)
+        mgr = CheckpointManager(output_dir=str(empty_cwd), quiet=True)
         assert mgr.checkpoint_dir.name == "checkpoints"
         _assert_still_empty(empty_cwd, "CheckpointManager(...)")
 
     def test_dir_is_created_on_demand(self, empty_cwd):
         pytest.importorskip("h5py", reason="CheckpointManager 需要 h5py")
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        from autoflowcfd.config.solver_config import SteadyConfig
 
-        mgr = CheckpointManager(SteadyConfig(), output_dir=str(empty_cwd),
-                                checkpoint_interval=10, quiet=True)
+        mgr = CheckpointManager(output_dir=str(empty_cwd), quiet=True)
         mgr._ensure_checkpoint_dir()
         assert mgr.checkpoint_dir.is_dir(), "按需创建应当真的建出来"
 

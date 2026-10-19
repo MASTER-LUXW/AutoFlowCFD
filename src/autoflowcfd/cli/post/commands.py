@@ -178,12 +178,13 @@ def report(case: str, checkpoint: Optional[str], output: str) -> None:
         history, iteration, metadata = _load_history_only(case, checkpoint)
         analyzer = _replay_history(history)
 
-        # checkpoint 只存了原始求解器配置的哈希（见
-        # CheckpointManager._compute_config_hash），没有存配置本身——
-        # 如实汇报实际可用的内容，不去伪造一份完整的配置 dict。
+        # checkpoint 记录的求解参数（写出端逐项写进 metadata）
         config_summary = {
-            'config_hash': metadata.get('config_hash'),
-            'original_backend': metadata.get('original_backend'),
+            'backend': metadata.get('backend'),
+            'order': metadata.get('order'),
+            'target_order': metadata.get('target_order'),
+            'turbulence_model': metadata.get('turbulence_model'),
+            'time_scheme': metadata.get('time_scheme'),
             'timestamp': metadata.get('timestamp'),
         }
 

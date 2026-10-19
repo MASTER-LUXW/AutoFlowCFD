@@ -54,7 +54,6 @@ def write_checkpoint(
     order: int,
     turbulence_model: str,
     backend: str,
-    history: Optional[dict] = None,
     quiet: bool = False,
     surface_mesh: Optional[str] = None,
     target_order: Optional[int] = None,
@@ -108,23 +107,11 @@ def write_checkpoint(
     残差在 8.8e6 附近原地打转，不会向 P1 转变）。
 
     Returns:
-        checkpoint 文件路径；h5py 不可用等失败情形返回 None（不中止求解）
+        checkpoint 文件路径（写出失败直接抛出，见 `CheckpointManager.save`）
     """
-    from types import SimpleNamespace
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager, H5PY_AVAILABLE
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
-    if not H5PY_AVAILABLE:
-        if not quiet:
-            print("   ⚠️  h5py not available, skipping checkpoint write (final_state.pkl is still saved)")
-        return None
-
-    config = SimpleNamespace(
-        mode="steady" if history is None else "transient",
-        backend=backend,
-        order=order,
-        turbulence=turbulence_model,
-    )
-    manager = CheckpointManager(config, output_dir=output_dir, quiet=quiet)
+    manager = CheckpointManager(output_dir=output_dir, quiet=quiet)
 
     # 单元积分平均（求积权重 x det(J)，填充槽位权重 0）：供粗粒度外部消费方（低阶 VTK、瞬态统计）使用；
     # 内部消费方（续算、气动力）一律读下方逐解点的 `U_sps`。P0 每单元一个解点，平均就是它本身。
@@ -212,7 +199,7 @@ def write_checkpoint(
 
     path = manager.save(
         solution_cell_avg,
-        history or {"iterations": [iteration]},
+        {"iterations": [iteration]},
         iteration,
         metadata=metadata,
         extra_fields=extra_fields,
@@ -223,27 +210,27 @@ def write_checkpoint(
 
 
 def write_single_node_outputs(solver, output_dir: str, iteration: int, input_file: str, turbulence_model: str,
-                              backend: str, *, surface_mesh: Optional[str] = None, transient: bool = False,
-                              quiet: bool = False) -> Optional[str]:
+                              backend: str, *, surface_mesh: Optional[str] = None,
+                              quiet: bool = False) -> str:
     """单机求解器（CPU `FRSolver` / 单 GPU `GPUFRSolver`）的结果落盘：`final_state.pkl` + checkpoint。
 
     经 `solver.host_view()` 读状态（GPU 拷回主机）。阶数取 `solver.current_order`、目标阶数取
     `solver.order`（Order Continuation 爬到目标阶数之前两者不等，理由见 `write_checkpoint` 的
-    `target_order` 文档）。`transient=True` 时 checkpoint 记为瞬态模式。
+    `target_order` 文档）。稳态 / 瞬态由 checkpoint 记录的时间格式区分（`solve_path_metadata`）。
 
     Returns:
-        checkpoint 路径（h5py 不可用时 None）
+        checkpoint 路径
     """
     host = solver.host_view()
     save_results(host, output_dir, quiet=quiet)
     return write_checkpoint(
         host, output_dir, iteration, input_file, solver.current_order, turbulence_model, backend,
-        history={"iterations": [iteration]} if transient else None, quiet=quiet,
+        quiet=quiet,
         surface_mesh=surface_mesh, target_order=solver.order)
 
 
 def periodic_checkpoint_callback(interval: int, output_dir: str, input_file: str, turbulence_model: str,
-                                 backend: str, *, surface_mesh: Optional[str] = None, transient: bool = False,
+                                 backend: str, *, surface_mesh: Optional[str] = None,
                                  iteration_offset: int = 0):
     """单机 `solve()` 的中间 checkpoint 回调：每 `interval` 步落盘一次（`solve steady/transient` 与
     `solve resume` 共用；此前三处各写一份，`solve transient` 单机分支则完全没有——`--checkpoint-interval`
@@ -258,7 +245,7 @@ def periodic_checkpoint_callback(interval: int, output_dir: str, input_file: str
         iteration = iteration_offset + local_iteration
         try:
             write_single_node_outputs(solver, output_dir, iteration, input_file, turbulence_model, backend,
-                                      surface_mesh=surface_mesh, transient=transient, quiet=True)
+                                      surface_mesh=surface_mesh, quiet=True)
             print(f"   [Checkpoint] iter {iteration} saved")
         except Exception as e:
             print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")

@@ -12,7 +12,7 @@ from typing import Optional
 
 
 
-from autoflowcfd.core.mpi import is_root, get_rank, get_size
+from autoflowcfd.core.mpi import get_rank, get_size
 
 from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata, solve_path_metadata
@@ -34,7 +34,6 @@ def distributed_save_checkpoint(
     order: int,
     turbulence_model: str,
     backend: str,
-    history: Optional[dict] = None,
     target_order: Optional[int] = None,
     surface_mesh: Optional[str] = None,
 ) -> Optional[str]:
@@ -57,7 +56,6 @@ def distributed_save_checkpoint(
             from_checkpoint` 对应的恢复逻辑。
         turbulence_model: 湍流模型名
         backend: 后端名
-        history: 收敛历史（可选）
         target_order: Order Continuation 的最终目标阶数
             （`solver.order`）。None（默认，兼容旧调用方）时回退到
             `order` 本身——与单机 `write_checkpoint` 同一个"两个独立的量"
@@ -66,13 +64,7 @@ def distributed_save_checkpoint(
     Returns:
         checkpoint 文件路径（仅 root rank 有值）
     """
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager, H5PY_AVAILABLE
-    from types import SimpleNamespace
-
-    if not H5PY_AVAILABLE:
-        if is_root():
-            print("   ⚠️  h5py not available, skipping distributed checkpoint")
-        return None
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     rank = get_rank()
     n_ranks = get_size()
@@ -103,13 +95,7 @@ def distributed_save_checkpoint(
         return None
 
     # 2. Root rank 保存 checkpoint
-    config = SimpleNamespace(
-        mode="steady" if history is None else "transient",
-        backend=backend,
-        order=order,
-        turbulence=turbulence_model,
-    )
-    manager = CheckpointManager(config, output_dir=output_dir)
+    manager = CheckpointManager(output_dir=output_dir)
 
     solution_cell_avg = avg_global[:, 0, :]
     extra_fields = {"U_sps": U_global, **turb_fields}
@@ -145,7 +131,7 @@ def distributed_save_checkpoint(
 
     path = manager.save(
         solution_cell_avg,
-        history or {"iterations": [iteration]},
+        {"iterations": [iteration]},
         iteration,
         metadata=metadata,
         extra_fields=extra_fields,

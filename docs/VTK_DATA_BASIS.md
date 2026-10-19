@@ -75,9 +75,8 @@ result = api.run_steady(grid, backend="gpu")
 solution = result.solution
 
 # 方式2: 从检查点加载
-from autoflowcfd.core.checkpoint import CheckpointManager
-ckpt_manager = CheckpointManager("./checkpoints")
-solution, _, _, _ = ckpt_manager.load("checkpoint_500.h5")
+from autoflowcfd.core.utils.checkpoint import CheckpointManager
+solution, _, _, _ = CheckpointManager().load("results/checkpoints/checkpoint_iter_000500.h5")
 ```
 
 #### **数据结构（保守变量形式）**
@@ -284,13 +283,11 @@ print("💡 使用ParaView打开查看速度和压力分布")
 ### **从检查点恢复并导出**
 
 ```python
-from autoflowcfd.core.checkpoint import CheckpointManager
+from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
 # 加载检查点
-ckpt_manager = CheckpointManager("./checkpoints")
-solution, history, iteration, metadata = ckpt_manager.load(
-    "checkpoint_500.h5",
-    target_backend="cpu"
+solution, history, iteration, metadata = CheckpointManager().load(
+    "results/checkpoints/checkpoint_iter_000500.h5"
 )
 
 print(f"从迭代 {iteration} 恢复")

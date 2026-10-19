@@ -79,7 +79,7 @@ def transient_mean(case: str, grid: Optional[str], output: str,
             raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
 
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
+        ckpt_manager = CheckpointManager()
         stats = TransientStatistics(grid_data)
 
         # P-03 气动系数时间平均：懒构造一次 FRSolver（几何/gh ost provider
@@ -220,7 +220,7 @@ def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: floa
             raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
 
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
+        ckpt_manager = CheckpointManager()
         stats = TransientStatistics(grid_data)
 
         n_excluded = 0
@@ -317,7 +317,7 @@ def transient_psd(case: str, grid: Optional[str], output: str, probe_location: t
         probe_cell_idx = [int(np.argmin(np.linalg.norm(centroids - p, axis=1))) for p in probes]
 
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
+        ckpt_manager = CheckpointManager()
 
         times: List[float] = []
         pressures_per_ckpt: List[List[float]] = []

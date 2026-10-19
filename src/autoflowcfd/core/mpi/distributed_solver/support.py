@@ -16,7 +16,7 @@ class _DistributedSupportMixin:
     """halo 交换、阶数切换、传感器门控滤波、负载均衡报告"""
 
     def save_checkpoint_distributed(self, output_dir: str, iteration: int, input_file: str, order: int,
-                                    turbulence_model: str, history: dict = None, target_order: int = None,
+                                    turbulence_model: str, target_order: int = None,
                                     surface_mesh: str = None):
         """分布式 checkpoint 保存（集体操作，全部 rank 调用）；与多 GPU 同名同签名，CLI 对两个分布式后端
         用同一个回调（`cli/solve/distributed_checkpoint_io.py::distributed_periodic_checkpoint_callback`）。"""
@@ -24,7 +24,7 @@ class _DistributedSupportMixin:
 
         return distributed_save_checkpoint(
             self, output_dir, iteration, input_file, order, turbulence_model, "cpu",
-            history=history, target_order=target_order, surface_mesh=surface_mesh)
+            target_order=target_order, surface_mesh=surface_mesh)
 
     def local_cell_geometry(self):
         """本 rank local 单元（原生排列，与 `state.U[:n_local]` 同序）的 `(det_jacs (n_local, n_sps), 是否棱柱)`。

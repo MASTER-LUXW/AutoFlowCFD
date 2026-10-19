@@ -26,12 +26,7 @@ from autoflowcfd.core.utils.checkpoint_load import load_checkpoint
 
 
 def _manager(tmp_path):
-    """最小 CheckpointManager：`config` 只被 `_compute_config_hash` 读，
-    用 `getattr(..., 默认值)` 取，所以给一个空对象即可。"""
-    from types import SimpleNamespace
-
-    return CheckpointManager(config=SimpleNamespace(),
-                             output_dir=str(tmp_path), quiet=True)
+    return CheckpointManager(output_dir=str(tmp_path), quiet=True)
 
 
 def _write(tmp_path):
@@ -79,8 +74,7 @@ def test_basis_is_recorded(tmp_path):
 def test_same_basis_loads(tmp_path):
     """当前基下写的 checkpoint 正常加载（护栏不能把正常路径也堵掉）。"""
     path = _write(tmp_path)
-    mgr = _manager(tmp_path)
-    sol, _hist, it, _meta = load_checkpoint(mgr, path)
+    sol, _hist, it, _meta = load_checkpoint(path)
     assert it == 7
     assert sol.shape == (3, 5)
 
@@ -88,14 +82,12 @@ def test_same_basis_loads(tmp_path):
 def test_collapsed_labelled_checkpoint_is_refused(tmp_path):
     """**核心判据**：坍缩时代的 checkpoint 必须抛错，不是 warning。
 
-    与 `config_hash` 不一致刻意不同级别：配置哈希不一致只是"可能影响
-    结果"（例如 CFL 上限变了），棱柱基不一致是"这份数据的含义变了"。
+    棱柱基不一致是"这份数据的含义变了"，形状恰好相同、不会报形状不符，只能硬失败。
     """
     path = _write(tmp_path)
     _relabel(path, "collapsed")
-    mgr = _manager(tmp_path)
-    with pytest.raises(RuntimeError, match="棱柱基"):
-        load_checkpoint(mgr, path)
+    with pytest.raises(ValueError, match="棱柱基"):
+        load_checkpoint(path)
 
 
 def test_missing_attr_is_refused(tmp_path):
@@ -105,9 +97,8 @@ def test_missing_attr_is_refused(tmp_path):
     """
     path = _write(tmp_path)
     _relabel(path, None)
-    mgr = _manager(tmp_path)
-    with pytest.raises(RuntimeError, match="没有记录棱柱基"):
-        load_checkpoint(mgr, path)
+    with pytest.raises(ValueError, match="没有记录棱柱基"):
+        load_checkpoint(path)
 
 
 def test_refusal_does_not_advise_the_deleted_collapsed_mode(tmp_path):
@@ -115,12 +106,11 @@ def test_refusal_does_not_advise_the_deleted_collapsed_mode(tmp_path):
     那条建议在 2026-09-23 删除坍缩基之后是**错的建议**（照做只会撞上
     `resolve_prism_basis_mode` 的报错），而错的建议比没有建议更费时间。
     """
-    mgr = _manager(tmp_path)
     for label in ("collapsed", None):
         path = _write(tmp_path)
         _relabel(path, label)
-        with pytest.raises(RuntimeError) as exc:
-            load_checkpoint(mgr, path)
+        with pytest.raises(ValueError) as exc:
+            load_checkpoint(path)
         msg = str(exc.value)
         assert "AFCFD_PRISM_BASIS=collapsed" not in msg
         assert "从头开始" in msg

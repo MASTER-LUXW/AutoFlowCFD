@@ -1,22 +1,21 @@
-"""CheckpointManager.load 实现 (从 checkpoint.py 拆分)。
+"""checkpoint 读取（`CheckpointManager.load` 的实现）：布局校验、旧布局迁移、收敛历史。
 
-从 checkpoint.py 拆出来（该文件原有 488 行，超过 400 行硬性拆分
-阈值）：`load` 是文件里最长的单个方法（约 190 行），只依赖
-`manager._compute_config_hash()` 这一处实例状态，独立成模块函数、
-`CheckpointManager` 上保留同名薄委托方法是最干净的拆分点。纯代码
-搬移，不改变任何行为。
+布局版本（写出端 `checkpoint.py::CheckpointManager.save` 记录）：
+
+* 棱柱基 `prism_basis`：不是原生基的 checkpoint 硬失败（`_check_prism_basis`）；
+* 解点存储宽度 `sp_layout`：缺失即 2026-10-19 之前的 `(p+1)^3` 宽度，精确截到当前宽度（`_migrate_legacy_sp_width`）；
+* 四面体节点集 `tet_node_set`：P4+ 不一致硬失败（`_check_tet_node_set`）。
+
+2026-10-19（I-86）删除配置哈希比对与假的跨后端转换（见 `checkpoint.py` 模块文档）；读失败不再统一改包成
+RuntimeError，原始异常（布局不符的 ValueError、文件缺失的 FileNotFoundError……）直接抛给调用方。
 """
 
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
+import h5py
 import numpy as np
 from loguru import logger
-
-try:
-    import h5py
-except ImportError:
-    h5py = None
 
 
 def decode_attr(value):
@@ -134,189 +133,57 @@ def _check_tet_node_set(meta_group, solution, checkpoint_path) -> None:
             f"请从低阶 checkpoint 延拓（--init-from 低阶 checkpoint）或从头开始。")
 
 
-def load_checkpoint(
-    manager,
-    checkpoint_path: Union[str, Path],
-    target_backend: Optional[str] = None,
-) -> Tuple[np.ndarray, dict, int, dict]:
-    """从 HDF5 文件加载 checkpoint。
+#: 读取时不放进 metadata 的属性：2026-10-19 之前写的配置哈希（已删除，无意义）
+_NOT_METADATA = ("config_hash",)
 
-    Args:
-        manager: CheckpointManager 实例
-        checkpoint_path: checkpoint 文件路径
-        target_backend: 目标 backend（"cpu" 或 "gpu"）。
-                      若为 None，使用原始 backend。
+
+def load_checkpoint(checkpoint_path: Union[str, Path]) -> Tuple[np.ndarray, dict, int, dict]:
+    """读取 HDF5 checkpoint。
 
     Returns:
-        (solution, history, iteration, metadata) 元组
+        `(solution, history, iteration, metadata)`：solution 为单元积分平均 `(n_cells, n_vars)`；history 为收敛历史
+        字典；metadata 为写出端记录的全部属性（含 timestamp 与布局版本），逐解点 / 逐单元数据集在 `metadata['fields']`
 
     Raises:
-        FileNotFoundError: 找不到 checkpoint 文件
-        ValueError: checkpoint 格式无效
-
-    Example:
-        >>> solution, history, iteration, meta = load_checkpoint(manager, "checkpoint.h5")
-        >>> print(f"Resumed from iteration {iteration}")
+        FileNotFoundError: 文件不存在
+        ValueError: 布局不符（棱柱基、解点存储布局、P4+ 四面体节点集）
     """
     checkpoint_path = Path(checkpoint_path)
-
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+    logger.info(f"Loading checkpoint: {checkpoint_path}")
 
-    try:
-        logger.info(f"Loading checkpoint: {checkpoint_path}")
+    with h5py.File(checkpoint_path, 'r') as f:
+        meta_group = f["metadata"]
+        iteration = int(meta_group.attrs['iteration'])
+        metadata = {key: decode_attr(meta_group.attrs[key]) for key in meta_group.attrs.keys()
+                    if key not in _NOT_METADATA}
+        _check_prism_basis(meta_group, checkpoint_path)
 
-        with h5py.File(checkpoint_path, 'r') as f:
-            # === 加载元数据 ===
-            meta_group = f["metadata"]
-            iteration = int(meta_group.attrs['iteration'])
+        sol_group = f["solution"]
+        solution = sol_group["conserved"][:]
+        # 逐解点 / 逐单元数据集放在 metadata['fields'] 下，(solution, history, iteration, metadata) 的返回形状不变
+        extra_field_names = [k for k in sol_group.keys() if k != "conserved"]
+        if extra_field_names:
+            metadata['fields'] = {name: sol_group[name][:] for name in extra_field_names}
+        _migrate_legacy_sp_width(meta_group, metadata)
+        _check_tet_node_set(meta_group, metadata.get('fields', {}).get('U_sps'), checkpoint_path)
 
-            timestamp = decode_attr(meta_group.attrs['timestamp'])
-            original_backend = decode_attr(meta_group.attrs['backend'])
-            config_hash = decode_attr(meta_group.attrs['config_hash'])
+        conv_group = f["convergence/history"]
+        history = {}
+        if 'iterations' in conv_group:
+            history['iterations'] = conv_group['iterations'][:].tolist()
+        for group_name in ('residuals', 'coefficients'):
+            if group_name in conv_group:
+                history[group_name] = {name: conv_group[group_name][name][:].tolist()
+                                       for name in conv_group[group_name].keys()}
+        if 'cfl_history' in conv_group:
+            history['cfl_history'] = conv_group['cfl_history'][:].tolist()
+        if 'statistics' in f:
+            stats_group = f['statistics']
+            history['statistics'] = {name: stats_group[name][:] for name in stats_group.keys()}
+            history['statistics'].update({name: stats_group.attrs[name] for name in stats_group.attrs.keys()})
 
-            metadata = {
-                'iteration': iteration,
-                'timestamp': timestamp,
-                'original_backend': original_backend,
-                'config_hash': config_hash,
-            }
-
-            # 提取额外的元数据
-            for key in meta_group.attrs.keys():
-                if key not in ['iteration', 'timestamp', 'backend', 'config_hash']:
-                    metadata[key] = decode_attr(meta_group.attrs[key])
-
-            # === 校验棱柱基（硬失败，不是警告）===
-            _check_prism_basis(meta_group, checkpoint_path)
-
-            # === 校验配置 ===
-            current_hash = manager._compute_config_hash()
-            if config_hash != current_hash:
-                logger.warning(
-                    f"⚠ Configuration mismatch!\n"
-                    f"  Checkpoint config: {config_hash[:16]}...\n"
-                    f"  Current config:    {current_hash[:16]}...\n"
-                    f"  This may cause incorrect results."
-                )
-
-            # === 加载解 ===
-            sol_group = f["solution"]
-            solution = sol_group["conserved"][:]
-
-            # 随守恒解一起保存的任何额外逐单元字段（见 save() 的
-            # extra_fields 参数，例如 'mu_t'）——放在
-            # metadata['fields'] 下而不是作为第 5 个返回值，这样现有
-            # 的 (solution, history, iteration, metadata) 调用方不受
-            # 影响；对于在加上这个功能之前写入的 checkpoint，或者
-            # save() 从未传过 extra_fields 的情况，这里就不存在。
-            extra_field_names = [k for k in sol_group.keys() if k != "conserved"]
-            if extra_field_names:
-                metadata['fields'] = {name: sol_group[name][:] for name in extra_field_names}
-            _migrate_legacy_sp_width(meta_group, metadata)
-            _check_tet_node_set(meta_group, metadata.get('fields', {}).get('U_sps'), checkpoint_path)
-
-            # 如需要则做 backend 转换
-            if target_backend and target_backend != original_backend:
-                logger.info(
-                    f"Converting solution from {original_backend} to {target_backend}"
-                )
-
-                # 实现 CPU↔GPU 转换
-                try:
-                    if target_backend.lower() == 'gpu':
-                        # CPU -> GPU: 将numpy数组转移到GPU
-                        try:
-                            import cupy as cp
-                            # 转换守恒变量
-                            if 'conserved' in sol_group:
-                                U_cpu = sol_group['conserved'][:]
-                                U_gpu = cp.asarray(U_cpu)
-                                metadata['conserved'] = U_gpu
-                                logger.info("Successfully converted solution from CPU to GPU")
-
-                            # 转换其他场变量
-                            for field_name in extra_field_names:
-                                if field_name in sol_group:
-                                    field_cpu = sol_group[field_name][:]
-                                    field_gpu = cp.asarray(field_cpu)
-                                    metadata[field_name] = field_gpu
-
-                        except ImportError:
-                            logger.warning("CuPy not available, keeping solution on CPU")
-
-                    elif target_backend.lower() == 'cpu':
-                        # GPU -> CPU: 将GPU数组转移回CPU
-                        try:
-                            import cupy as cp
-                            # 如果数据已经在GPU上（以cupy数组形式存储）
-                            if isinstance(metadata.get('conserved'), cp.ndarray):
-                                metadata['conserved'] = cp.asnumpy(metadata['conserved'])
-                                logger.info("Successfully converted solution from GPU to CPU")
-
-                            # 转换其他场变量
-                            for field_name in extra_field_names:
-                                if field_name in metadata and isinstance(metadata[field_name], cp.ndarray):
-                                    metadata[field_name] = cp.asnumpy(metadata[field_name])
-
-                        except ImportError:
-                            logger.warning("CuPy not available, assuming data is already on CPU")
-
-                    else:
-                        logger.warning(f"Unknown target backend: {target_backend}")
-
-                except Exception as e:
-                    logger.error(f"Backend conversion failed: {e}")
-                    logger.warning("Solution will remain on original backend")
-
-            # === 加载收敛历史 ===
-            conv_group = f["convergence/history"]
-            history = {}
-
-            # 迭代数
-            if 'iterations' in conv_group:
-                history['iterations'] = conv_group['iterations'][:].tolist()
-
-            # 残差
-            if 'residuals' in conv_group:
-                history['residuals'] = {}
-                for eq_name in conv_group['residuals'].keys():
-                    history['residuals'][eq_name] = (
-                        conv_group['residuals'][eq_name][:].tolist()
-                    )
-
-            # 系数
-            if 'coefficients' in conv_group:
-                history['coefficients'] = {}
-                for coef_name in conv_group['coefficients'].keys():
-                    history['coefficients'][coef_name] = (
-                        conv_group['coefficients'][coef_name][:].tolist()
-                    )
-
-            # CFL 历史
-            if 'cfl_history' in conv_group:
-                history['cfl_history'] = conv_group['cfl_history'][:].tolist()
-
-            # === 加载统计量（瞬态模式）===
-            if 'statistics' in f:
-                history['statistics'] = {}
-                stats_group = f['statistics']
-                for stat_name in stats_group.keys():
-                    history['statistics'][stat_name] = stats_group[stat_name][:]
-                for attr_name in stats_group.attrs.keys():
-                    history['statistics'][attr_name] = stats_group.attrs[attr_name]
-
-        logger.success(
-            f"✓ Checkpoint loaded: {checkpoint_path}\n"
-            f"  Iteration: {iteration}\n"
-            f"  Solution shape: {solution.shape}\n"
-            f"  History entries: {len(history.get('iterations', []))}"
-        )
-
-        return solution, history, iteration, metadata
-
-    except Exception as e:
-        logger.error(f"Failed to load checkpoint: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        raise RuntimeError(f"Checkpoint loading failed: {e}")
+    logger.info(f"Checkpoint loaded: {checkpoint_path} (iteration {iteration}, solution {solution.shape}, "
+                f"{len(history.get('iterations', []))} history entries)")
+    return solution, history, iteration, metadata

@@ -49,7 +49,7 @@ def _resolved_config(config_cls, config, fields: dict):
 class _APISolveMixin:
     """求解入口：稳态、瞬态、从 checkpoint 续算"""
 
-    def _solve_and_write(self, solver, volume_mesh, config, *, transient: bool, **solve_kwargs):
+    def _solve_and_write(self, solver, volume_mesh, config, **solve_kwargs):
         """求解并按配置的 `output_dir` / `checkpoint_interval` 落盘（中间 checkpoint + 收尾结果），与 CLI 同一组写出函数。
 
         2026-10-19 以前 API 从不写结果：配置里的 `output_dir`、`checkpoint_interval` 被静默忽略，长程计算中断即丢失。
@@ -61,10 +61,10 @@ class _APISolveMixin:
         names = (turbulence_solver_name(config.turbulence), config.backend.value)
         result = solver.solve(
             checkpoint_callback=periodic_checkpoint_callback(config.checkpoint_interval, config.output_dir, input_file,
-                                                             *names, transient=transient),
+                                                             *names),
             phase_max_iter=config.phase_max_iter, residual_drop_threshold=config.residual_drop_threshold,
             **solve_kwargs)
-        write_single_node_outputs(solver, config.output_dir, result.iterations, input_file, *names, transient=transient)
+        write_single_node_outputs(solver, config.output_dir, result.iterations, input_file, *names)
         return result
 
     def _build_solver(self, volume_mesh: VolumeMeshData, config, *, aoa_deg: float, aos_deg: float,
@@ -129,7 +129,7 @@ class _APISolveMixin:
         solver = self._build_solver(volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg,
                                     skip_quality_check=skip_quality_check, reference_area=reference_area,
                                     low_mach_precond=config.low_mach_precond)
-        result = self._solve_and_write(solver, volume_mesh, config, transient=False,
+        result = self._solve_and_write(solver, volume_mesh, config,
                                        max_iter=config.max_iter, dt=STEADY_DT, tol=config.convergence_tol)
         logger.info(f"Simulation complete: {result.iterations} iterations, converged={result.converged}")
         return result
@@ -157,7 +157,7 @@ class _APISolveMixin:
             from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
 
             start_single_node_from_checkpoint(solver, config.init_from_checkpoint)
-        result = self._solve_and_write(solver, volume_mesh, config, transient=True,
+        result = self._solve_and_write(solver, volume_mesh, config,
                                        max_iter=config.n_steps, dt=config.dt, tol=0.0)
         logger.info(f"Transient simulation complete: {result.iterations} steps")
         return result

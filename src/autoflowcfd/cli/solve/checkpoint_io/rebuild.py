@@ -167,15 +167,12 @@ def rebuild_from_checkpoint(
         click.ClickException: checkpoint 缺少 U_sps 字段、缺少 input_file，
             或状态形状与重建求解器不匹配
     """
-    from types import SimpleNamespace
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
     from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 
-    _solution, _history, iteration, metadata = CheckpointManager(
-        config=SimpleNamespace(), output_dir="."
-    ).load(checkpoint_path)
+    _solution, _history, iteration, metadata = CheckpointManager().load(checkpoint_path)
 
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:

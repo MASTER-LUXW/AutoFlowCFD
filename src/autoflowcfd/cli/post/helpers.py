@@ -123,8 +123,8 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
 
     case_path = Path(case)
     ckpt_file = _locate_checkpoint(case_path, checkpoint)
-    ckpt_manager = CheckpointManager(str(ckpt_file.parent))
-    solution_data, history, iteration, metadata = ckpt_manager.load(ckpt_file, target_backend=None)
+    ckpt_manager = CheckpointManager()
+    solution_data, history, iteration, metadata = ckpt_manager.load(ckpt_file)
     logger.info(f"✓ Solution loaded from iteration {iteration}")
 
     grid_data = _load_grid_data(_locate_grid_file(case_path, grid, metadata))
@@ -148,8 +148,8 @@ def _load_history_only(case: str, checkpoint: Optional[str] = None) -> Tuple[dic
 
     case_path = Path(case)
     ckpt_file = _locate_checkpoint(case_path, checkpoint)
-    ckpt_manager = CheckpointManager(str(ckpt_file.parent))
-    _solution, history, iteration, metadata = ckpt_manager.load(ckpt_file, target_backend=None)
+    ckpt_manager = CheckpointManager()
+    _solution, history, iteration, metadata = ckpt_manager.load(ckpt_file)
     return history, iteration, metadata
 
 

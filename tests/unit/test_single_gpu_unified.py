@@ -88,7 +88,6 @@ def test_gpu_dual_time_inner_iterations_reach_the_integrator():
 
 @pytest.mark.parametrize("turb", ["SST", "SA"])
 def test_checkpoint_round_trip_through_the_host_view(tmp_path, turb):
-    from types import SimpleNamespace
 
     from autoflowcfd.cli.solve.checkpoint_io import restore_solver_state_from_fields, write_single_node_outputs
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
@@ -96,7 +95,7 @@ def test_checkpoint_round_trip_through_the_host_view(tmp_path, turb):
     a = _gpu_solver(turb)
     a.solve(max_iter=3, dt=1e-3, tol=0.0)
     path = write_single_node_outputs(a, str(tmp_path), 3, "dummy.nas", turb.lower(), "gpu", quiet=True)
-    _, _, _, meta = CheckpointManager(config=SimpleNamespace(), output_dir=".").load(path)
+    _, _, _, meta = CheckpointManager().load(path)
     fields = meta["fields"]
     names = a.turb_model_gpu.TRANSPORTED_FIELDS
     assert all(n in fields for n in names) and "nu_t" in fields and "tau_accum" in fields
@@ -224,5 +223,4 @@ def test_transient_single_node_writes_periodic_checkpoints(tmp_path):
     assert build.call_args.args[0] == "gpu"
     ref.assert_called_once()
     assert [c.args[2] for c in periodic_write.call_args_list] == [3, 6]
-    assert all(c.kwargs["transient"] for c in periodic_write.call_args_list)
-    assert final_write.call_args.kwargs["transient"] is True
+    final_write.assert_called_once()

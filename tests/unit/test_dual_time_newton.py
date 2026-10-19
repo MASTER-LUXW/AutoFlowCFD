@@ -281,7 +281,7 @@ def test_resumed_run_solves_the_same_bdf_equations_including_turbulence(tmp_path
     first.solve(max_iter=2, dt=dt, tol=0.0)
     path = write_checkpoint(first, str(tmp_path), 2, "mesh.nas", order=1, turbulence_model=model.lower(),
                             backend="cpu", quiet=True)
-    meta = CheckpointManager(SimpleNamespace(), output_dir=str(tmp_path)).load(path)[3]
+    meta = CheckpointManager().load(path)[3]
     n_fields = len(first.turb_model.TRANSPORTED_FIELDS)
     assert meta["fields"][TURBULENCE_PREVIOUS_FIELD].shape == first.state.U.shape[:2] + (n_fields,)
 

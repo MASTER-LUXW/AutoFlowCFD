@@ -1,8 +1,7 @@
 """单机续算的"求解 + 落盘"（CLI `solve resume` 单机分支与 Python API `resume_simulation` 共用的唯一实现）。
 
 输出写在 checkpoint 所在算例目录（`<output_dir>/checkpoints/xxx.h5` 的 `<output_dir>`）；中间 checkpoint 的文件名用续算
-起点的绝对迭代数作偏移，不会覆盖续算之前已有的同名文件。瞬态（dual-time）续算的中间与收尾写出都记为瞬态——
-2026-10-19 以前 CLI 只有中间 checkpoint 带了这个标志，收尾的 `final_state.pkl` 被记成稳态；API 续算则完全不落盘。
+起点的绝对迭代数作偏移，不会覆盖续算之前已有的同名文件。2026-10-19 以前 API 续算完全不落盘。
 """
 
 from pathlib import Path
@@ -22,18 +21,15 @@ def continue_single_node(solver, iteration: int, metadata: dict, checkpoint_file
         dt: 已解析的时间步长（`core/utils/checkpoint_time.py::resume_time_step`）
         tol: 相对收敛容差；时间精确的续算按 `run_tolerance` 跑满全部步
     """
-    from autoflowcfd.core.utils.checkpoint_time import is_dual_time, run_tolerance
+    from autoflowcfd.core.utils.checkpoint_time import run_tolerance
 
     output_dir = str(Path(checkpoint_file).parent.parent)
     names = (metadata["input_file"], metadata["turbulence_model"], metadata["backend"])
     surface_mesh = metadata.get("surface_mesh")
-    transient = is_dual_time(solver)
     result = solver.solve(
         max_iter=max_iter, dt=dt, tol=run_tolerance(tol, solver),
         checkpoint_callback=periodic_checkpoint_callback(checkpoint_interval, output_dir, *names,
-                                                         surface_mesh=surface_mesh, iteration_offset=iteration,
-                                                         transient=transient),
+                                                         surface_mesh=surface_mesh, iteration_offset=iteration),
         phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
-    write_single_node_outputs(solver, output_dir, iteration + result.iterations, *names, surface_mesh=surface_mesh,
-                              transient=transient)
+    write_single_node_outputs(solver, output_dir, iteration + result.iterations, *names, surface_mesh=surface_mesh)
     return result
