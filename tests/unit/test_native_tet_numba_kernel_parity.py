@@ -19,6 +19,7 @@ import numpy as np
 from autoflowcfd.fr.face_flux_points.kernel import build_fp_newton_parallel
 from autoflowcfd.fr.face_flux_points import build_cross_interp, native_tet_face_points_physical
 from autoflowcfd.fr.face_flux_points.basis_inverses import build_basis_inverses
+from autoflowcfd.fr.native_padding import sps_width
 from autoflowcfd.fr.face_flux_points.native_geometry_nb import native_prism_cap_points_nb
 from autoflowcfd.fr.quadrature_points import gauss_legendre
 
@@ -46,7 +47,7 @@ def _run_kernel_single_face(
     b = build_basis_inverses(order)
 
     result = build_fp_newton_parallel(
-        1, n_prism, n1d, n_fp,
+        1, n_prism, n1d, n_fp, sps_width(order),
         np.ascontiguousarray(sps_1d.astype(np.float64)),
         np.array([False]),
         np.array([owner_cell], dtype=np.int32), np.array([owner_code], dtype=np.int32),

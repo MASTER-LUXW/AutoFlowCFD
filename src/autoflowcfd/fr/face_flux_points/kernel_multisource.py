@@ -40,7 +40,7 @@ def build_ms_interp_parallel(
     ms_ow_sec_cell, ms_ow_sec_cube_face, ms_ow_extra_idx,
     nb_mask, ow_mask,
     ms_nb_mixed, ms_ow_mixed,
-    n_prism, n1d, n_fp, sps_1d,
+    n_prism, n1d, n_fp, n_sps, sps_1d,
     owner_cell_arr, owner_cube_face_arr,
     neighbor_cell_arr, neighbor_cube_face_arr,
     area_arr, face_translation_arr,
@@ -89,7 +89,6 @@ def build_ms_interp_parallel(
     Newton 被跳过）对应行保持初始化的全零，调用方必须只在非 mixed 索引上
     读取。
     """
-    n_sps = n1d * n1d * n1d
 
     # ---- Neighbor multi-source ----
     for idx in prange(n_ms_nb):

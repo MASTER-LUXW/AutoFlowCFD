@@ -125,7 +125,7 @@ class TestGpuSolverInterpolateToNewOrder:
     def test_p1_to_p2_upgrade_interpolates_uniform_field_exactly(self):
         solver = _make_solver(1, turb_model="sst")
         assert solver.current_order == 1
-        assert solver.mesh.n_sps_per_cell == 8
+        assert solver.mesh.n_sps_per_cell == 6
 
         rho_inf, vel_inf, p_inf = 1.225, 33.33, 101325.0
         gamma = 1.4
@@ -134,8 +134,8 @@ class TestGpuSolverInterpolateToNewOrder:
         solver._interpolate_to_new_order(2)
 
         assert solver.current_order == 2
-        assert solver.mesh.n_sps_per_cell == 27
-        assert solver.U_gpu.shape == (solver.mesh.n_cells, 27, 5)
+        assert solver.mesh.n_sps_per_cell == 18
+        assert solver.U_gpu.shape == (solver.mesh.n_cells, 18, 5)
         # 均匀自由流场：升阶插值必须精确保持（不是近似）。
         np.testing.assert_allclose(solver.U_gpu[:, :, 0], rho_inf)
         np.testing.assert_allclose(solver.U_gpu[:, :, 1], rho_inf * vel_inf)
@@ -143,15 +143,15 @@ class TestGpuSolverInterpolateToNewOrder:
         assert np.all(np.isfinite(solver.U_gpu))
 
         # 湍流场同样精确保持均匀初值，形状正确随阶数切换。
-        assert solver.turb_model_gpu.k_field.shape == (solver.mesh.n_cells, 27)
-        assert solver.turb_model_gpu.omega_field.shape == (solver.mesh.n_cells, 27)
+        assert solver.turb_model_gpu.k_field.shape == (solver.mesh.n_cells, 18)
+        assert solver.turb_model_gpu.omega_field.shape == (solver.mesh.n_cells, 18)
         assert np.all(np.isfinite(solver.turb_model_gpu.k_field))
         assert np.all(np.isfinite(solver.turb_model_gpu.omega_field))
 
         # boundary_ghost_provider/mesh_data/ops 都必须随阶数重建
         # （新阶数 SEM/FP 几何形状），不是残留旧阶数的对象。
-        assert solver.ops.n_sps == 27
-        assert solver.mesh_data['det_jacs'].shape[1] == 27
+        assert solver.ops.n_sps == 18
+        assert solver.mesh_data['det_jacs'].shape[1] == 18
 
     def test_reset_to_p0_when_downgrading(self):
         """降阶（reset 场景，供 run_order_continuation 在

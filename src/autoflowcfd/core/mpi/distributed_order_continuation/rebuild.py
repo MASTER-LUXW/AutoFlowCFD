@@ -208,7 +208,9 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
         return
 
     n_local = solver.partition.n_local_cells
-    new_n_sps = (target_p + 1) ** 3
+    from autoflowcfd.fr.native_padding import sps_width
+
+    new_n_sps = sps_width(target_p)
 
     if target_p > old_order:
         new_local_U = _interp_state_and_turbulence_local(

@@ -33,7 +33,7 @@ def prolongate_checkpoint_fields(fields: dict, target_order: int, cell_is_prism,
     Raises:
         ValueError: 单元数不符，或 checkpoint 阶数高于目标阶数
     """
-    from autoflowcfd.fr.native_padding import order_from_n_sps
+    from autoflowcfd.fr.native_padding import order_from_n_sps, sps_width
     from autoflowcfd.fr.order_interp import apply_order_interp
 
     U = np.asarray(fields["U_sps"])
@@ -50,7 +50,7 @@ def prolongate_checkpoint_fields(fields: dict, target_order: int, cell_is_prism,
 
     def lift(field):
         field = np.asarray(field)
-        out = np.empty((field.shape[0], (target_order + 1) ** 3) + field.shape[2:])
+        out = np.empty((field.shape[0], sps_width(target_order)) + field.shape[2:])
         for mask, n_prism in ((is_prism, None), (~is_prism, 0)):
             if mask.any():
                 part = field[mask]

@@ -46,7 +46,7 @@ from autoflowcfd.core.fr_operators.volume_contract import (
 from autoflowcfd.fr.native_tet.overintegration import (
     build_native_tet_overintegration_operators,
 )
-from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
+from autoflowcfd.fr.native_padding import pad_native_matrix_to_global, sps_width
 from autoflowcfd.fr.operators import generate_fr_operators
 
 
@@ -107,7 +107,7 @@ class TestOperatorShapes:
         ops = generate_fr_operators(order)
         oo = _over_order_tet(order)
         nf = _n_fine_native(oo)
-        ns = (order + 1) ** 3
+        ns = sps_width(order)
 
         assert ops.overint_order_tet == oo, (
             f"P{order}: 四面体过积分阶数 {ops.overint_order_tet} != {oo}")
@@ -144,7 +144,7 @@ class TestEquivalenceWithPaddedVersion:
     @pytest.mark.parametrize("order", [1, 2])
     def test_full_chain_matches(self, order):
         oo = _over_order(order)
-        n_sps_g = (order + 1) ** 3
+        n_sps_g = sps_width(order)
         # 填充目标宽度 = 棱柱布局宽度（两条棱柱基不同，见 `_n_fine_prism`）
         n_fine_g = _n_fine_prism(order)
         ref_f, c2f_n, Df_n, f2c_n = build_native_tet_overintegration_operators(

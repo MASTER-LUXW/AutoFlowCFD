@@ -40,7 +40,7 @@ Lagrange 张量积）：
 
 ## 零填充槽位的处理
 
-全局 SP 宽度恒为 `(p+1)^3`（坍缩棱柱的自由度数），原生基只用前
+全局 SP 宽度为 `sps_width(p)`（原生棱柱的自由度数），四面体只用前
 `real_sps_per_cell` 个槽位（见 `fr/native_padding.py`）：
 
 * **源**的填充列必须取零 —— 那些槽位的值是"初始化时复制真实 SP #0"
@@ -55,6 +55,8 @@ from functools import lru_cache
 from typing import Tuple
 
 import numpy as np
+
+from .native_padding import sps_width
 
 __all__ = ["build_order_interp_matrices", "apply_order_interp"]
 
@@ -86,7 +88,7 @@ def _native_prism_interp(old_order: int, new_order: int) -> np.ndarray:
     v_old_at_new, _, _, _ = build_native_prism_vandermonde(
         old_order, nodes_new)
     w_real = np.linalg.solve(v_old_at_old.T, v_old_at_new.T).T
-    return _embed_padded(w_real, (new_order + 1) ** 3, (old_order + 1) ** 3)
+    return _embed_padded(w_real, sps_width(new_order), sps_width(old_order))
 
 
 def _native_tet_interp(old_order: int, new_order: int) -> np.ndarray:
@@ -99,7 +101,7 @@ def _native_tet_interp(old_order: int, new_order: int) -> np.ndarray:
     v_old_at_old = _native_modal_vandermonde(nodes_old, modes_old)
     v_old_at_new = _native_modal_vandermonde(nodes_new, modes_old)
     w_real = np.linalg.solve(v_old_at_old.T, v_old_at_new.T).T
-    return _embed_padded(w_real, (new_order + 1) ** 3, (old_order + 1) ** 3)
+    return _embed_padded(w_real, sps_width(new_order), sps_width(old_order))
 
 
 @lru_cache(maxsize=None)
@@ -115,7 +117,7 @@ def _build_cached(old_order: int, new_order: int) -> Tuple[np.ndarray, np.ndarra
 
 def build_order_interp_matrices(old_order: int, new_order: int
                                 ) -> Tuple[np.ndarray, np.ndarray]:
-    """返回 `(W_prism, W_tet)`，形状均为 `((new+1)^3, (old+1)^3)`。
+    """返回 `(W_prism, W_tet)`，形状均为 `(sps_width(new), sps_width(old))`。
 
     `W @ f_old` 给出解在新阶数解点上的取值（全局填充布局，见模块文档）。
     两个矩阵是**只读**的缓存对象，调用方不要就地修改。
@@ -140,11 +142,11 @@ def apply_order_interp(field: np.ndarray, n_prism_cells: int,
         old_order / new_order: 源与目标阶数
 
     Returns:
-        同维度、SP 轴换成 `(new_order+1)^3` 的新数组。
+        同维度、SP 轴换成 `sps_width(new_order)` 的新数组。
     """
     field = np.asarray(field)
     w_prism, w_tet = build_order_interp_matrices(old_order, new_order)
-    n_old = (old_order + 1) ** 3
+    n_old = sps_width(old_order)
     if field.shape[1] != n_old:
         raise ValueError(
             f"场的 SP 轴长度 {field.shape[1]} 与 old_order={old_order} 的"
@@ -157,7 +159,7 @@ def apply_order_interp(field: np.ndarray, n_prism_cells: int,
             f"n_prism_cells={n_prism} 超出 [0, n_cells={n_cells}]")
 
     spec = "ab,cb->ca" if field.ndim == 2 else "ab,cbv->cav"
-    out_shape = (n_cells, (new_order + 1) ** 3) + field.shape[2:]
+    out_shape = (n_cells, sps_width(new_order)) + field.shape[2:]
     out = np.empty(out_shape, dtype=np.float64)
     if n_prism > 0:
         out[:n_prism] = np.einsum(spec, w_prism, field[:n_prism])

@@ -11,6 +11,7 @@ from autoflowcfd.fr import (
     gauss_legendre,
     gauss_lobatto,
 )
+from autoflowcfd.fr.native_padding import sps_width
 from autoflowcfd.core.fr_solver.state import FRState  # 导入 S-01 核心类
 
 
@@ -62,8 +63,8 @@ class TestFROperators:
         n = order + 1  # SPs数量
 
         # 检查形状
-        assert ops.n_sps == n**3
-        assert ops.D_native_prism_padded.shape == (n**3, n**3, 3)
+        assert ops.n_sps == sps_width(order)
+        assert ops.D_native_prism_padded.shape == (sps_width(order), sps_width(order), 3)
 
     def test_generate_operators_p2(self):
         """测试P=2阶算子生成"""
@@ -73,8 +74,8 @@ class TestFROperators:
         n = order + 1
 
         # 检查形状
-        assert ops.n_sps == n**3
-        assert ops.D_native_prism_padded.shape == (n**3, n**3, 3)
+        assert ops.n_sps == sps_width(order)
+        assert ops.D_native_prism_padded.shape == (sps_width(order), sps_width(order), 3)
 
 
 class TestFRState:

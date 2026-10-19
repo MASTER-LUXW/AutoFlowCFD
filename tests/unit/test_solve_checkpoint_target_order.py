@@ -125,7 +125,7 @@ class TestRebuildRestoresSolverOrderToTarget:
         （恒有 order==target_order）行为，而不是因为缺键崩溃。
         """
         write_checkpoint(
-            _fake_solver(n_cells=2, n_sps=27, order=2), str(tmp_path), 100, "volume.nas",
+            _fake_solver(n_cells=2, n_sps=18, order=2), str(tmp_path), 100, "volume.nas",
             order=2, turbulence_model="sst", backend="cpu", quiet=True,
         )
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_000100.h5"
@@ -135,7 +135,7 @@ class TestRebuildRestoresSolverOrderToTarget:
             del f["metadata"].attrs["target_order"]
 
         def _fake_frsolver(**kwargs):
-            return _fake_solver(n_cells=2, n_sps=27, order=kwargs["order"])
+            return _fake_solver(n_cells=2, n_sps=18, order=kwargs["order"])
 
         with patch(
             "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",

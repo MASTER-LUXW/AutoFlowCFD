@@ -74,17 +74,57 @@ def _check_prism_basis(meta_group, checkpoint_path) -> None:
             f"跨基 resume 会静默重解释同一份数组、给出看不出异常的错解。只能在原生基下从头开始。")
 
 
+#: 解点存储宽度的版本：每单元 `sps_width(order)` 个槽位（`fr/native_padding.py`）。没有这个属性的 checkpoint
+#: 是 2026-10-19 之前写的，宽度为 `(order+1)^3`。
+SP_LAYOUT = "native_dof"
+
+
+def _migrate_legacy_sp_width(meta_group, metadata: dict) -> None:
+    """把 2026-10-19 之前写的 checkpoint 的逐解点字段从 `(p+1)^3` 宽度截到 `sps_width(p)`（就地改 metadata）。
+
+    旧布局里每单元前 `real_sps_per_cell` 个槽位是自由度、其余是填充，新宽度 `sps_width(p)` 不小于两类单元的
+    真实自由度数，所以截掉的只有填充槽位，截取是精确的。SP 轴是第 1 轴、长度等于旧宽度的数组都是逐解点字段
+    （U_sps、输运湍流场、nu_t、dual-time 上一时间层）；单元平均与 `tau_accum` 是一维，`conserved` 是单元平均
+    `(n_cells, n_vars)`，都不动。旧宽度 8/27/64 与任何 `sps_width` 都不相等，判别无歧义。
+    """
+    from autoflowcfd.fr.native_padding import sps_width
+
+    if 'sp_layout' in meta_group.attrs:
+        saved = decode_attr(meta_group.attrs['sp_layout'])
+        if saved != SP_LAYOUT:
+            raise ValueError(f"checkpoint 的解点存储布局 {saved!r} 不认识（当前为 {SP_LAYOUT!r}）")
+        return
+    fields = metadata.get('fields')
+    if not fields or 'U_sps' not in fields:
+        return
+    legacy = int(np.asarray(fields['U_sps']).shape[1])
+    order = round(legacy ** (1.0 / 3.0)) - 1
+    if order < 0 or (order + 1) ** 3 != legacy:
+        raise ValueError(f"旧布局 checkpoint 的 U_sps 每单元解点数 {legacy} 不是 (p+1)^3，无法迁移")
+    width = sps_width(order)
+    if width == legacy:  # P0
+        return
+    for name, arr in fields.items():
+        if arr.ndim >= 2 and arr.shape[1] == legacy:
+            fields[name] = np.ascontiguousarray(arr[:, :width])
+    if 'n_sps_per_cell' in metadata:
+        metadata['n_sps_per_cell'] = width
+    logger.info(f"旧布局 checkpoint（P{order}，每单元 {legacy} 个解点槽位）已截为 {width} 个（只去掉填充槽位）")
+
+
 def _check_tet_node_set(meta_group, solution, checkpoint_path) -> None:
     """P4 及以上：checkpoint 的四面体节点集必须与当前一致，否则硬失败。
 
     2026-10-17 改正了 Warp & Blend 优化参数的下标（`fr/warp_blend_nodes.py`），P4+ 四面体解点位置随之改变；
     节点值在旧、新节点上含义不同，形状恰好相同、不会报错，续算会静默重解释成错解。P1~P3 的节点没有变，
-    不检查。阶数由解的每单元解点数推出（`(p+1)^3`）。
+    不检查。阶数由逐解点状态 `U_sps` 的每单元解点数推出（宽度迁移之后调用）。
+
+    2026-10-19 修复：此前对 `conserved` 判断，而那是单元平均 `(n_cells, n_vars)`、恒为二维，这道检查从未生效。
     """
     from autoflowcfd.fr.native_padding import order_from_n_sps
     from autoflowcfd.fr.warp_blend_nodes import TET_NODE_SET
 
-    if solution.ndim != 3 or order_from_n_sps(int(solution.shape[1])) < 4:
+    if solution is None or solution.ndim != 3 or order_from_n_sps(int(solution.shape[1])) < 4:
         return
     saved = decode_attr(meta_group.attrs['tet_node_set']) if 'tet_node_set' in meta_group.attrs else None
     if saved != TET_NODE_SET:
@@ -163,7 +203,6 @@ def load_checkpoint(
             # === 加载解 ===
             sol_group = f["solution"]
             solution = sol_group["conserved"][:]
-            _check_tet_node_set(meta_group, solution, checkpoint_path)
 
             # 随守恒解一起保存的任何额外逐单元字段（见 save() 的
             # extra_fields 参数，例如 'mu_t'）——放在
@@ -174,6 +213,8 @@ def load_checkpoint(
             extra_field_names = [k for k in sol_group.keys() if k != "conserved"]
             if extra_field_names:
                 metadata['fields'] = {name: sol_group[name][:] for name in extra_field_names}
+            _migrate_legacy_sp_width(meta_group, metadata)
+            _check_tet_node_set(meta_group, metadata.get('fields', {}).get('U_sps'), checkpoint_path)
 
             # 如需要则做 backend 转换
             if target_backend and target_backend != original_backend:

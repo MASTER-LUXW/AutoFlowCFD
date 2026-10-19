@@ -285,7 +285,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     n_faces = fc.n_faces
     n1d = mesh.n_points_1d
     n_fp = n1d * n1d
-    n_sps = n1d ** 3
+    n_sps = mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
 
     # 原始 cube face 编码：`fc` 本身就带着，native 分支据此判断（四面体

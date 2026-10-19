@@ -16,13 +16,13 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.output import (
     CHECKPOINT_PREFIX, turbulence_cell_means, turbulence_fields_from_checkpoint,
 )
-from autoflowcfd.fr.native_padding import real_sps_per_cell, sp_integration_weights
+from autoflowcfd.fr.native_padding import sp_integration_weights, sps_width
 
 
 def _sst(n_prism, n_tet, order, rng):
     from autoflowcfd.core.turbulence.sst import SSTModelFR
 
-    n_sps = (order + 1) ** 3 if n_prism else real_sps_per_cell(order)[1]
+    n_sps = sps_width(order)
     m = SSTModelFR(n_prism + n_tet, n_sps, k_inf=1e-3, omega_inf=10.0)
     m.k_field = rng.uniform(0.1, 1.0, m.k_field.shape)
     m.omega_field = rng.uniform(100.0, 200.0, m.omega_field.shape)
@@ -53,16 +53,16 @@ def test_sst_outputs_follow_the_model_fields():
 def test_sa_outputs_nu_tilde_and_nut():
     from autoflowcfd.core.turbulence.sa import SAModel
 
-    m = SAModel(4, 8, nu_ref=1.5e-5, viscosity_ratio=3.0)
-    m.nu_tilde_field = np.arange(32, dtype=float).reshape(4, 8) * 1e-6
-    W = _weights(4, 4, 1, 8)
+    m = SAModel(4, 6, nu_ref=1.5e-5, viscosity_ratio=3.0)
+    m.nu_tilde_field = np.arange(24, dtype=float).reshape(4, 6) * 1e-6
+    W = _weights(4, 4, 1, 6)
     out = turbulence_cell_means(m, W)
     assert set(out) == {"nu_tilde", "nut"}
     np.testing.assert_allclose(out["nu_tilde"], _integral_mean(m.nu_tilde_field, W), rtol=1e-14)
 
 
 def test_laminar_has_no_turbulence_outputs():
-    assert turbulence_cell_means(None, np.ones((3, 8))) == {}
+    assert turbulence_cell_means(None, np.ones((3, 6))) == {}
 
 
 def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
@@ -75,12 +75,12 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
 
     rng = np.random.default_rng(1)
     m = _sst(2, 0, 1, rng)
-    U = np.ones((2, 8, 7))
+    U = np.ones((2, 6, 7))
     U[..., 5] = -123.0      # 死槽位：此前 VTK 的 k 读的就是它
     U[..., 6] = -456.0
-    state = SimpleNamespace(U=U, Q=U.copy(), n_sps=8, n_vars=7)
+    state = SimpleNamespace(U=U, Q=U.copy(), n_sps=6, n_vars=7)
     solver = SimpleNamespace(state=state, order=1, current_order=1, turb_model=m,
-                             mesh=SimpleNamespace(n_prism_cells=2, jacobians={"det_jacs": np.ones(16)}),
+                             mesh=SimpleNamespace(n_prism_cells=2, jacobians={"det_jacs": np.ones(12)}),
                              freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, wall_treatment="resolved", low_mach_precond=True,
                              time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3))
     init_production_ramp(solver, TimeIntegrationScheme.SSP_RK3)     # 真实求解器在构造时设置
@@ -91,7 +91,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     turb = turbulence_fields_from_checkpoint(fields)
     assert set(turb) == {"k", "omega", "nut"}
     assert all(f"{CHECKPOINT_PREFIX}{k}" in fields for k in turb)
-    W = _weights(2, 2, 1, 8)
+    W = _weights(2, 2, 1, 6)
     np.testing.assert_allclose(turb["k"], _integral_mean(m.k_field, W), rtol=1e-14)
     np.testing.assert_allclose(turb["omega"], _integral_mean(m.omega_field, W), rtol=1e-14)
 
@@ -129,7 +129,7 @@ def test_cell_average_is_the_integral_mean_of_a_quadratic_on_a_tet(order):
     verts = np.array([[0.1, 0.0, 0.0], [1.3, 0.2, 0.0], [0.2, 0.9, 0.1], [0.4, 0.3, 1.1]])
     ref, _ = build_native_tet_operators(order)
     x = map_native_tet_to_physical(ref, verts)[:, 0]
-    n_sps = (order + 1) ** 3
+    n_sps = sps_width(order)
     f = np.zeros((1, n_sps))
     f[0, :len(x)] = x ** 2
     f[0, len(x):] = 1e6                       # 填充槽位的值不得进入平均

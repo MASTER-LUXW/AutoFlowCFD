@@ -20,6 +20,7 @@ from .geometry import (
     FaceFluxPointGeometry,
 )
 from .basis_inverses import build_basis_inverses
+from ..native_padding import sps_width
 from .face_metrics import build_face_metrics
 from .grouping import _second_half_frac, build_face_groups
 from .data import _KernelFaceData, _classify_half, prism_quad_local_idx
@@ -138,7 +139,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
          else np.empty((0, 4), dtype=np.int64)).ravel().astype(np.int32)
     )
     node_coords = np.ascontiguousarray(mesh._node_coords.astype(np.float64))
-    n_sps = n1d ** 3
+    n_sps = sps_width(n1d - 1)
     _require_native_face_codes(face_conn)
     binv = build_basis_inverses(n1d - 1)
     v_sps_inv_native = binv.v_sps_inv_native
@@ -163,7 +164,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _geom_oa, _geom_os, _geom_na, _geom_ns,
         _geom_aw, _geom_n,
     ) = kernel(
-        n_faces, n_prism, n1d, n_fp,
+        n_faces, n_prism, n1d, n_fp, n_sps,
         np.ascontiguousarray(sps_1d.astype(np.float64)),
         np.ascontiguousarray(face_conn.is_boundary),
         np.ascontiguousarray(face_conn.owner_cell.astype(np.int32)),
@@ -363,7 +364,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _ms_ow_sec_cell, _ms_ow_sec_cf, _ms_ow_extra_idx,
             nb_mask, ow_mask,
             _ms_nb_mixed, _ms_ow_mixed,
-            n_prism, n1d, n_fp, np.ascontiguousarray(sps_1d.astype(np.float64)),
+            n_prism, n1d, n_fp, n_sps, np.ascontiguousarray(sps_1d.astype(np.float64)),
             np.ascontiguousarray(face_conn.owner_cell.astype(np.int32)),
             np.ascontiguousarray(face_conn.owner_cube_face.astype(np.int32)),
             np.ascontiguousarray(face_conn.neighbor_cell.astype(np.int32)),

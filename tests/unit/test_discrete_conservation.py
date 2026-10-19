@@ -85,7 +85,7 @@ def test_every_k_combo_is_cell_conservative(order):
     for K, w in ((ops.overint_lifted_div_tet, build_native_tet_sp_weights(order)),
                  (ops.overint_lifted_div_prism, build_native_prism_sp_weights(order))):
         n = len(w)
-        assert np.abs(K[:, n:]).max() == 0.0
+        assert not np.any(K[:, n:])          # 填充列为零（棱柱用满宽度、没有填充列）
         col = np.einsum("s,csqm->cqm", w, K[:, :n])
         assert np.abs(col).max() < 1e-12 * np.abs(K).max()
         assert np.abs(K - K[:1]).max() > 1e-6 * np.abs(K).max()      # 组合之间确实不同

@@ -409,7 +409,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         redistribute_multi_gpu_fully_distributed_for_new_order(solver, 1)
 
         assert solver.current_order == 1
-        new_n_sps = (1 + 1) ** 3
+        new_n_sps = 6                               # sps_width(1)
         assert solver.U_gpu.shape == (n_local, new_n_sps, 5)
         # 均匀自由流场：升阶插值必须精确保持（Lagrange 延拓的定义性质）。
         np.testing.assert_allclose(solver.U_gpu[:, :, 0], rho_inf)

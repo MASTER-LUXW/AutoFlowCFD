@@ -45,7 +45,7 @@ def _own_face_points_nb(n1d, code, slot, is_prism, axis, side, nodes, sps_1d):
 
 @njit(parallel=True, cache=True)
 def build_fp_newton_parallel(
-    n_faces, n_prism, n1d, n_fp, sps_1d,
+    n_faces, n_prism, n1d, n_fp, n_sps, sps_1d,
     is_boundary, owner_cell, owner_cube_face,
     neighbor_cell, neighbor_cube_face,
     area, normal, face_translation,
@@ -87,7 +87,6 @@ def build_fp_newton_parallel(
     `owner_slot`/`neighbor_slot`：两侧三角形面的坍缩顶点槽位（`fr/triangle_apex.py`），
     决定各侧自己的通量点集与顺序（`_own_face_points_nb`）。
     """
-    n_sps = n1d * n1d * n1d
     nb_fc = np.zeros((n_faces, n_fp, 2))
     # nb_resid/ow_resid：逐 Flux Point 残差（不在这里归约成单一标量），
     # 供 face_flux_points/merge.py 对多源棱柱四边形侧面按对角线半区

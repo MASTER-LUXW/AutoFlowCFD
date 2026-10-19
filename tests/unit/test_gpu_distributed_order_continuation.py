@@ -141,7 +141,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         )
 
         class _FakeOps:
-            n_sps = 8
+            n_sps = 6
         import autoflowcfd.fr.operators as ops_mod
         patch_pkg_attr(monkeypatch, ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
 
@@ -154,8 +154,8 @@ class TestGpuInterpolateToNewOrderCoreMath:
         gpu_interpolate_to_new_order(solver, 1)
 
         assert solver.current_order == 1
-        # 均匀自由流场：升阶插值必须精确保持（新 n_sps=8，见 _FakeOps）。
-        assert solver.U_gpu.shape == (n_local, 8, 5)
+        # 均匀自由流场：升阶插值必须精确保持（新 n_sps=6，见 _FakeOps）。
+        assert solver.U_gpu.shape == (n_local, 6, 5)
         np.testing.assert_allclose(solver.U_gpu[:, :, 0], rho_inf)
         np.testing.assert_allclose(solver.U_gpu[:, :, 1], rho_inf * vel_inf)
         np.testing.assert_allclose(solver.U_gpu[:, :, 4], rho_inf * e)
@@ -179,7 +179,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.device_id = 0
         solver.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
         solver.partition = types.SimpleNamespace(n_local_cells=n_local, local_faces=np.array([], dtype=np.int64))
-        solver.U_gpu = np.random.default_rng(1).uniform(1, 2, size=(n_local, 27, 5))
+        solver.U_gpu = np.random.default_rng(1).uniform(1, 2, size=(n_local, 18, 5))
         solver.turb_model_gpu = None
         solver.ddes_model_gpu = None
         solver.sgs_model_gpu = None
@@ -243,7 +243,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
     这里仍然用 shim 构造只是与本文件既有风格保持一致）。
     """
 
-    def _make_solver_stub(self, k_value, omega_value, n_cells=8, n_sps=8,
+    def _make_solver_stub(self, k_value, omega_value, n_cells=8, n_sps=6,
                            k_max=555.44, omega_max=1e6):
         from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
         from autoflowcfd.core.turbulence.sst import SSTModelFR
@@ -292,7 +292,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
         from autoflowcfd.core.mpi.distributed_order_continuation import (
             _reset_turbulence_if_resumed_field_exploded,
         )
-        solver = self._make_solver_stub(k_value=1.0, omega_value=100.0, n_cells=100, n_sps=8)
+        solver = self._make_solver_stub(k_value=1.0, omega_value=100.0, n_cells=100, n_sps=6)
 
         flat = solver.turb_model_gpu.k_field.reshape(-1)
         n_clamp = max(1, int(0.05 * flat.size))

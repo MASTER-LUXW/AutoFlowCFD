@@ -56,6 +56,7 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
     nu_ref = MU / RHO
     nu_tilde = nu_ref * (3.0 + rng.uniform(-1.0, 6.0, size=(n_cells, n_sps)))
     nu_tilde[rng.random(nu_tilde.shape) < 0.15] *= -0.4              # SA-neg 负支
+    nu_tilde[:, 1] = -0.4 * np.abs(nu_tilde[:, 1])                    # 每个单元至少一个负值点，不依赖随机抽样
     d_wall = rng.uniform(0.01, 0.08, size=(n_cells, n_sps))
     d_wall[:, 0] = 0.0                                                # 壁面解点
 

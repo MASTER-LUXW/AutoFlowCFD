@@ -75,7 +75,9 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
             freestream_conservative_state,
         )
 
-        new_n_sps = (target_p + 1) ** 3
+        from autoflowcfd.fr.native_padding import sps_width
+
+        new_n_sps = sps_width(target_p)
         # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
         # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
         # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。

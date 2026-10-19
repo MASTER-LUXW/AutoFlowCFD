@@ -30,9 +30,11 @@ def generate_fr_operators(order: int) -> FROperators:
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
     """
-    # 解点存储宽度：原生基（四面体/棱柱）的真实自由度一律零填充到这个宽度（`fr/native_padding.py` 的"零填充块
-    # 对角"不变量）。定义在最前面是因为棱柱原生过积分算子（下一段）也要用它填充粗网格轴。
-    n_sps_global = (order + 1) ** 3
+    # 解点存储宽度（`fr/native_padding.py::sps_width`，原生棱柱真实自由度）：四面体的真实自由度零填充到这个
+    # 宽度（"零填充块对角"不变量）。定义在最前面是因为棱柱原生过积分算子（下一段）也要用它填充粗网格轴。
+    from autoflowcfd.fr.native_padding import sps_width
+
+    n_sps_global = sps_width(order)
 
     # 6. 棱柱体积项去混叠算子（order==0 时 P0 走独立有限体积路径，不
     # 需要）。四面体那份见下方 3e。

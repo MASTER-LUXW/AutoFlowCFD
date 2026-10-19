@@ -219,7 +219,7 @@ def _native_alpha_beta_to_rst_nb(excluded_vertex, free):
 def _native_interp_matrix_nb(rst, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps):
     """给定一批目标点的 native 原生参考坐标 (r,s,t)，构造它们相对某个
     native 四面体体积节点的插值矩阵，形状 (n_pts, n_sps)——`n_sps` 是
-    全局统一宽度（`n1d**3`），按 Part6/7"补位对齐"原则只写前
+    全局统一宽度（`sps_width(order)`），按 Part6/7"补位对齐"原则只写前
     `n_native=len(native_mode_i)` 列，其余列保持零（`np.zeros` 初始化）。
     `build_fp_newton_parallel`（主 kernel）与 `build_ms_interp_parallel`
     （multi-source kernel）的 native 分支共用同一份实现，避免重复。"""

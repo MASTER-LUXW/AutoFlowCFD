@@ -159,9 +159,11 @@ class CheckpointManager:
                 # 所以跨基 resume 会**静默重解释**同一份数组，给出一个
                 # 看不出异常的错解。校验在 `checkpoint_load.py` 里，
                 # 不匹配直接硬失败。
-                from autoflowcfd.core.utils.checkpoint_load import PRISM_BASIS
+                from autoflowcfd.core.utils.checkpoint_load import PRISM_BASIS, SP_LAYOUT
 
                 meta_group.attrs['prism_basis'] = np.string_(PRISM_BASIS)
+                # 解点存储宽度的版本（`checkpoint_load.py::_migrate_legacy_sp_width`）
+                meta_group.attrs['sp_layout'] = np.string_(SP_LAYOUT)
                 # 四面体节点集版本（P3+ 节点随它变，`checkpoint_load.py::_check_tet_node_set`）
                 meta_group.attrs['tet_node_set'] = np.string_(TET_NODE_SET)
 

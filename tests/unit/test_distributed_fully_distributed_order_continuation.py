@@ -101,7 +101,7 @@ class TestFullyDistributedOrderContinuation:
         assert np.isfinite(result.final_residual)
         assert result.iterations > 0
         n_local = solver.partition.n_local_cells
-        assert solver.state.U.shape[1] == 27  # P2: (2+1)^3
+        assert solver.state.U.shape[1] == 18  # P2: sps_width(2)
         assert np.all(np.isfinite(solver.state.U[:n_local]))
 
     def test_no_root_context_fails_fast_when_order_continuation_needed(self):
@@ -129,8 +129,8 @@ class TestFullyDistributedOrderContinuation:
 
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells
-        assert solver.turb_model.k_field.shape == (n_local, 27)
-        assert solver.turb_model.omega_field.shape == (n_local, 27)
+        assert solver.turb_model.k_field.shape == (n_local, 18)
+        assert solver.turb_model.omega_field.shape == (n_local, 18)
         assert np.isfinite(result.final_residual)
         assert np.all(np.isfinite(solver.turb_model.k_field))
         assert np.all(np.isfinite(solver.turb_model.omega_field))

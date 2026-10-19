@@ -34,13 +34,14 @@ def test_only_p4_and_above_nodes_change(p, changes):
     assert bool(np.abs(new - old).max() > 1e-6) == changes
 
 
-def _write(tmp_path, solution):
+def _write(tmp_path, U_sps):
     from types import SimpleNamespace
 
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     mgr = CheckpointManager(config=SimpleNamespace(), output_dir=str(tmp_path), quiet=True)
-    path = mgr.save(solution=solution, history={"iterations": [1], "residuals": {"rho": [1.0]},
+    # 与生产写入端一致：`conserved` 是单元平均 (n_cells, n_vars)，逐解点状态在 `U_sps`
+    path = mgr.save(solution=U_sps.mean(axis=1), extra_fields={"U_sps": U_sps}, history={"iterations": [1], "residuals": {"rho": [1.0]},
                                                 "coefficients": {}, "cfl_history": [0.03]}, iteration=3)
     return mgr, path
 
@@ -48,7 +49,7 @@ def _write(tmp_path, solution):
 def test_node_set_is_recorded_and_p3_without_it_is_refused(tmp_path):
     from autoflowcfd.core.utils.checkpoint_load import load_checkpoint
 
-    mgr, path = _write(tmp_path, np.ones((2, 125, 5)))          # P4：(4+1)^3 个解点
+    mgr, path = _write(tmp_path, np.ones((2, 75, 5)))           # P4：sps_width(4) 个解点
     with h5py.File(path, "r") as f:
         saved = f["metadata"].attrs["tet_node_set"]
     assert (saved.decode() if isinstance(saved, bytes) else saved) == TET_NODE_SET
@@ -63,7 +64,7 @@ def test_p3_checkpoint_without_node_set_still_loads(tmp_path):
     """P1~P3 的节点没有变：旧 checkpoint 照常加载。"""
     from autoflowcfd.core.utils.checkpoint_load import load_checkpoint
 
-    mgr, path = _write(tmp_path, np.ones((2, 64, 5)))
+    mgr, path = _write(tmp_path, np.ones((2, 40, 5)))           # P3
     with h5py.File(path, "r+") as f:
         del f["metadata"].attrs["tet_node_set"]
     load_checkpoint(mgr, path)

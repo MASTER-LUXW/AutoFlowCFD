@@ -96,7 +96,7 @@ class TestDistributedOrderContinuationDispatch:
         # 新阶数（P2，27 SPs/cell）下的 state 形状必须与 ops 一致——
         # 阶数切换后 partition/dist_flat_face/state 没有正确重建的话，
         # 这里会是旧阶数的形状。
-        assert solver.state.U.shape[1] == ops.n_sps == 27
+        assert solver.state.U.shape[1] == ops.n_sps == 18
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
     @pytest.mark.parametrize("enabled", [True, False])
@@ -236,8 +236,8 @@ class TestDistributedOrderContinuationWithTurbulence:
 
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells
-        assert solver.turb_model.k_field.shape == (n_local, 27)
-        assert solver.turb_model.omega_field.shape == (n_local, 27)
+        assert solver.turb_model.k_field.shape == (n_local, 18)
+        assert solver.turb_model.omega_field.shape == (n_local, 18)
         assert np.isfinite(result.final_residual)
         assert np.all(np.isfinite(solver.turb_model.k_field))
         assert np.all(np.isfinite(solver.turb_model.omega_field))
@@ -254,7 +254,7 @@ class TestDistributedOrderContinuationWithTurbulence:
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells
         nt = solver.turb_model.nu_tilde_field
-        assert nt.shape == (n_local, 27)
+        assert nt.shape == (n_local, 18)
         assert np.isfinite(result.final_residual) and np.all(np.isfinite(nt))
         wall = np.asarray(local_part(solver, solver.wall_distance_compact)) == 0.0
         assert wall.any() and np.all(nt[wall] == 0.0)

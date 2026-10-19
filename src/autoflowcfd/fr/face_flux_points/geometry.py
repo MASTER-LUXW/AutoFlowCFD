@@ -25,6 +25,7 @@ from typing import Dict, List
 import numpy as np
 
 from .locate import newton_locate_on_face
+from ..native_padding import sps_width
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
     NATIVE_PRISM_FACE_CODE_RANGE,
@@ -220,7 +221,7 @@ def build_cross_interp(
     translation: np.ndarray = None,
 ) -> tuple:
     """求 target_cell 的解在给定 source_phys 目标物理点集上的取值算子，
-    形状 (n_source_pts, n_sps)（n_sps=n1d**3，与 coarse 网格全局体积
+    形状 (n_source_pts, n_sps)（n_sps=sps_width(order)，与 coarse 网格全局体积
     数组宽度一致——native 四面体的有效自由度更少，按 Part6/7"补位对齐"
     原则，插值矩阵多出的列恒为零，不改变全局数组统一形状这个既有假设，
     见下方 native 分支）。target_cell 的固定面由 `target_face_code`
@@ -269,7 +270,7 @@ def build_cross_interp(
         interp_native = lu_solve(lu_piv, V_target.T).T  # (n_pts, n_native_sps)
 
         n_pts = source_phys.shape[0]
-        n_sps = n1d**3
+        n_sps = sps_width(n1d - 1)
         interp = np.zeros((n_pts, n_sps))
         interp[:, : interp_native.shape[1]] = interp_native
         return interp, final_resid
@@ -283,7 +284,7 @@ def build_cross_interp(
 
     other_axes = [a for a in range(3) if a != target_axis]
     n_pts = source_phys.shape[0]
-    n_sps = n1d**3
+    n_sps = sps_width(n1d - 1)
     order = n1d - 1
 
     abc = np.zeros((n_pts, 3))

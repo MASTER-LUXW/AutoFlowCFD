@@ -107,7 +107,7 @@ class TestGpuDistributedCheckpointRoundtrip:
     save->load 往返后 U 数据逐位不变。
     """
 
-    def _build_fake_solver(self, tmp_path, n_cells=4, n_sps=8, n_vars=5):
+    def _build_fake_solver(self, tmp_path, n_cells=4, n_sps=6, n_vars=5):
         from autoflowcfd.core.mpi.partition import build_distributed_partition
         from autoflowcfd.core.mpi.distributed_state import DistributedFRState
         from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh

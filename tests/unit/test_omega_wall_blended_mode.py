@@ -49,7 +49,7 @@ def test_cpu_wall_target_follows_the_model_treatment(treatment):
     """CPU 壁面目标值按湍流模型的 `wall_treatment` 取公式（auto 用贴壁单元 k 的真实自由度均值）。"""
     from autoflowcfd.core.turbulence.transport.omega_wall import _omega_wall_formula
 
-    solver = types.SimpleNamespace(turb_model=types.SimpleNamespace(k_field=np.full((1, 8), 0.1),
+    solver = types.SimpleNamespace(turb_model=types.SimpleNamespace(k_field=np.full((1, 6), 0.1),
                                                                     wall_treatment=treatment),
                                    mesh=types.SimpleNamespace(n_prism_cells=1))
     got = _omega_wall_formula(solver, np.zeros(1, dtype=np.int64), np.full(1, 1.5e-5), np.full(1, 2e-4), BETA1)[0]

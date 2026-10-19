@@ -47,17 +47,14 @@ from tests.unit._module_source import module_source
 class TestRealDofReductionHelpers:
     """两个归约辅助本身。
 
-    构造方式刻意让"错"与"对"相差**三个**能手算、互不相同的值：真实槽位
-    全 1、填充槽位全 50。order=1 下 `n_sps=8`，两类单元的真实前缀分别是
-    棱柱 6（原生棱柱 `(p+1)^2(p+2)/2`）与四面体 4（`(p+1)(p+2)(p+3)/6`）：
+    构造方式：前 4 个槽位全 1、其余全 50。order=1 下存储宽度 `n_sps=sps_width(1)=6`，两类单元的真实前缀
+    分别是棱柱 6（原生棱柱 `(p+1)^2(p+2)/2`，用满宽度）与四面体 4（`(p+1)(p+2)(p+3)/6`）：
 
-      - 不屏蔽任何填充（错）：`(4*1 + 4*50)/8 = 25.5`
-      - 按棱柱前缀屏蔽：`(4*1 + 2*50)/6 = 17.3333...`
-      - 按四面体前缀屏蔽：`1.0`
+      - 棱柱（整行）：`(4*1 + 2*50)/6 = 17.3333...`
+      - 四面体（前 4 个）：`1.0`
 
-    三个值两两不同，所以"把棱柱当成四面体切"与"棱柱不切"这两种错法都会
-    被判据抓住 —— 这一点在两类单元的真实前缀都小于 `n_sps` 之后才成立
-    （坍缩棱柱基时代棱柱用满 8 个槽位，那时前两个值重合）。
+    两个值不同，所以"把棱柱当成四面体切"与"四面体不切"两种错法都会被判据抓住。2026-10-19 之前宽度是
+    `(p+1)^3=8`，棱柱也有填充槽位（I-29 改为真实自由度数）。
 
     坍缩棱柱基已于 2026-09-23 删除，所以本类不再分档；原先那个只在原生档
     下跑的对偶类 `TestNativePrismIsAlsoMasked` 已并入这里（同一语义两处
@@ -65,7 +62,9 @@ class TestRealDofReductionHelpers:
     """
 
     def _field(self, n_cells=4, order=1):
-        n_sps = (order + 1) ** 3
+        from autoflowcfd.fr.native_padding import sps_width
+
+        n_sps = sps_width(order)
         n_native = native_tet_n_real_sps(order)
         f = np.empty((n_cells, n_sps))
         f[:, :n_native] = 1.0
@@ -78,20 +77,19 @@ class TestRealDofReductionHelpers:
     def test_real_prefix_per_cell_type(self):
         """`real_sps_per_cell` 是"哪些槽位是真的"的唯一判据来源。
 
-        两类单元的真实前缀**都**小于 `n_sps=(p+1)^3`，这正是下面几条手算
-        判据能分辨三种错法的前提（并入自原 `TestNativePrismIsAlsoMasked`）。
+        棱柱前缀等于存储宽度 `sps_width(p)`、四面体前缀小于它（并入自原 `TestNativePrismIsAlsoMasked`）。
         """
-        from autoflowcfd.fr.native_padding import real_sps_per_cell
+        from autoflowcfd.fr.native_padding import real_sps_per_cell, sps_width
 
         for p, expect in ((1, (6, 4)), (2, (18, 10)), (3, (40, 20))):
             assert real_sps_per_cell(p) == expect, (
                 f"P{p} 的 (棱柱, 四面体) 真实自由度数应当是 {expect}")
-            assert max(expect) < (p + 1) ** 3
+            assert expect[0] == sps_width(p) > expect[1]
 
     def test_per_cell_mean_masks_each_cell_types_padding(self):
         f = self._field()
-        # 未修正的写法：两类单元都被污染成同一个 25.5
-        np.testing.assert_allclose(f.mean(axis=1), 25.5)
+        # 未屏蔽的写法：四面体也被污染成棱柱的 17.33
+        np.testing.assert_allclose(f.mean(axis=1), (4 * 1.0 + 2 * 50.0) / 6.0)
         got = reduce_per_cell_over_real_sps(f, 2, 1, 'mean')
         # 前两个是棱柱（只看前 6 个：4 个 1 + 2 个 50），
         # 后两个是四面体（只看前 4 个，得 1.0）
@@ -114,31 +112,18 @@ class TestRealDofReductionHelpers:
             reduce_rows_over_real_sps(f, row_is_prism, 1, 'mean'),
             [prism_expect, 1.0, prism_expect, 1.0])
 
-    def test_all_prism_slices_exactly_the_prism_prefix(self):
-        """`n_prism == n_cells` 时必须**逐位等于**对棱柱前缀的朴素归约。
-
-        这条判据在 2026-09-23 之前写的是"逐位等于全宽度朴素归约"，那只对
-        已删除的坍缩棱柱基成立（棱柱用满 `(p+1)^3`）。原生棱柱有填充槽位，
-        所以正确的对照是 `field[:, :n_prism_real]` —— 仍然是逐位判据
-        （不引入任何多余的算术），只是前缀换对了。
-        """
-        from autoflowcfd.fr.native_padding import real_sps_per_cell
-
-        n_prism_real, _ = real_sps_per_cell(1)
+    def test_all_prism_is_the_plain_full_width_reduction(self):
+        """`n_prism == n_cells` 时必须**逐位等于**全宽度朴素归约：棱柱用满存储宽度（I-29），不引入任何多余算术。"""
         rng = np.random.default_rng(0)
-        f = rng.normal(size=(6, 8))
+        f = rng.normal(size=(6, 6))
         for how in ('mean', 'min', 'max', 'sum'):
-            masked = reduce_per_cell_over_real_sps(f, 6, 1, how)
             np.testing.assert_array_equal(
-                masked, getattr(np, how)(f[:, :n_prism_real], axis=1))
-            # 负对照：全宽度归约**不**应当等于它，否则填充没被屏蔽
-            assert not np.allclose(masked, getattr(np, how)(f, axis=1)), (
-                f"how={how}：全宽度归约与屏蔽后归约相等，判据失去分辨力")
+                reduce_per_cell_over_real_sps(f, 6, 1, how), getattr(np, how)(f, axis=1))
 
     @pytest.mark.parametrize("how", ["median", "prod", ""])
     def test_rejects_unsupported_reduction(self, how):
         with pytest.raises(ValueError):
-            reduce_per_cell_over_real_sps(np.zeros((2, 8)), 1, 1, how)
+            reduce_per_cell_over_real_sps(np.zeros((2, 6)), 1, 1, how)
 
     def test_rejects_order_inconsistent_with_n_sps(self):
         """阶数与数组 SP 轴不自洽必须显式报错。
@@ -149,7 +134,7 @@ class TestRealDofReductionHelpers:
         bug（见 `gpu_solver.py::_compute_local_time_step_gpu` 里
         metric_flux_scale 缓存那段注释）。
         """
-        f = np.zeros((3, 8))  # n_sps=8 -> 只能是 order=1
+        f = np.zeros((3, 6))  # n_sps=6 -> 只能是 order=1
         for bad_order in (0, 2, 3):
             with pytest.raises(ValueError, match="不自洽"):
                 reduce_per_cell_over_real_sps(f, 1, bad_order, 'mean')

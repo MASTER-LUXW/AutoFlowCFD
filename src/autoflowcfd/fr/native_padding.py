@@ -20,6 +20,10 @@
 omega 壁面目标值里的 rho、GPU 局部 dt 的 min）会**静默算错**——填充槽位
 冻结在初值、随推进变馊（实测 10 步后偏差 3.4%）。所以两个归约现在都按
 `real_sps_per_cell` 给出的**两个**真实长度分别切片。
+
+**存储宽度（2026-10-19 起）= 原生棱柱真实自由度**（`sps_width`）：此前恒为坍缩棱柱基的 `(p+1)^3`，原生棱柱
+上线后两类单元都只用其中一部分（P2 棱柱 18/27、四面体 10/27），多出的槽位只占内存与算力。现在棱柱用满宽度、
+只有四面体有填充槽位；归约仍按两个真实长度切片，与宽度取值无关。
 """
 
 from typing import Tuple
@@ -28,8 +32,7 @@ import numpy as np
 
 
 def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple) -> np.ndarray:
-    """把 native 四面体算子矩阵嵌入到全局统一宽度 `n_sps`（=`n1d**3`，
-    棱柱/坍缩坐标四面体共用的张量积节点数）的零矩阵左上角，其余槽位
+    """把原生基算子矩阵嵌入到全局统一宽度 `n_sps`（`sps_width(order)`）的零矩阵左上角，其余槽位
     （"填充行/列"）恒为零——Part8 文档"零填充块对角"不变量的具体实现：
 
     - 对体积->体积算子（如 `D_native_tet`，形状 `(n_native,n_native,3)`，
@@ -51,7 +54,7 @@ def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple)
         matrix: 待填充矩阵，`pad_axes` 指定的轴当前长度必须是
             `n_native`（<=`n_sps`），未列出的轴（如 `D_native_tet` 的
             第三个"方向"轴）原样保留。
-        n_sps: 全局统一宽度（`n1d**3`）。
+        n_sps: 全局统一宽度（`sps_width(order)`）。
         pad_axes: 需要从 `n_native` 填充到 `n_sps` 的轴下标元组。
 
     Returns:
@@ -69,8 +72,8 @@ def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple)
     if n_sps < n_native:
         raise ValueError(
             f"pad_native_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}——"
-            "native 基自由度理应严格不多于全局统一宽度（(order+1)(order+2)(order+3)/6 "
-            "<= (order+1)^3），出现相反的情形说明上游传错了参数，不应该静默截断。"
+            "原生基自由度理应不多于全局统一宽度 sps_width(order)，出现相反的情形说明上游传错了参数，"
+            "不应该静默截断。"
         )
 
     new_shape = list(matrix.shape)
@@ -109,23 +112,27 @@ def native_prism_n_real_sps(order: int) -> int:
 
 
 def real_sps_per_cell(order: int) -> Tuple[int, int]:
-    """`(棱柱真实自由度, 四面体真实自由度)`，按**当前生效的棱柱基**。
+    """`(棱柱真实自由度, 四面体真实自由度)`。
 
-    全局统一 SPs 宽度恒为 `(p+1)^3`；这两个数是那个宽度里真正携带自由度
-    的前缀长度，其余是零填充。
-
-      * 坍缩棱柱（迁移期默认）：棱柱**用满** `(p+1)^3`，没有填充；
-      * 原生棱柱：棱柱只用前 `(p+1)^2(p+2)/2` 个。
-
-    四面体恒为 `(p+1)(p+2)(p+3)/6`（native 是唯一实现）。
+    这两个数是全局统一宽度 `sps_width(order)` 里真正携带自由度的前缀长度，其余是零填充：棱柱
+    `(p+1)^2(p+2)/2` 用满宽度，四面体 `(p+1)(p+2)(p+3)/6`。
 
     这是"哪些槽位是真的"的**唯一判据来源**：归约、checkpoint 的单元均值、
     人工粘性尺度、GPU 局部 dt 全都读它，任何一处自己判断都会在切换基的
     时候漏改。
     """
-    # 棱柱只有原生基一种实现（坍缩棱柱基已于 2026-09-23 删除，见
-    # 棱柱只有原生基），所以这里不再分派。
     return native_prism_n_real_sps(order), native_tet_n_real_sps(order)
+
+
+def sps_width(order: int) -> int:
+    """每单元解点的存储宽度（全部 `(n_cells, n_sps[, ...])` 场的 SP 轴长度），唯一定义。
+
+    取两类单元真实自由度的较大者，即原生棱柱的 `(p+1)^2(p+2)/2`：棱柱与四面体之比 `3(p+1)/(p+3) >= 1`
+    （P0 相等、均为 1）。P0..P3 依次为 1/6/18/40。2026-10-19 之前是坍缩棱柱基留下的 `(p+1)^3`（1/8/27/64）。
+    """
+    if order < 0:
+        raise ValueError(f"sps_width: 阶数必须非负，收到 {order}")
+    return native_prism_n_real_sps(order)
 
 
 def real_row_mask(cell_is_prism, n_sps: int, order: int) -> np.ndarray:
@@ -136,7 +143,7 @@ def real_row_mask(cell_is_prism, n_sps: int, order: int) -> np.ndarray:
 
 
 def order_from_n_sps(n_sps: int) -> int:
-    """从每单元解点数反解多项式阶数：`n_sps = (p+1)^3` => `p`。
+    """从每单元解点数反解多项式阶数：`n_sps = sps_width(p)` => `p`。
 
     为什么优先用这个而不是 `solver.current_order`/`solver.order`：本项目
     的填充/真实自由度划分完全由**数组自身的 SP 轴长度**决定，而 solver
@@ -146,23 +153,24 @@ def order_from_n_sps(n_sps: int) -> int:
     替身更是只有必需的几个属性）。从数组反解则**恒与被归约的数组自洽**。
 
     Raises:
-        ValueError: `n_sps` 不是某个整数的立方——那说明调用方传进来的不是
-            张量积解点布局的数组，不能猜。
+        ValueError: `n_sps` 不是任何阶数的存储宽度——调用方传进来的不是解点布局的数组，不能猜。
     """
-    p = int(round(float(n_sps) ** (1.0 / 3.0))) - 1
-    for cand in (p - 1, p, p + 1):  # 立方根浮点误差的邻域
-        if cand >= 0 and (cand + 1) ** 3 == n_sps:
-            return cand
-    raise ValueError(
-        f"order_from_n_sps: n_sps={n_sps} 不是 (order+1)^3 形式，"
-        f"无法反解阶数（调用方传进来的不是张量积解点布局的数组）")
+    n_sps = int(n_sps)
+    p = 0
+    while sps_width(p) < n_sps:  # 宽度随阶数严格递增
+        p += 1
+    if sps_width(p) != n_sps:
+        raise ValueError(
+            f"order_from_n_sps: n_sps={n_sps} 不是任何阶数的存储宽度 sps_width(order)"
+            f"（P0..P3 为 1/6/18/40），无法反解阶数")
+    return p
 
 
 def _check_order_matches_n_sps(order: int, n_sps: int, who: str) -> int:
     """确认传入的 `order` 与数组的 SP 轴长度自洽，并返回真实自由度个数。
 
     零填充的行数是 `n_sps - n_native`，两者都由**当前解阶数**决定
-    (`n_sps=(p+1)^3`)。调用方通常从 solver 上取 `current_order`，而在
+    (`n_sps=sps_width(p)`)。调用方通常从 solver 上取 `current_order`，而在
     Order Continuation 期间网格几何量的 `n_sps` 可以短暂地属于另一个
     阶数——那种情形下按错的 `n_native` 切片会静默地把真实解点当成填充
     丢掉（或反过来把填充当真实算进去），是一个无声的精度损失。本项目
@@ -170,9 +178,9 @@ def _check_order_matches_n_sps(order: int, n_sps: int, who: str) -> int:
     `gpu_solver.py::_compute_local_time_step_gpu` 里 metric_flux_scale
     缓存那段注释），所以这里显式报错而不是静默继续。
     """
-    if (order + 1) ** 3 != n_sps:
+    if sps_width(order) != n_sps:
         raise ValueError(
-            f"{who}: order={order} 对应 n_sps=(order+1)^3={(order + 1) ** 3}，"
+            f"{who}: order={order} 对应 n_sps=sps_width(order)={sps_width(order)}，"
             f"但数组的 SP 轴长度是 {n_sps}——阶数与数组不自洽，"
             f"不能静默按其中之一继续（会把真实解点当填充丢掉，或反之）")
     return native_tet_n_real_sps(order)
@@ -236,7 +244,7 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
 
     单元存储是"棱柱在前、四面体在后"（本项目的既有不变量），所以直接切片
     就够，不需要构造布尔掩码。**两段各按自己的真实长度切**（见
-    `real_sps_per_cell`）：原生棱柱上线后棱柱段也有填充槽位。
+    `real_sps_per_cell`），不假设哪一段用满宽度。
 
     Args:
         field: `(n_cells, n_sps)` 或 `(n_cells, n_sps, V)`
@@ -258,9 +266,7 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
     n_sps = field.shape[1]
     _check_order_matches_n_sps(
         order, n_sps, 'reduce_per_cell_over_real_sps')
-    # 两个真实长度都从 `real_sps_per_cell` 取：坍缩棱柱是 (p+1)^3（用满、
-    # 无填充），原生棱柱是 (p+1)^2(p+2)/2（有填充）。写死"棱柱用满"会在
-    # 切换棱柱基时静默算错，见本模块文档。
+    # 两个真实长度都从 `real_sps_per_cell` 取，与存储宽度的取值无关（宽度改过一次，见本模块文档）。
     n_prism_real, n_tet_real = real_sps_per_cell(order)
     fn = getattr(xp, how)
     out_prism = (fn(field[:n_prism, :n_prism_real], axis=1)

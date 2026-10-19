@@ -100,15 +100,15 @@ class TestTreatmentSelectsTheConvention:
     def test_d1_follows_the_wall_treatment(self, treatment, expected):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        # P1 四面体：8 个槽位里前 4 个是真实解点，后 4 个填充槽位的值不得进入 min/mean
-        wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5, 1e-9, 1e-9, 9.0, 9.0]])
+        # P1 四面体：6 个槽位里前 4 个是真实解点，后 2 个填充槽位的值不得进入 min/mean
+        wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5, 1e-9, 9.0]])
         assert omega_wall_length_scale(wd, np.array([False]), np, treatment)[0] == pytest.approx(expected, rel=1e-14)
 
     def test_rejects_unknown_treatment(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
         with pytest.raises(ValueError, match="近壁处理方式"):
-            omega_wall_length_scale(np.full((1, 8), 1e-5), np.array([False]), np, "min")
+            omega_wall_length_scale(np.full((1, 6), 1e-5), np.array([False]), np, "min")
 
 
 class TestRealOffWallPoints:
@@ -120,7 +120,7 @@ class TestRealOffWallPoints:
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
         from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-        n_sps = 8                                    # P1：棱柱 8 槽位，四面体 4 个真实解点
+        n_sps = 6                                    # P1：棱柱 6 槽位（用满），四面体 4 个真实解点
         n_tet = real_sps_per_cell(1)[1]
         wd = np.full((1, n_sps), 1e-9)               # 填充槽位：任意小的垃圾值
         wd[0, :n_tet] = [0.0, 0.0, 3e-4, 5e-4]       # 两个解点在壁面上
@@ -132,5 +132,5 @@ class TestRealOffWallPoints:
     def test_prism_rows_use_all_their_points(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        wd = np.linspace(1e-5, 8e-5, 8)[None, :]
+        wd = np.linspace(1e-5, 6e-5, 6)[None, :]
         assert omega_wall_length_scale(wd, np.array([True]), np, "resolved")[0] == 1e-5

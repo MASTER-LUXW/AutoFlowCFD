@@ -18,24 +18,26 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
 
     @pytest.mark.parametrize("order", [1, 2, 3, 4])
     def test_native_prism_reports_its_own_count(self, order, monkeypatch):
-        from autoflowcfd.fr.native_padding import real_sps_per_cell
+        from autoflowcfd.fr.native_padding import real_sps_per_cell, sps_width
 
-        n_prism, _ = real_sps_per_cell(order)
+        n_prism, n_tet = real_sps_per_cell(order)
         assert n_prism == native_prism_n_sps(order)
-        assert n_prism < (order + 1) ** 3
+        # 存储宽度就是棱柱自由度数：棱柱用满、只有四面体有填充槽位（I-29，2026-10-19）
+        assert n_prism == sps_width(order) > n_tet
 
-    def test_reduction_excludes_prism_padding_under_native(self, monkeypatch):
-        """决定性判据：棱柱填充槽位塞进一个巨大值，均值必须不受影响。"""
+    def test_mixed_reduction_uses_full_prism_rows_and_masks_tet_padding(self):
+        """决定性判据：棱柱段对整行归约；四面体段的填充槽位塞进一个巨大值，均值必须不受影响。"""
         from autoflowcfd.fr.native_padding import (
-            reduce_per_cell_over_real_sps,
+            real_sps_per_cell, reduce_per_cell_over_real_sps,
         )
 
-        f = np.zeros((4, 27))
-        f[:, :18] = 2.0
-        f[:2, 18:] = 1e6          # 棱柱段的填充槽位：变馊的初值
+        _, n_tet = real_sps_per_cell(2)
+        f = np.zeros((4, 18))
+        f[:2] = np.arange(18.0)   # 棱柱：18 个槽位全是真实解点，均值 8.5
+        f[2:, :n_tet] = 2.0
+        f[2:, n_tet:] = 1e6       # 四面体段的填充槽位：变馊的初值
         got = reduce_per_cell_over_real_sps(f, 2, 2, "mean")
-        assert np.allclose(got[:2], 2.0), (
-            f"棱柱填充槽位被算进均值了：{got[:2]}")
+        np.testing.assert_array_equal(got, [8.5, 8.5, 2.0, 2.0])
 
     def test_tet_reduction_is_bit_identical_to_plain_mean(self):
         """**四面体段**的归约必须与"直接对整个真实 SP 轴求均值"逐位相同。
@@ -51,19 +53,17 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
 
         _n_prism_real, n_tet_real = real_sps_per_cell(2)
         rng = np.random.default_rng(11)
-        f = rng.normal(size=(6, 27))
+        f = rng.normal(size=(6, 18))
         f[:, n_tet_real:] = np.nan          # 填充槽位：被正确掩掉才不会传染
         got = reduce_per_cell_over_real_sps(f, 0, 2, "mean")
         assert np.array_equal(got, f[:, :n_tet_real].mean(axis=1))
 
-    def test_row_masked_reduction_excludes_prism_padding(self, monkeypatch):
-        """逐行掩码版（按 owner_cell 索引出来的逐面数组）同样要正确。"""
+    def test_row_masked_reduction_excludes_tet_padding(self, monkeypatch):
+        """逐行掩码版（按 owner_cell 索引出来的逐面数组）同样要正确：棱柱行用满，四面体行只取前 10 个。"""
         from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
 
-        f = np.zeros((3, 27))
-        f[:, :10] = 5.0
-        f[:, 10:18] = 5.0
-        f[:, 18:] = -1e6
+        f = np.full((3, 18), 5.0)
+        f[1, 10:] = -1e6          # 四面体行的填充槽位
         is_prism = np.array([True, False, True])
         got = reduce_rows_over_real_sps(f, is_prism, 2, "mean")
         assert np.allclose(got, 5.0), got
@@ -210,24 +210,18 @@ class TestNativePrismGeometry:
     # "原生档恒定"是基本身的功劳，不是网格规整的副产物。
 
 
-    def test_padding_slots_copy_real_sp0(self, monkeypatch):
-        """填充槽位必须复制真实 SP #0（有限、物理上合法的占位值）。
+    def test_prism_rows_fill_the_storage_width(self, monkeypatch):
+        """棱柱的每个存储槽位都是真实解点（宽度 = 棱柱自由度数，I-29）：几何量逐点互不相同、有限且 det(J) 非零。
 
-        留 `np.zeros` 默认值对应原点，会被后处理/可视化误当成真实几何
-        位置；而 `det_jacs` 是**除数**，留 0 直接是除零。
+        四面体填充槽位复制真实 SP #0 的约定见 `test_native_tet_mesh_geometry_wiring.py`。
         """
         mesh, geom = self._geometry(2, monkeypatch)
         n_sps = mesh.n_sps_per_cell
-        n_real = native_prism_n_sps(2)
         n_prism = mesh.n_prism_cells
-        assert n_real < n_sps
+        assert n_sps == native_prism_n_sps(2)
         det = geom["jacobians"]["det_jacs"].reshape(-1, n_sps)[:n_prism]
         coords = geom["sps_coords"][:n_prism]
-        assert np.array_equal(det[:, n_real:],
-                              np.repeat(det[:, :1], n_sps - n_real, axis=1))
-        assert np.array_equal(
-            coords[:, n_real:],
-            np.repeat(coords[:, :1], n_sps - n_real, axis=1))
+        assert all(len(np.unique(c.round(14), axis=0)) == n_sps for c in coords)
         assert np.all(np.isfinite(det)) and np.all(np.abs(det) > 0.0)
 
     @pytest.mark.parametrize("order", [1, 2])

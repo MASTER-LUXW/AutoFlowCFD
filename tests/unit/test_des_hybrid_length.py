@@ -115,7 +115,7 @@ def test_sst_destruction_uses_lengths_from_the_same_evaluation(model_cls):
     from autoflowcfd.fr.native_padding import order_from_n_sps
 
     rng = np.random.default_rng(7)
-    n, m = 3, 8                                   # order 1 的全局解点宽度
+    n, m = 3, 6                                   # order 1 的全局解点宽度 sps_width(1)
     k_inf, omega_inf, mu, rho = 0.05, 400.0, 1.8e-5, 1.2
     model = SSTModelFR(n, m, k_inf=k_inf, omega_inf=omega_inf)
     model.k_field = rng.uniform(0.01, 0.5, (n, m))

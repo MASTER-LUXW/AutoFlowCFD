@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.fr.native_padding import sps_width
 
 
 
@@ -29,12 +30,9 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     old_order = solver.current_order
     print(f"  Interpolating solution from P{old_order} to P{new_order}...")
 
-    # 获取新旧SPs数量 - 关键修复：直接计算，不依赖solver.state.n_sps
-    old_n_points_1d = old_order + 1
-    old_n_sps = old_n_points_1d ** 3
-
-    new_n_points_1d = new_order + 1
-    new_n_sps = new_n_points_1d ** 3
+    # 新旧每单元解点数按阶数直接给出（不读 solver.state.n_sps）
+    old_n_sps = sps_width(old_order)
+    new_n_sps = sps_width(new_order)
 
     print(f"    Old SPs/cell: {old_n_sps}, New SPs/cell: {new_n_sps}")
 
@@ -123,8 +121,7 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
 
     reset_newton_state(solver)
 
-    n_points_1d = new_order + 1
-    new_n_sps = n_points_1d ** 3
+    new_n_sps = sps_width(new_order)
 
     actual_n_sps = solver.state.U.shape[1]
     if actual_n_sps != new_n_sps:
