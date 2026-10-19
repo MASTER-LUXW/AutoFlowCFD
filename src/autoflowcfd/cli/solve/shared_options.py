@@ -75,11 +75,11 @@ def shared_solve_options(config_cls):
                      help='GPU 设备号。不给时：单 GPU 用 0，--multi-gpu 按 rank % GPU 数自动分配；'
                           '给出时全部 rank 用该设备'),
         click.option('--turbulence-intensity', type=float, default=d('turbulence_intensity'), show_default=True,
-                     help='来流湍流强度 Tu（0.01 = 1%）：RANS 来流 k 与 ddes/iddes/les 合成湍流入口的目标雷诺应力'),
+                     help='来流湍流强度 Tu（0.01 = 1%）：RANS 来流 k 与 ddes/iddes/les/wmles 合成湍流入口的目标雷诺应力'),
         click.option('--viscosity-ratio', type=float, default=d('viscosity_ratio'), show_default=True,
                      help='来流粘性比 nu_t/nu（外部气动常用 2~10）'),
         click.option('--sem-num-eddies', type=int, default=_SEM_DEFAULT_NUM_EDDIES,
-                     help='ddes/iddes/les 合成湍流入口的涡核数（不给时按 Jarrin 密度判据 V_B/sigma^3 取）'),
+                     help='ddes/iddes/les/wmles 合成湍流入口的涡核数（不给时按 Jarrin 密度判据 V_B/sigma^3 取）'),
         click.option('--mu-molecular', type=float, default=d('mu_molecular'), show_default=True,
                      help='分子动力粘度 (Pa*s)，非标准状态空气请覆盖'),
         click.option('--rho-inf', type=float, default=d('rho_inf'), show_default=True, help='自由流密度 (kg/m^3)'),

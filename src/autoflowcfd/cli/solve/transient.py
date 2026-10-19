@@ -37,8 +37,7 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
               type=click.Choice(["sst", "sa", "ddes", "iddes", "wmles", "les"]),
               default=config_default(TransientConfig, "turbulence"), show_default=True,
               help="湍流模型。sa 为 SA-neg URANS（core/turbulence/sa）；ddes/iddes 为 SST-DDES/IDDES（Gritskevich et al. "
-                   "2012，core/turbulence/des/）。ddes/iddes/les 在 VELOCITY_INLET 边界启用合成湍流入口；wmles 不启用"
-                   "（近壁应力由壁面模型给出）")
+                   "2012，core/turbulence/des/）。ddes/iddes/les/wmles 在 VELOCITY_INLET 边界启用合成湍流入口")
 @click.option("--max-iter", "-n", type=int, default=config_default(TransientConfig, "max_iter"), show_default=True,
               help="物理时间步数（给了 --physical-time 时按 physical_time/dt 换算，忽略本选项）")
 @click.option("--dt", type=float, default=config_default(TransientConfig, "dt"), show_default=True,

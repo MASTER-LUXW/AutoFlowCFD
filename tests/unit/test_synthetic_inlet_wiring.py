@@ -50,6 +50,13 @@ def test_inlet_uses_the_users_eddy_count_and_a_deterministic_seed():
     assert synthetic_inlet_seed("x_min") == zlib.crc32(b"x_min") != synthetic_inlet_seed("x_max")
 
 
+@pytest.mark.parametrize("model", ["LES", "WMLES", "DDES", "IDDES"])
+def test_every_scale_resolving_model_gets_a_synthetic_inlet(model):
+    """解析湍流脉动的模型都在速度入口注入合成湍流（I-75：此前 WMLES 被排除，入口是层流）；RANS 不注入。"""
+    assert len(synthetic_inlets(_provider(_stub(turb_model_name=model)))) == 1
+    assert not synthetic_inlets(_provider(_stub(turb_model_name="SST")))
+
+
 @pytest.mark.parametrize("missing", ["_sem_num_eddies", "_turbulence_intensity", "_viscosity_ratio", "mu_molecular"])
 def test_missing_solver_settings_are_an_error_not_a_default(missing):
     stub = _stub()

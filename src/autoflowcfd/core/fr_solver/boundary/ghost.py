@@ -158,10 +158,9 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 供 FRSolver.step() 每个物理步调用一次 advance()（见该列表的
     # 消费点），不在这里（构造阶段）就调用，因为这里只跑一次。
     #
-    # WMLES（turb_model_name == "WMLES"）不注入 SEM 入口脉动：近壁应力由壁面模型给出，CLI `--turbulence-model`
-    # 帮助文本已说明。判据按湍流模型名，不按是否有壁面模型对象——DDES/IDDES 配 RANS 自动壁面处理时同样有
-    # 壁面模型（`core/turbulence/wall_model/`），入口照常需要合成湍流。
-    use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES")
+    # 解析湍流脉动的模型（LES、WMLES、DDES、IDDES）在速度入口注入合成湍流。壁面模型只给出近壁应力，不提供
+    # 入口的湍流内容：2026-10-19（I-75）以前 WMLES 以"壁面模型已承担近壁湍流校正"为由被排除，发展流的入口是层流。
+    use_sem = solver.turb_model_name in ("LES", "WMLES", "DDES", "IDDES")
 
     # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
     # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的

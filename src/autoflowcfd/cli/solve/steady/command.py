@@ -27,8 +27,7 @@ from .single_node import _run_single_node
               default=config_default(SteadyConfig, 'turbulence'), show_default=True,
               help='湍流模型。sa 为 SA-neg（Allmaras, Johnson & Spalart 2012，为高阶离散设计的负值鲁棒 '
                    'Spalart-Allmaras；高阶 P2/P3 隐式稳态推荐，SST 的 C0 折点使其在高阶下收敛缓慢，见 '
-                   'core/turbulence/sa 模块文档）。ddes/iddes/les 在 VELOCITY_INLET 边界启用合成湍流入口；'
-                   'wmles 不启用（近壁应力由壁面模型给出）')
+                   'core/turbulence/sa 模块文档）。ddes/iddes/les/wmles 在 VELOCITY_INLET 边界启用合成湍流入口')
 @click.option('--max-iter', '-n', type=int, default=config_default(SteadyConfig, 'max_iter'), show_default=True,
               help='最大迭代步数')
 @click.option('--time-scheme', '-t', type=click.Choice(_TIME_SCHEME_CHOICES),
