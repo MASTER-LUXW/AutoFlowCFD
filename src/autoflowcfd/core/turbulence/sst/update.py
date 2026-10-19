@@ -5,6 +5,7 @@
 """
 
 import numpy as np
+from loguru import logger
 
 from autoflowcfd.core.utils.array_module import array_module
 
@@ -59,9 +60,9 @@ def advance_k_log_omega(model, dt, Sk, S_log_omega, transport_k, transport_log_o
     # （合成 Couette+SST 升阶到 P2 时纯前向欧拉失稳）。只阻尼源项，不阻尼输运。
     beta_blend = getattr(model, "_last_beta_blend", None)
     if beta_blend is None:
-        # 防御性回退（正常路径下源项求值总在更新之前，已刷新混合 beta）：用 beta2
-        # （> beta1，阻尼更强而非更弱）
-        beta_blend = model.beta2
+        # 源项求值（`compute_source_terms`）总在更新之前并刷新混合 beta；缺失说明调用顺序错了。2026-10-19（I-45）
+        # 以前这里"防御性回退"到 beta2，掩盖调用顺序错误。
+        raise RuntimeError("SST 更新前没有求源项（_last_beta_blend 未设定）：必须先调用 compute_source_terms")
     omega_old = model.omega_field
     with np.errstate(over='ignore', invalid='ignore'):
         dk = Sk / (1.0 + dt * model.beta_star * omega_old)
@@ -70,9 +71,17 @@ def advance_k_log_omega(model, dt, Sk, S_log_omega, transport_k, transport_log_o
         dk = dk + transport_k
     if transport_log_omega is not None:
         dw = dw + transport_log_omega
-    # 非有限增量归零：退化网格上源项/输运可能出现 inf-inf
-    dk = xp.where(xp.isfinite(dk), dk, 0.0)
-    dw = xp.where(xp.isfinite(dw), dw, 0.0)
+    # 非有限增量（退化网格上源项/输运可能出现 inf-inf）：该点本步不更新，并计数告警（与正性限制器一样如实报告；
+    # 2026-10-19（I-45）以前静默归零）。累计数在 `model.nonfinite_increment_count`
+    finite_k = xp.isfinite(dk)
+    finite_w = xp.isfinite(dw)
+    n_bad = int(dk.size - xp.count_nonzero(finite_k)) + int(dw.size - xp.count_nonzero(finite_w))
+    if n_bad:
+        model.nonfinite_increment_count += n_bad
+        logger.warning(f"SST k/ln(omega) 增量出现 {n_bad} 个非有限值（这些解点本步不更新；累计 "
+                       f"{model.nonfinite_increment_count}）——检查退化单元或湍流输运")
+        dk = xp.where(finite_k, dk, 0.0)
+        dw = xp.where(finite_w, dw, 0.0)
 
     model.k_field = model.k_field + dt * dk
     model.omega_field = omega_from_log(log_omega(omega_old, xp) + dt * dw, model.omega_max, xp)
