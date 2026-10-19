@@ -15,8 +15,7 @@ import numpy as np
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
-GAMMA = 1.4
-R_AIR = 287.0
+from autoflowcfd.core.thermo import GAMMA, R_AIR
 
 
 def conserved_to_primitive_gpu(U):

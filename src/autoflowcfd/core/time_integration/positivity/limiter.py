@@ -19,7 +19,7 @@
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.flux_kernels import GAMMA
+from autoflowcfd.core.thermo import GAMMA
 
 from .zhang_shu import zhang_shu_numba, zhang_shu_xp
 

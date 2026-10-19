@@ -25,7 +25,7 @@ GPU 侧的两处刻意差异：
 """
 from autoflowcfd.core.gpu import get_cupy
 
-_GAMMA_GAS = 1.4
+from autoflowcfd.core.thermo import GAMMA
 
 
 def precond_beta2_gpu(q2, a2, mach_ref: float, k: float = 1.1):
@@ -90,7 +90,7 @@ def apply_low_mach_preconditioner_gpu(residual, U, mach_ref: float, k: float = 1
         CuPy 数组，形状与 residual 相同（out 非 None 时就是 out）。
     """
     cp = get_cupy()
-    gm1 = _GAMMA_GAS - 1.0
+    gm1 = GAMMA - 1.0
 
     rho = U[..., 0]
     inv_rho = 1.0 / cp.maximum(rho, 1e-30)
@@ -104,7 +104,7 @@ def apply_low_mach_preconditioner_gpu(residual, U, mach_ref: float, k: float = 1
     # 制造 NaN 去掩盖真正的问题——与 CPU 侧 kernel 同一处理。
     physical = (rho > 0.0) & (p > 0.0)
 
-    a2 = _GAMMA_GAS * p * inv_rho
+    a2 = GAMMA * p * inv_rho
     a2_safe = cp.maximum(a2, 1e-30)
     beta2 = precond_beta2_gpu(q2, a2_safe, mach_ref, k)
 

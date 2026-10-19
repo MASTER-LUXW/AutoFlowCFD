@@ -45,7 +45,7 @@ from typing import Callable
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.flux_kernels.constants import GAMMA
+from autoflowcfd.core.thermo import GAMMA
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
 

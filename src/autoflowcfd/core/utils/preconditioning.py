@@ -151,7 +151,7 @@ def preconditioned_sound_speed(vel_mag, a, mach_ref: float, k: float = 1.1):
 #       推导最强的数值校验（测试里用数值 Jacobian 直接比对）
 # =============================================================================
 
-_GAMMA_GAS = 1.4
+from autoflowcfd.core.thermo import GAMMA
 
 
 def _precond_beta2(q2, a2, mach_ref: float, k: float):
@@ -178,7 +178,7 @@ def _apply_low_mach_precond_kernel(R, Q, mach_ref, k, out) -> None:
         out: (n_cells, n_sps, 5) 输出，可以与 R 是同一个数组（就地）
     """
     n_cells, n_sps = R.shape[0], R.shape[1]
-    gm1 = _GAMMA_GAS - 1.0
+    gm1 = GAMMA - 1.0
     floor2 = k * mach_ref * mach_ref
     for c in prange(n_cells):
         for s in range(n_sps):
@@ -193,7 +193,7 @@ def _apply_low_mach_precond_kernel(R, Q, mach_ref, k, out) -> None:
                 for m in range(5):
                     out[c, s, m] = R[c, s, m]
                 continue
-            a2 = _GAMMA_GAS * p / rho
+            a2 = GAMMA * p / rho
             q2 = u * u + v * v + w * w
             m2 = q2 / a2
             beta2 = m2 if m2 > floor2 else floor2

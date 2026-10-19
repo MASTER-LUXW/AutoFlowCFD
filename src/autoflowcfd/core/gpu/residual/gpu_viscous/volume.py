@@ -16,10 +16,8 @@ from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu, co
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
 
-from autoflowcfd.core.fr_operators.flux_kernels import (
-    R_AIR,
-    resolve_viscous_ip_constant,
-)
+from autoflowcfd.core.thermo import R_AIR
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from .interface import _compute_viscous_interface_correction_gpu
 
 

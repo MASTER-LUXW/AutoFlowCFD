@@ -6,7 +6,9 @@
 import numpy as np
 
 from numba import njit, prange
-from .constants import CP_AIR, R_AIR, VISCOUS_IP_C_BASE
+from autoflowcfd.core.thermo import CP_AIR, R_AIR
+
+from .constants import VISCOUS_IP_C_BASE
 
 
 def resolve_viscous_ip_constant(order: int) -> float:

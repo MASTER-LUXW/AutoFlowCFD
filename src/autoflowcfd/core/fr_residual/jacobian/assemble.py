@@ -36,6 +36,7 @@ from typing import Optional
 import numpy as np
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.thermo import GAMMA
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
@@ -105,7 +106,7 @@ def _ghost_perturbations(flat, Q, provider):
     row = -np.ones(flat.n_faces, dtype=np.int64)
     row[faces] = np.arange(faces.size)
     rho, vel, p = Q[..., 0], Q[..., 1:4], Q[..., 4]
-    c = np.sqrt(np.maximum(1.4 * p / np.maximum(rho, 1e-300), 0.0))
+    c = np.sqrt(np.maximum(GAMMA * p / np.maximum(rho, 1e-300), 0.0))
     vref = float((np.linalg.norm(vel, axis=-1) + c).max())
     HG = _SQRT_EPS * np.array([np.abs(rho).max(), vref, vref, vref, np.abs(p).max()])
     QgP = np.empty((5, max(faces.size, 1), Qg0.shape[1], 5))
@@ -278,7 +279,7 @@ def _gamma_matrices(Q, gamma_R, TQ, mach_ref):
     R_raw = np.linalg.solve(gamma, gamma_R[..., None])[..., 0]
     dq = np.empty(shape + (5, 5))
     rho, vel, p = Q[..., 0], Q[..., 1:4], Q[..., 4]
-    c = np.sqrt(np.maximum(1.4 * p / np.maximum(rho, 1e-300), 0.0))
+    c = np.sqrt(np.maximum(GAMMA * p / np.maximum(rho, 1e-300), 0.0))
     ref = np.stack([np.abs(rho), *(np.linalg.norm(vel, axis=-1) + c,) * 3, np.abs(p)], axis=-1)
     base = apply_low_mach_preconditioner(R_raw, Q, mach_ref)
     for v in range(5):

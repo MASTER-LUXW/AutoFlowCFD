@@ -8,6 +8,8 @@
 
 import numpy as np
 
+from autoflowcfd.core.thermo import GAMMA
+
 from ..reductions import LocalReductions
 
 #: 物理性限幅允许的单步最大相对**下降**（对 `rho` 与 `p`，湍流的 `k`/`omega`）；
@@ -59,7 +61,7 @@ def _pressure(u_flat: np.ndarray) -> np.ndarray:
     rho = u_flat[:, 0]
     m2 = u_flat[:, 1] ** 2 + u_flat[:, 2] ** 2 + u_flat[:, 3] ** 2
     with np.errstate(divide="ignore", invalid="ignore"):
-        return 0.4 * (u_flat[:, 4] - 0.5 * m2 / rho)
+        return (GAMMA - 1.0) * (u_flat[:, 4] - 0.5 * m2 / rho)
 
 
 def density_pressure_row_limits(u0_flat, du_flat, red: LocalReductions):

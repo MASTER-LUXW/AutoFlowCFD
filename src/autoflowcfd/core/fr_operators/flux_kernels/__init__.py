@@ -28,9 +28,6 @@ nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须
 """
 
 from .constants import (  # noqa: F401
-    CP_AIR,
-    GAMMA,
-    R_AIR,
     VISCOUS_IP_C_BASE,
 )
 from .euler import (  # noqa: F401
@@ -62,9 +59,6 @@ from .viscous_bc import (  # noqa: F401
 )
 
 __all__ = [
-    "CP_AIR",
-    "GAMMA",
-    "R_AIR",
     "VBC_DIRICHLET",
     "VBC_INTERIOR",
     "VBC_MIRROR",

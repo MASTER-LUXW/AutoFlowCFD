@@ -15,6 +15,8 @@ core/fr_viscous_flux.py），已删除而不是继续留作"看起来完整、�
 import numpy as np
 from numba import njit
 
+from autoflowcfd.core.thermo import GAMMA
+
 @njit(cache=True, inline='always')
 def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
                          mach_ref: float) -> np.ndarray:
@@ -44,7 +46,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     Returns:
         flux: 守恒变量通量，形状 (5,)
     """
-    gamma = 1.4
+    gamma = GAMMA
 
     # === 1. 正性保护与状态限制 ===
     rhoL = max(qL[0], 1e-6)

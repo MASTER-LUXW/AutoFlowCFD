@@ -15,6 +15,8 @@ AUSM+up 预处理与 CFL 都不同，实际解的是两个不同的离散问题�
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.core.thermo import GAMMA
+
 # 参考马赫数的物理下限（完整推导与实证标定见 `resolve_mach_ref` 文档）。
 #
 # 用直接谱测量标定（组装预处理后算子 Γ⁻¹R 的稠密 Jacobian 求特征值，与 SSP-RK3 稳定域 |Im|<=1.732 比；
@@ -63,7 +65,7 @@ def resolve_mach_ref(rho_inf: float, vel_inf: float, p_inf: float) -> float:
     0.1 以上真实马赫数的算例不受影响。
     2026-09-17 在 AUSM+up 物理声速档上用直接谱测量重标定为 0.05（见 `MACH_REF_FLOOR` 上方的表）。
     """
-    mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+    mach_ref = vel_inf / np.sqrt(max(GAMMA * p_inf / max(rho_inf, 1e-10), 1e-10))
     floor = MACH_REF_FLOOR
     if mach_ref < floor:
         logger.info(

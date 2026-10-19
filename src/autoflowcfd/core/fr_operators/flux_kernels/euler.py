@@ -6,7 +6,7 @@
 import numpy as np
 
 from numba import njit, prange
-from .constants import GAMMA
+from autoflowcfd.core.thermo import GAMMA
 
 
 @njit(cache=True)

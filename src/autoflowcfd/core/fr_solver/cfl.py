@@ -8,6 +8,8 @@ AutoFlowCFD V2.0 - FRSolver 局部时间步长计算 (从 fr_solver.py 拆分)
 
 import numpy as np
 
+from autoflowcfd.core.thermo import GAMMA
+
 
 def compute_local_time_step(solver, return_physical_too: bool = False):
     """
@@ -94,7 +96,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     v = solver.state.Q[:, :, 2]
     w = solver.state.Q[:, :, 3]
     p = solver.state.Q[:, :, 4]
-    a = np.sqrt(np.maximum(1.4 * p / np.maximum(rho, 1e-10), 1e-10))
+    a = np.sqrt(np.maximum(GAMMA * p / np.maximum(rho, 1e-10), 1e-10))
 
     vel_mag = np.sqrt(u**2 + v**2 + w**2)
 

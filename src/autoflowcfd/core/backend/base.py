@@ -20,6 +20,8 @@ import numpy as np
 from typing import Optional
 from dataclasses import dataclass
 
+from autoflowcfd.core.thermo import GAMMA as THERMO_GAMMA
+
 
 @dataclass
 class SolutionVector:
@@ -50,8 +52,8 @@ class SolutionVector:
     n_cells: int = 0
     n_variables: int = 5
 
-    # 比热比，与求解器全局使用的状态方程一致（例如 core/aero_coeffs.py）。
-    GAMMA = 1.4
+    # 比热比（core/thermo.py 唯一定义）
+    GAMMA = THERMO_GAMMA
     _RHO_FLOOR = 1e-10
 
     def __post_init__(self):

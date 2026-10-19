@@ -31,13 +31,9 @@ core/fr_residual/viscous_flux_kernel.py 模块文档。
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .constants import (  # noqa: F401
-    GAMMA,
-)
 from .volume import compute_temperature_gpu, compute_viscous_residual_fr_gpu  # noqa: F401
 
 __all__ = [
-    "GAMMA",
     "compute_temperature_gpu",
     "compute_viscous_residual_fr_gpu",
 ]

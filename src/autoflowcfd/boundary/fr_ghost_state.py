@@ -20,7 +20,6 @@ from typing import Optional
 
 import numpy as np
 
-GAMMA = 1.4
 
 
 def wall_ghost_state(

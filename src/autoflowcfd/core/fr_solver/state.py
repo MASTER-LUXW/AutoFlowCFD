@@ -9,6 +9,8 @@ import numpy as np
 from numba import njit, prange
 from dataclasses import dataclass
 
+from autoflowcfd.core.thermo import GAMMA
+
 #: 求解器状态数组的变量数：平均流守恒变量 (rho, rho*u, rho*v, rho*w, rho*E)。湍流输运场存在模型对象上
 #: （`turbulence/transported.py`）。2026-10-05 以前 SST 族的 CPU 单机状态另带两个 k/omega 槽位
 #: `U[..., 5:7]`：全仓库无人读取、残差恒为零，却让 CPU SST 的残差 RMS 分母多算两列（比 GPU/分布式小
@@ -18,7 +20,7 @@ N_MEAN_FLOW_VARS = 5
 
 
 def uniform_conservative(rho: float, u: float, v: float, w: float,
-                         p: float, gamma: float = 1.4) -> np.ndarray:
+                         p: float, gamma: float = GAMMA) -> np.ndarray:
     """均匀流场的守恒量 (5,) = `[rho, rho*u, rho*v, rho*w, rho*E]`。
 
     **全仓库"均匀原始量 -> 守恒量"的唯一公式**（量热完全气体）。
@@ -99,7 +101,7 @@ def _update_primitives_kernel(U, Q):
             v = U[c, s, 2] / rho
             w = U[c, s, 3] / rho
             ke = 0.5 * (u * u + v * v + w * w)
-            p = (U[c, s, 4] - rho * ke) * 0.4  # gamma = 1.4
+            p = (U[c, s, 4] - rho * ke) * (GAMMA - 1.0)
             if p < 1.0:
                 p = 1.0
             Q[c, s, 0] = rho

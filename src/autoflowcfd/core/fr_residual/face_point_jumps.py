@@ -22,8 +22,9 @@ import numpy as np
 from numba import njit
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
+from autoflowcfd.core.thermo import CP_AIR
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
+    VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
     mirror_normal_derivative,
     effective_eddy_viscosity, viscous_physical_flux_point, viscous_physical_flux_point_effective,
     viscous_ip_penalty_tilde,

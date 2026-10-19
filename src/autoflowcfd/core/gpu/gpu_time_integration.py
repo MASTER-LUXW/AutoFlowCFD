@@ -19,7 +19,7 @@ AutoFlowCFD V2.0 - GPU 版时间积分
 （`time_integration/positivity/`，GPU 上用它的数组模块无关实现）。
 """
 
-from autoflowcfd.core.fr_operators.flux_kernels import GAMMA
+from autoflowcfd.core.thermo import GAMMA
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS, TimeIntegrator, scheme_from_name
 

@@ -24,7 +24,7 @@ from numba import njit, prange
 from autoflowcfd.core.fr_operators.flux_kernels import (
     euler_physical_flux_point, viscous_physical_flux_point,
 )
-from autoflowcfd.core.fr_residual.viscous_flux.constants import GAMMA, R_AIR
+from autoflowcfd.core.thermo import GAMMA, R_AIR
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 

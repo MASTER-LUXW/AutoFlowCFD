@@ -15,7 +15,8 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_operators.flux_kernels import CP_AIR, viscous_physical_flux_point
+from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point
+from autoflowcfd.core.thermo import CP_AIR
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr, viscous_physical_flux
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators

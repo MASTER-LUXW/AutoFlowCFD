@@ -52,10 +52,6 @@ fr_troubled_cell.py 模块文档"机制3"一节）：(1) 绝对 det(J) 阈值是
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .constants import (  # noqa: F401
-    GAMMA,
-    R_AIR,
-)
 from .pointwise import (  # noqa: F401
     compute_temperature,
     viscous_physical_flux,
@@ -68,8 +64,6 @@ from .residual import (  # noqa: F401
 )
 
 __all__ = [
-    "GAMMA",
-    "R_AIR",
     "compute_temperature",
     "compute_viscous_residual_fr",
     "viscous_volume_term",

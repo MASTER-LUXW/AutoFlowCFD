@@ -9,8 +9,9 @@ from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 
+from autoflowcfd.core.thermo import CP_AIR, R_AIR
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+    VBC_DIRICHLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
 )
 from .extrap import _extrap_side, _p0_cell_values, _self_extrap_side, _viscous_tilde_flux
 

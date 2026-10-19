@@ -5,9 +5,7 @@
 """
 
 
-GAMMA = 1.4
-
-R_AIR = 287.0  # 空气比气体常数 J/(kg*K)，须与 fr_viscous_flux.py 保持一致
+# 热力学常数（GAMMA、R_AIR、CP_AIR）在 core/thermo.py
 
 #: 粘性 Interior Penalty 罚项常数。标准 DG 惯例取 O(1)~O(10)，理论要求
 #: `c > C_trace(p)`（3D P1 的 trace 常数约 2.7）。**边界面与内部面用同一个
@@ -28,8 +26,3 @@ R_AIR = 287.0  # 空气比气体常数 J/(kg*K)，须与 fr_viscous_flux.py 保�
 #:   ④ 刚性因子 17（BASE=4.0 是 33）—— 虽然真实网格上实测代价为零
 #:      （粘性从来不是约束方），但没有理由白付。
 VISCOUS_IP_C_BASE = 2.0
-
-#: 定压比热 J/(kg*K)。此前在 `viscous_physical_flux_point` 里逐点算一次
-#: `cp = GAMMA * R_AIR / (GAMMA - 1.0)`；内部面罚项的热传导系数要用同一个
-#: cp，所以提到模块级（同一个表达式在导入期求值一次，逐位相同）。
-CP_AIR = GAMMA * R_AIR / (GAMMA - 1.0)

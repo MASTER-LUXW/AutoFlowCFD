@@ -9,7 +9,9 @@ import numpy as np
 
 
 
-from .constants import GAMMA, PRANDTL_TURBULENT, R_AIR
+from autoflowcfd.core.thermo import GAMMA, R_AIR
+
+from .constants import PRANDTL_TURBULENT
 
 
 def compute_temperature(Q: np.ndarray) -> np.ndarray:

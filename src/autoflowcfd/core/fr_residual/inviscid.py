@@ -34,7 +34,7 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     cell_blocks, contract_local, contravariant_point, get_overintegration_context, lifted_segments,
 )
 
-GAMMA = 1.4
+from autoflowcfd.core.thermo import GAMMA
 
 
 def conserved_to_primitive(U: np.ndarray) -> np.ndarray:

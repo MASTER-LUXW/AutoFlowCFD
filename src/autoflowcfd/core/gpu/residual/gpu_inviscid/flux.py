@@ -5,6 +5,7 @@
 
 
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.thermo import GAMMA
 
 
 def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
@@ -50,7 +51,7 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
         flux: (N, n_fp, 5) 数值通量
     """
     cp = get_cupy()
-    gamma = 1.4
+    gamma = GAMMA
 
     rhoL = cp.maximum(Q_L[..., 0], 1e-6)
     uL, vL, wL = Q_L[..., 1], Q_L[..., 2], Q_L[..., 3]

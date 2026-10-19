@@ -7,7 +7,7 @@
 步）。所以这里不再修改任何值：状态可容许就原样放行，不可容许就明确报错。
 """
 
-from autoflowcfd.core.fr_operators.flux_kernels import GAMMA
+from autoflowcfd.core.thermo import GAMMA
 from autoflowcfd.core.utils.array_module import array_module
 
 

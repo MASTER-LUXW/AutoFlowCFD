@@ -13,14 +13,14 @@ import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
 
-GAMMA = 1.4
+from autoflowcfd.core.thermo import GAMMA
 
 # ─── AUSM+up CUDA C 核心（嵌入 RawKernel）──────────────────────
 # 逐面计算：每个 CUDA 线程处理一个面
 # - 读取 owner/neighbor 原始变量
 # - 计算 AUSM+up 公共通量（混合拆分面另用幽灵态解一次做面积加权，B-8）
 # - 原子累加到残差
-_P0_INVISCID_CUDA_CODE = r"""
+_P0_INVISCID_CUDA_CODE = f"#define AFCFD_GAMMA {GAMMA!r}\n" + r"""
 // 注意：只有 __global__ 入口需要 extern "C"（RawKernel 按名查找）；
 // __device__ 辅助函数加 extern "C" 有 nvcc 链接语义风险，不加。
 __device__
@@ -33,7 +33,7 @@ void ausm_up_flux(
 ) {
     // ── AUSM+up 数值通量 ──
     // 与 core/fr_kernels.py::compute_ausm_up_flux 逐字对应
-    double gamma = 1.4;
+    double gamma = AFCFD_GAMMA;   // core/thermo.py::GAMMA
 
     double rhoL_s = fmax(rhoL, 1e-6);
     double rhoR_s = fmax(rhoR, 1e-6);
