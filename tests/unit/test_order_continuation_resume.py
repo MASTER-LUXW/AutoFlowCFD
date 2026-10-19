@@ -27,6 +27,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
 from autoflowcfd.core.utils.order_continuation import run_order_continuation
 
 
@@ -72,6 +73,7 @@ def _fake_solver(current_order, target_order, resumed):
         sgs_model=None,
         _resumed_from_checkpoint=resumed,
         step=_decreasing_step,
+        convergence_history=ConvergenceHistory(),
         # 统一循环（2026-10-05）的日志/守卫钩子：替身没有这些诊断
         _divergence_hint=lambda: "",
         _loop_monitor_suffix=lambda: "",

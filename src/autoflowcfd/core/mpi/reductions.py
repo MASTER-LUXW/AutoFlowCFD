@@ -30,3 +30,6 @@ class MPIReductions(LocalReductions):
 
     def _allreduce_max(self, value: float) -> float:
         return float(allreduce_max(float(value)))
+
+    def _allreduce_sum_array(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(allreduce_sum(np.ascontiguousarray(values, dtype=np.float64)))

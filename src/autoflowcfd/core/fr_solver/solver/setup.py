@@ -209,4 +209,6 @@ class _SolverSetupMixin:
         # 恒返回硬编码占位符 {"iterations": [], "residuals": []}——GPUFRSolver
         # 一直有这个属性且真正被 solve 循环填充，CPU 版本此前遗漏。solve()/
         # run_order_continuation() 每步迭代后 append，与 GPU 版同一约定。
-        self.residual_history: list = []
+        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+        self.convergence_history = ConvergenceHistory()

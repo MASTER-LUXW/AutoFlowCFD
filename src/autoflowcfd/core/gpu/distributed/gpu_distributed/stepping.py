@@ -200,7 +200,7 @@ class _MultiGPUSteppingMixin:
         # （RK3 下是 `R(U^(2))`），同一个算例在不同后端上打印的残差因此不是
         # 同一个量，自适应 CFL 控制器也吃到不同的信号。
         residual0_raw = _spatial_residual(U_flat)
-        residual_norm = self._monitor_residual_norm(residual0_raw)
+        residual_norm, self._residual_per_equation = self._monitor_residuals(residual0_raw)
 
         def _residual(U_flat_trial):
             return _precond(_spatial_residual(U_flat_trial), U_flat_trial)
@@ -275,7 +275,6 @@ class _MultiGPUSteppingMixin:
             )
         self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
 
-        self.residual_history.append(residual_norm)
         self.iteration += 1
         if not dual_time:        # 双时间步的伪时间 CFL 在内迭代里更新（implicit/newton/physical_time.py）
             self._update_cfl_controller(residual_norm, newton_info=nk_info)

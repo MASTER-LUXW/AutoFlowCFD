@@ -9,14 +9,20 @@
 续算时不再使用。
 """
 
+from typing import Tuple
+
 import numpy as np
 
 #: 当前定义的版本号（真实自由度上的 RMS）。旧 checkpoint 没有这个字段
 RESIDUAL_NORM_VERSION = 2
 
 
-def monitor_residual_norm(red, residual, cell_is_prism, order: int) -> float:
-    """`residual (n_cells * n_sps, n_vars)` 或 `(n_cells, n_sps, n_vars)` 在真实自由度上的全局 RMS。
+def monitor_residuals(red, residual, cell_is_prism, order: int) -> Tuple[float, np.ndarray]:
+    """`residual (n_cells * n_sps, n_vars)` 或 `(n_cells, n_sps, n_vars)` 在真实自由度上的全局 RMS：
+    `(全部变量合起来的 RMS, 逐方程 RMS (n_vars,))`。
+
+    前者是收敛判据、阶段基准与自适应 CFL 用的监控残差（定义见模块文档，与此前逐位相同）；后者只进收敛历史
+    （`core/fr_solver/convergence_history.py`），每方程的平方和与真实行数一次归约。
 
     Args:
         red: 归约对象（`implicit/reductions.py::LocalReductions` 或分布式的 `MPIReductions`），数组模块即
@@ -33,5 +39,9 @@ def monitor_residual_norm(red, residual, cell_is_prism, order: int) -> float:
     flat = residual.reshape(n_cells, -1, residual.shape[-1])
     n_sps = flat.shape[1]
     rows = flat.reshape(n_cells * n_sps, -1)
-    mask = real_row_mask(cell_is_prism, n_sps, int(order))
-    return red.rms(rows[xp.asarray(mask)])
+    real = rows[xp.asarray(real_row_mask(cell_is_prism, n_sps, int(order)))]
+    total = red.rms(real)
+    sq = xp.sum(real * real, axis=0)
+    sums = red.sum_array(np.append(np.asarray(sq.get() if hasattr(sq, "get") else sq), float(real.shape[0])))
+    per_equation = np.sqrt(sums[:-1] / sums[-1]) if sums[-1] > 0 else np.zeros(sums.size - 1)
+    return total, per_equation

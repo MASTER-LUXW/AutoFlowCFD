@@ -185,15 +185,15 @@ class _MultiGPUResidualMixin:
 
         return get_positivity_limiter(self, xp=get_cupy(), geometry=self.local_cell_geometry)
 
-    def _monitor_residual_norm(self, residual_local) -> float:
-        """监控残差范数：本 rank local 单元（原生排列）的残差，全部后端同一个定义（真实自由度上的全局 RMS，
-        `time_integration/residual_norm.py`）。"""
+    def _monitor_residuals(self, residual_local):
+        """`(监控残差范数, 逐方程 RMS)`：本 rank local 单元（原生排列）的残差，全部后端同一个定义（真实自由度上的
+        全局 RMS，`time_integration/residual_norm.py`）。"""
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
         from autoflowcfd.core.mpi.reductions import MPIReductions
-        from autoflowcfd.core.time_integration.residual_norm import monitor_residual_norm
+        from autoflowcfd.core.time_integration.residual_norm import monitor_residuals
         from autoflowcfd.fr.native_padding import order_from_n_sps
 
         n_local = self.partition.n_local_cells
-        return monitor_residual_norm(MPIReductions(get_cupy()), residual_local,
-                                     native_cell_is_prism(self.dist_flat_face)[:n_local],
-                                     order_from_n_sps(self.mesh.n_sps_per_cell))
+        return monitor_residuals(MPIReductions(get_cupy()), residual_local,
+                                 native_cell_is_prism(self.dist_flat_face)[:n_local],
+                                 order_from_n_sps(self.mesh.n_sps_per_cell))

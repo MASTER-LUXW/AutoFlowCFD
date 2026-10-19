@@ -79,7 +79,7 @@ def rebuild_distributed_solver_from_checkpoint(
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-    _solution, _history, iteration, metadata = CheckpointManager().load(checkpoint_path)
+    _solution, history, iteration, metadata = CheckpointManager().load(checkpoint_path)
 
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:
@@ -258,6 +258,10 @@ def rebuild_distributed_solver_from_checkpoint(
     # Continuation，这两个属性对它同样生效，不是无害占位。
     if hasattr(solver, "order"):
         solver.order = target_order
+    # 收敛历史接着 checkpoint 往下记（各 rank 都读了同一份 checkpoint，历史一致）
+    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+    solver.convergence_history = ConvergenceHistory.from_checkpoint(history, iteration)
     solver._resumed_from_checkpoint = True
     # 收尾气动系数用的参考面积（root 上；传统模式各 rank 都加载了体网格，完全分布式在 root 的 `_root_context`）
     from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area

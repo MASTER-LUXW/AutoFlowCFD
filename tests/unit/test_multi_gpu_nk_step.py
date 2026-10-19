@@ -58,7 +58,7 @@ def _stub(n_local, n_sps, target):
     s.turb_model_gpu = None
     s.turb_model_name = "NONE"
     s.low_mach_precond_enabled = False
-    s.residual_history, s.iteration = [], 0
+    s.iteration = 0
     s.dist_flat_face = types.SimpleNamespace(perm=np.arange(n_local),
                                              compact_cell_type=np.zeros(n_local, dtype=int))
     s._inv_perm_gpu = s._perm_gpu = np.arange(n_local)
@@ -70,7 +70,7 @@ def _stub(n_local, n_sps, target):
                              np.ones(n_local, dtype=bool), n_sps, n_sps)
     s._get_positivity_limiter_gpu = lambda: _lim
     s._compute_turbulence_source_distributed = lambda dt: None
-    s._monitor_residual_norm = lambda r: float(np.linalg.norm(r))
+    s._monitor_residuals = lambda r: (float(np.linalg.norm(r)), np.zeros(5))
     big = np.full(n_local, 1e3)          # dtau 远大于 1/5：接近纯 Newton
     s._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av_compact=None: (
         (big, big) if return_physical_too else big)
@@ -146,4 +146,4 @@ def test_dual_time_branch_solves_bdf1_then_bdf2():
     assert np.all(np.abs(s.U_gpu - expected2).max(axis=(0, 1)) <= 1e-6 * step)
     assert s._dual_time_inner["a0"] == 1.5
     np.testing.assert_array_equal(s._dual_time_U_prev.reshape(U0.shape), U1)
-    assert not outer_updates and s.iteration == 2 and len(s.residual_history) == 2
+    assert not outer_updates and s.iteration == 2

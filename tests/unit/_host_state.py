@@ -9,12 +9,16 @@ from contextlib import contextmanager
 
 
 def with_host_state(solver):
-    """给 SimpleNamespace 求解器替身补上 CPU 求解器的主机视图接口与产生项渐变计数器（真实求解器在构造时由
-    同一个 `init_production_ramp` 设置，checkpoint 写入/恢复读它们），返回替身本身。"""
+    """给 SimpleNamespace 求解器替身补上 CPU 求解器的主机视图接口、产生项渐变计数器与收敛历史（真实求解器在构造时
+    设置：前者由同一个 `init_production_ramp`，后者为空的 `ConvergenceHistory`；checkpoint 写入/恢复读它们），
+    返回替身本身。"""
+    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
     from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
 
     if not hasattr(solver, "_turb_ramp_step"):
         init_production_ramp(solver, solver.time_integrator.scheme)
+    if not hasattr(solver, "convergence_history"):
+        solver.convergence_history = ConvergenceHistory()
     solver.host_view = lambda: solver
 
     @contextmanager

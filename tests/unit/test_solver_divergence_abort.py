@@ -38,6 +38,8 @@ plate_demo_volume_les（179,237 单元）上一条 AUSM+up 预处理档对照运
 import numpy as np
 import pytest
 
+from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
 from autoflowcfd.core.fr_solver.residual_diagnostics import (
     SolverDivergedError,
     check_residual_finite,
@@ -198,12 +200,11 @@ class TestSolveLoopActuallyAborts:
         def step(dt):
             i = calls['step']
             calls['step'] += 1
-            stub.residual_history.append(residuals[i])   # 收敛历史在单步里记录（与真实求解器一致）
             return residuals[i]
 
         stub = SimpleNamespace(
             step=step,
-            residual_history=[],
+            convergence_history=ConvergenceHistory(),   # 收敛历史由求解循环记录（与真实求解器一致）
             order=1,
             turb_model_name='NONE',
             order_continuation_enabled=False,
@@ -249,7 +250,8 @@ class TestSolveLoopActuallyAborts:
         assert seen == [1, 2, 3, 4]
         assert result.iterations == 4
         assert result.final_residual == 6.5e8
-        assert stub.residual_history == [8.4e8, 7.9e8, 7.0e8, 6.5e8]
+        assert stub.convergence_history.residual == [8.4e8, 7.9e8, 7.0e8, 6.5e8]
+        assert stub.convergence_history.iterations == [1, 2, 3, 4]
 
     @pytest.mark.parametrize('bad', [float('inf'), float('-inf'), float('nan')])
     def test_aborts_on_every_nonfinite_kind(self, bad):

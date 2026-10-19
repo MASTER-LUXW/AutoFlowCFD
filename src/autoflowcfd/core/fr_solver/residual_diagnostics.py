@@ -48,7 +48,8 @@ class ResidualDiagnostics(NamedTuple):
     max_abs_var: int                 # 最大值所在变量索引（0=rho,1..3=动量,4=能量）
 
 
-_VAR_NAMES = ("rho", "rho_u", "rho_v", "rho_w", "rho_E")
+#: 平均流 5 个守恒方程的名字（缩放残差诊断与收敛历史共用）
+MEAN_FLOW_EQUATIONS = ("rho", "rho_u", "rho_v", "rho_w", "rho_E")
 
 
 def _reference_scales(freestream: dict, n_vars: int) -> np.ndarray:
@@ -169,10 +170,10 @@ def format_scaled_residual_line(diag: "ResidualDiagnostics",
     """
     n_vars = diag.scaled_rms_per_var.shape[0]
     parts = []
-    for i in range(min(n_vars, len(_VAR_NAMES))):
-        parts.append(f"{_VAR_NAMES[i]}={diag.scaled_rms_per_var[i]:.3e}")
+    for i in range(min(n_vars, len(MEAN_FLOW_EQUATIONS))):
+        parts.append(f"{MEAN_FLOW_EQUATIONS[i]}={diag.scaled_rms_per_var[i]:.3e}")
     scaled_str = " ".join(parts)
-    var_name = _VAR_NAMES[diag.max_abs_var] if diag.max_abs_var < len(_VAR_NAMES) else f"var{diag.max_abs_var}"
+    var_name = MEAN_FLOW_EQUATIONS[diag.max_abs_var] if diag.max_abs_var < len(MEAN_FLOW_EQUATIONS) else f"var{diag.max_abs_var}"
     loc = f"{var_name}@cell{diag.max_abs_cell}"
     pct = cell_volume_percentile(cell_volumes)
     if pct is not None and diag.max_abs_cell < pct.size:

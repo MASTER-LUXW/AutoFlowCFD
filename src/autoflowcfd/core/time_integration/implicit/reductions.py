@@ -38,9 +38,16 @@ class LocalReductions:
     def _allreduce_max(self, value: float) -> float:
         return value
 
+    def _allreduce_sum_array(self, values: np.ndarray) -> np.ndarray:
+        return values
+
     # ---- 算法代码用的接口 ----
     def sum(self, x) -> float:
         return self._allreduce_sum(float(self.xp.sum(x)))
+
+    def sum_array(self, values) -> np.ndarray:
+        """主机数组逐元素的全局和（一次归约完成若干个标量，如逐方程平方和）。"""
+        return self._allreduce_sum_array(np.asarray(values, dtype=np.float64))
 
     def count(self, x) -> float:
         return self._allreduce_sum(float(x.size))

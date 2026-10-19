@@ -93,7 +93,9 @@ class _DistributedFromPackageMixin:
 
         n_sps = precompacted_mesh.n_sps_per_cell
         self.state = DistributedFRState(self.partition, n_sps)
-        self.residual_history = []   # 每步一条（单步里追加，与其余后端一致）
+        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+        self.convergence_history = ConvergenceHistory()
         n_vars = self.state.n_vars
         # 均匀自由流场初始化（同一处真实 bug 修复，见
         # DistributedFRState.initialize_uniform 文档）——"完全分布式

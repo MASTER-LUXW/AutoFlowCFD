@@ -23,6 +23,7 @@ from autoflowcfd.core.utils.order_continuation.policy import (
 )
 from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.time_integration.implicit.newton.physical_time import inner_iteration_suffix
+from autoflowcfd.core.fr_solver.convergence_history import record_step
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.core.utils import order_continuation
@@ -40,7 +41,7 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     """每步一行日志（定阶循环 `SolveLoopMixin.solve` 与 Order Continuation 共用，此前两边各写一份）。
 
     残差、相对本阶段起点的下降倍数、单步耗时、CFL、Newton 诊断、后端附注；设置了 `_reference_area`
-    时附压力积分气动力系数（经 `host_view()` 读主机状态）。第 1 步与之后每 10 步再附逐方程缩放残差与最大
+    时附压力积分气动力系数（本步 `record_step` 记进收敛历史的那一份）。第 1 步与之后每 10 步再附逐方程缩放残差与最大
     残差定位（参照 Fluent scaled residuals / STAR-CCM+ Max 监视器；最大残差单元的体积分位是区分"退化单元
     机制"与"壁面处理机制"最直接的指标）和累计伪时间预算（残差下降不等于物理场已建立，见
     `pseudotime_budget.py` 模块文档）——数据源由后端钩子 `_scaled_residual_field()` 给出。
@@ -54,12 +55,9 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     if ctrl is not None:
         msg += f" | CFL={ctrl.cfl_number:.3f}"
     msg += inner_iteration_suffix(solver) + newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
-    ref_area = getattr(solver, "_reference_area", None)
-    if ref_area is not None and ref_area > 0:
-        from autoflowcfd.postprocess.fr_coefficients import pressure_force_coefficients
-
-        aero = pressure_force_coefficients(solver.host_view(), ref_area)
-        msg += f" | Cd_p={aero['Cd']:.4f} Cl_p={aero['Cl']:.4f} Cs_p={aero['Cs']:.4f}"
+    aero = solver.convergence_history.last_coefficients      # 本步 record_step 算好的那一份
+    if aero is not None:
+        msg += f" | Cd_p={aero['Cd_p']:.4f} Cl_p={aero['Cl_p']:.4f} Cs_p={aero['Cs_p']:.4f}"
     freestream = getattr(solver, "freestream", None)
     field = solver._scaled_residual_field() if (iteration == 1 or iteration % 10 == 0) else None
     if freestream is not None and field is not None:
@@ -88,6 +86,11 @@ def report_pseudo_time_summary(solver, n_steps: int) -> None:
 
 class SolveLoopMixin:
     """与后端无关的求解循环（见模块文档）。"""
+
+    @property
+    def residual_history(self) -> list:
+        """逐步监控残差（`convergence_history.residual`，只读视图）。"""
+        return self.convergence_history.residual
 
     def _loop_monitor_suffix(self) -> str:
         """每步日志末尾的后端信息（CPU 无；GPU 打印显存占用）。"""
@@ -265,6 +268,7 @@ class SolveLoopMixin:
                                       last_finite=last_finite, extra_hint=self._divergence_hint())
                 last_finite = res
 
+                record_step(self, res)
                 phase_gate.observe(self, res)
                 initial_res = update_phase_baseline(self, res, initial_res, report, f"P{self.order} Iter {i + 1}")
                 self._phase_initial_residual = initial_res

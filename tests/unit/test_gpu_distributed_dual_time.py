@@ -71,7 +71,6 @@ def _make_stub(n_local, n_sps, n_vars, target):
     # 初始猜测同样必须是真实物理量级的守恒变量（与 target 用不同随机种子，
     # 确保确实需要迭代收敛，不是从 target 本身出发的平凡情形）。
     stub.U_gpu = _make_target(n_local, n_sps, np.random.default_rng(999))
-    stub.residual_history = []
     stub.iteration = 0
     # 逐单元局部 CFL 步长（2026-09-14）：`step()` 的 DUAL_TIME 分支现在
     # 用 `_compute_local_time_step_gpu()` 算内层伪时间步长，而不是把调用
@@ -121,9 +120,9 @@ def _make_stub(n_local, n_sps, n_vars, target):
         return -5.0 * (stub.U_gpu - target)
     stub._compute_total_residual_gpu = _compute_total_residual_gpu
 
-    def _global_residual_norm(res_flat):
-        return float(np.linalg.norm(res_flat))
-    stub._monitor_residual_norm = _global_residual_norm
+    def _global_residuals(res_flat):
+        return float(np.linalg.norm(res_flat)), np.zeros(5)
+    stub._monitor_residuals = _global_residuals
 
     stub._calls = calls
     return stub

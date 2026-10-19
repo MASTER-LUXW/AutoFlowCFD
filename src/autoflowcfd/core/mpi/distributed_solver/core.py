@@ -154,7 +154,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 4. 初始化分布式状态（在面几何/halo 扩展之后构造）
         n_sps = mesh.n_sps_per_cell
         self.state = DistributedFRState(self.partition, n_sps)
-        self.residual_history = []   # 每步一条（单步里追加，与其余后端一致）
+        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+        self.convergence_history = ConvergenceHistory()
         n_vars = self.state.n_vars
         # 均匀自由流场初始化（真实 bug 修复，2026-09-02，见
         # DistributedFRState.initialize_uniform 文档）：此前这里从未

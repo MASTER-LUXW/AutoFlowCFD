@@ -90,26 +90,12 @@ class _APIPostMixin:
         logger.info(f"VTK 已导出：{filename}")
 
     def get_convergence_history(self) -> Dict[str, list]:
-        """获取收敛历史。
+        """获取收敛历史：`{"iterations", "residuals"}`（监控残差，`core/fr_solver/convergence_history.py`）。
 
-        真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里恒为
-        硬编码占位符 `{"iterations": [], "residuals": []}`，不管
-        run_steady/run_transient 是否已经成功跑完、收敛得多好，调用方
-        拿到的永远是两个空列表，且没有任何警告提示这是未实现的占位符。
-        现在读取 `self.solver.residual_history`（CPU FRSolver 与
-        GPUFRSolver/MultiGPUDistributedSolver 都在各自的 solve 循环里
-        逐迭代 append，同一个约定，见 fr_solver/solver.py::solve() 与
-        core/utils/order_continuation.py::run_order_continuation）。
-
-        Returns:
-            包含 iterations（1-based 迭代序号）和 residuals 的字典；
-            尚未运行过 run_steady/run_transient（self.solver 为 None）
-            或求解器本身未记录历史时返回两个空列表。
+        迭代编号与 checkpoint 一致（续算时接着 checkpoint 往下记）；尚未运行过求解时两个空列表。完整的逐方程
+        残差、CFL 与逐步力系数在 `self.solver.convergence_history` 与写出的 checkpoint 里。
         """
-        residuals = getattr(self.solver, "residual_history", None) if self.solver is not None else None
-        if not residuals:
+        history = getattr(self.solver, "convergence_history", None) if self.solver is not None else None
+        if history is None:
             return {"iterations": [], "residuals": []}
-        return {
-            "iterations": list(range(1, len(residuals) + 1)),
-            "residuals": list(residuals),
-        }
+        return {"iterations": list(history.iterations), "residuals": list(history.residual)}

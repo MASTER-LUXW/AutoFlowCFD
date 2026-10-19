@@ -126,7 +126,9 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
                                turbulence_intensity, viscosity_ratio)
         self._setup_state_and_boundary(n_local, n_sps)
 
-        self.residual_history = []
+        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+        self.convergence_history = ConvergenceHistory()
         self.iteration = 0
 
         barrier()

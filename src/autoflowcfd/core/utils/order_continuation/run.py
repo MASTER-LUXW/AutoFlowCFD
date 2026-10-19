@@ -15,6 +15,7 @@
 import time as _time
 from typing import Any, Optional
 
+from autoflowcfd.core.fr_solver.convergence_history import record_step
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.mpi import is_root
 
@@ -129,6 +130,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 check_residual_finite(res, i + 1, order=target_p, last_finite=last_finite,
                                       extra_hint=solver._divergence_hint())
                 last_finite = res
+                record_step(solver, res)
                 phase_gate.observe(solver, res)
                 initial_residual = update_phase_baseline(solver, res, initial_residual, report,
                                                          f"P{target_p} Iter {i + 1}")

@@ -138,6 +138,8 @@ class TestGpuDistributedCheckpointRoundtrip:
         # 产生项渐变计数器（真实求解器在构造时由同一个函数设置；checkpoint 记录渐变进度）
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
         init_production_ramp(solver, TimeIntegrationScheme.NEWTON_KRYLOV)
+        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+        solver.convergence_history = ConvergenceHistory()      # 真实求解器在构造时设置
         n_local = partition.n_local_cells
         rng = np.random.default_rng(123)
         solver.U_gpu = rng.uniform(-1.0, 1.0, size=(n_local, n_sps, n_vars))

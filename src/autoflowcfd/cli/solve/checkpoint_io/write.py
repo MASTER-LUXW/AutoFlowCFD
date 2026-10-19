@@ -197,9 +197,11 @@ def write_checkpoint(
     if _turb_prev is not None:
         extra_fields[TURBULENCE_PREVIOUS_FIELD] = _turb_prev
 
+    from autoflowcfd.core.fr_solver.convergence_history import checkpoint_history
+
     path = manager.save(
         solution_cell_avg,
-        {"iterations": [iteration]},
+        checkpoint_history(solver, iteration),
         iteration,
         metadata=metadata,
         extra_fields=extra_fields,

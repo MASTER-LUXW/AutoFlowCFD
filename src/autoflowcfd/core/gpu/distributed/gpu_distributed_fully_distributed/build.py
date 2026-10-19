@@ -254,7 +254,9 @@ def build_multi_gpu_solver_from_fully_distributed_package(
             self._wall_mask_gpu = cp.asarray(wall_mask_np)
             self._open_mask_gpu = cp.asarray(open_mask_np)
 
-    self.residual_history = []
+    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+    self.convergence_history = ConvergenceHistory()
     self.iteration = 0
 
     barrier()

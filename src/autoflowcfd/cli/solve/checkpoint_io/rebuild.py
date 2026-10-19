@@ -172,7 +172,7 @@ def rebuild_from_checkpoint(
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 
-    _solution, _history, iteration, metadata = CheckpointManager().load(checkpoint_path)
+    _solution, history, iteration, metadata = CheckpointManager().load(checkpoint_path)
 
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:
@@ -247,6 +247,10 @@ def rebuild_from_checkpoint(
 
     with solver.edit_host_state() as host:
         restore_solver_state_from_fields(host, fields, metadata)
+    # 收敛历史接着 checkpoint 往下记（编号与续算的 checkpoint 文件名一致）
+    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
+    solver.convergence_history = ConvergenceHistory.from_checkpoint(history, iteration)
 
     metadata["order"] = order
     metadata["target_order"] = target_order

@@ -220,13 +220,12 @@ class _GPUSolverStepMixin:
         self._apply_turbulence_corrections_gpu()
 
         # 残差范数：**未预处理**的物理残差（见 mean_flow_residual_raw），全部后端同一个定义
-        from autoflowcfd.core.time_integration.residual_norm import monitor_residual_norm
+        from autoflowcfd.core.time_integration.residual_norm import monitor_residuals
         from autoflowcfd.fr.native_padding import order_from_n_sps
 
-        residual_norm = monitor_residual_norm(
+        residual_norm, self._residual_per_equation = monitor_residuals(
             LocalReductions(cp), residual0_raw, np.arange(n_cells) < int(self.mesh.n_prism_cells),
             order_from_n_sps(n_sps))
-        self.residual_history.append(residual_norm)
         self.iteration += 1
 
         # 自适应 CFL：按物理残差更新（与 CPU 侧 step.py 同一时序——在残差

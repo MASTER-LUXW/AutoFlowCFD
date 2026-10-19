@@ -112,16 +112,17 @@ def _plateau_stub(residuals):
     from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, TimeIntegrator
 
+    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+
     calls = {"step": 0}
 
     def step(dt):
         r = residuals[min(calls["step"], len(residuals) - 1)]
         calls["step"] += 1
-        stub.residual_history.append(r)
         return r
 
     stub = SimpleNamespace(
-        step=step, residual_history=[], order=1, turb_model_name="NONE", turb_model=None,
+        step=step, convergence_history=ConvergenceHistory(), order=1, turb_model_name="NONE", turb_model=None,
         order_continuation_enabled=False,
         time_integrator=TimeIntegrator(scheme=TimeIntegrationScheme.NEWTON_KRYLOV),
         _cfl_controller=SERCFLController(cfl_start=1e4, cfl_max=1e4), _newton_last_info={"theta": 1.0},

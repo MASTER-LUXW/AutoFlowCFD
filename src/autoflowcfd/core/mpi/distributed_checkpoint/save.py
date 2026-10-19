@@ -64,6 +64,7 @@ def distributed_save_checkpoint(
     Returns:
         checkpoint 文件路径（仅 root rank 有值）
     """
+    from autoflowcfd.core.fr_solver.convergence_history import checkpoint_history
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     rank = get_rank()
@@ -131,7 +132,7 @@ def distributed_save_checkpoint(
 
     path = manager.save(
         solution_cell_avg,
-        {"iterations": [iteration]},
+        checkpoint_history(solver, iteration),
         iteration,
         metadata=metadata,
         extra_fields=extra_fields,
