@@ -13,29 +13,14 @@ Python 解释器 + 每次循环体内十几个小 numpy 调用的调度开销，
 可以直接读的定长 numpy 数组，缓存后供无粘/粘性两个 kernel 共用（面几何
 本身在无粘/粘性残差之间是共享的，且在同一批 RK 子迭代内不变）。
 
-缓存失效：Order Continuation（`grid/order_continuation.py`）会在阶数切换
-时于同一个 mesh 对象上整体替换 `mesh.face_flux_points`（重新构建或从
-缓存恢复，见 `grid/high_order_mesh_order.py`），所以缓存键必须是
-`mesh.face_flux_points` 这个 list 对象本身的身份，不能是"mesh 上有没有
-这个属性"——否则阶数切换后会静默复用上一个阶数的展平数组，不报错，只是
-算出错的残差。
+缓存：展平几何只依赖网格（同一阶数），挂在 `mesh.face_flux_points`（`_KernelFaceData`）自己的 `_flat_geometry` 上，
+与它同生命周期。Order Continuation 换阶时整体替换 `mesh.face_flux_points`（`grid/high_order_mesh_order.py`），
+新对象没有缓存，自然重建。
 
-缓存键危险陷阱（真实复现过一次，不是假设）：最初实现用 `id(mesh.
-face_flux_points)`（一个裸 int）当字典键。CPython 的 `id()` 只在对象存活
-期间保证唯一——旧 mesh 对象被垃圾回收后，它的 `face_flux_points` list
-腾出的内存完全可能被之后新建的、**另一个不相关 mesh** 的 `face_flux_
-points` list 复用，导致两个不同 mesh 拿到相同的 `id()`。本模块的缓存
-只保留最近一条记录，一旦发生这种 id 撞车，新 mesh 会命中缓存、静默拿到
-另一个 mesh（可能阶数、单元数、prism/tet 构成完全不同）的展平几何——
-真实复现：连续跑全量测试套件时（大量小 mesh 对象被创建/销毁，是 id 复用
-最容易发生的场景）第一次触发了 `ValueError: incompatible array sizes for
-np.dot`（形状对不上直接崩溃，运气好被抓住了）；同样的两次全量测试套件
-连续跑，另一次完全没有触发——是概率性的内存分配时机问题，不是随机噪声，
-更不能指望"多数时候不出现"就当它不存在：形状恰好碰巧兼容时，这个 bug
-不会崩溃，而是**静默算出错误物理量**，比崩溃更危险。修复：缓存键换成
-持有该 list 对象的**强引用**本身（不是它的 id()），查找时用 `is` 做身份
-比较——只要这个引用被缓存持有着，它就不可能被垃圾回收，也就不可能有
-任何其他对象复用到同一个身份，从根上消除这类 id 复用竞争。
+历史（2026-10-19，I-21）：此前是模块级单槽全局缓存，键为 `mesh.face_flux_points` 的强引用——网格释放后仍被缓存
+强引用住（展平几何连同整个面通量点数据滞留在内存），两张网格交替求值时每次都整体重建。更早用裸 `id()` 当键时
+还真实复现过一次 id 复用撞车（全量测试里另一张已释放网格的 id 被新网格复用，命中错误几何，形状不兼容时崩溃、
+兼容时静默算错）。缓存放在被缓存对象自身上，这两类问题都不再可能。
 
 内存设计：`owner_sources`/`neighbor_sources` 长度恒为 1 或 2（网格生成器
 把棱柱四边形侧面恒定拆分成 2 个三角子面，不会更多，见
@@ -55,12 +40,6 @@ import numpy as np
 
 from .face_points import p0_flux_points
 
-# 单槽缓存：(强引用住的 key list 对象, 对应的 FlatFaceGeometry)。用对象
-# 本身的强引用而不是 id() 当键，理由见模块文档"缓存键危险陷阱"一节——
-# 持有强引用能保证该对象在缓存存活期间不被 GC，其"身份"也就不可能被
-# 另一个无关对象复用。
-_FLAT_CACHE_KEY: object = None
-_FLAT_CACHE_VALUE: "FlatFaceGeometry" = None
 
 
 
@@ -425,18 +404,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
 
 
 def get_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
-    """缓存版本，键为 `mesh.face_flux_points` 这个 list 对象本身的身份
-    （不是 mesh 本身的身份——Order Continuation 在同一个 mesh 对象上原地
-    替换这个 list，见模块文档"缓存失效"一节；也不是裸 `id()` 整数——
-    见模块文档"缓存键危险陷阱"一节，裸 id() 有被另一个无关 mesh 复用
-    撞车的真实风险）。"""
-    global _FLAT_CACHE_KEY, _FLAT_CACHE_VALUE
-    if _FLAT_CACHE_KEY is mesh.face_flux_points and _FLAT_CACHE_VALUE is not None:
-        return _FLAT_CACHE_VALUE
-    flat = build_flat_face_geometry(mesh, ops)
-    # 只保留最近一次几何，避免阶数切换间反复累积旧缓存占用内存；同时
-    # 持有 mesh.face_flux_points 的强引用本身作为键，防止其被 GC 后
-    # 另一个无关对象复用同一身份。
-    _FLAT_CACHE_KEY = mesh.face_flux_points
-    _FLAT_CACHE_VALUE = flat
-    return flat
+    """`mesh` 当前阶数的展平面几何，缓存在 `mesh.face_flux_points._flat_geometry` 上（见模块文档"缓存"）。"""
+    ffp = mesh.face_flux_points
+    if ffp._flat_geometry is None:
+        ffp._flat_geometry = build_flat_face_geometry(mesh, ops)
+    return ffp._flat_geometry
