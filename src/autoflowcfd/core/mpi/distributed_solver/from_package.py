@@ -223,16 +223,6 @@ class _DistributedFromPackageMixin:
             boundary_ghost_provider=package['boundary_ghost_provider'],
             freestream={**package['freestream'], "mach_ref": package['mach_ref']},
         )
-        # `_p0_global_boundary_ghost_provider` 是"传统模式"专用的全局
-        # provider（本 rank 持有完整全局网格时才有意义），"完全分布式
-        # 加载"下恒为 None——但这**不代表** P0 阶段的分布式残差本身
-        # 不支持：那条路径改用 `distributed_order_continuation.py::
-        # compute_distributed_p0_inviscid_residual` 里 `_is_
-        # fully_distributed` 分支的另一套机制（只有 root 通过
-        # `self._root_context` 持有的完整网格计算，算完 broadcast 给
-        # 全部 rank），2026-09-02 已实现，见该函数文档。
-        self._p0_global_boundary_ghost_provider = None
-
         # 真实读取 package 里的 time_scheme/dual_time_inner_iter（不再
         # 硬编码 SSP_RK3）——`build_fully_distributed_rank_package`
         # 2026-09-02 已接入这两个字段（见 distributed_mesh_loader.py
@@ -323,19 +313,8 @@ class _DistributedFromPackageMixin:
             # `group_code` 重映射到压缩索引空间。
             provider = getattr(self._local_solver, 'boundary_ghost_provider', None)
             if provider is not None:
-                # P0 分布式残差路径（2026-09-02，见 core/mpi/
-                # distributed_order_continuation.py 模块文档"P0 有限
-                # 体积残差"一节）需要一份**未经压缩索引空间重映射**的
-                # provider——P0 kernel 直接对 `self.mesh`（完整全局网格）
-                # 逐全局面 id 调用，不经过下面这行的压缩重映射。在原地
-                # 覆写 `group_code` 之前，先浅拷贝一份 provider 对象、
-                # 保留原始全局 `group_code`，供 P0 路径使用；下面这行
-                # 仍然原地重映射 `self._local_solver.boundary_ghost_
-                # provider` 本身（P1+ 路径继续使用压缩索引空间版本，
-                # 行为不变）。
                 from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
 
-                self._p0_global_boundary_ghost_provider = provider
                 self._local_solver.boundary_ghost_provider = restrict_ghost_provider(
                     provider, self.partition.local_faces)
         return self._local_solver

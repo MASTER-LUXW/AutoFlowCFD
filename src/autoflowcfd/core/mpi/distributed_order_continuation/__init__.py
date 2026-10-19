@@ -53,15 +53,11 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 
 ## 文件分工(2026-09-24 拆包, 原 640 行)
 
-    p0_residual.py       P0 阶的分布式无粘残差（阶数延拓起点需要它单独一条路径）
     rebuild.py           阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .p0_residual import (  # noqa: F401
-    compute_distributed_p0_inviscid_residual,
-)
 from .rebuild import cpu_traditional_interpolate_to_new_order  # noqa: F401
 # resume 钳制检测是全部后端共用的**唯一实现**，住在后端中立的
 # `core/utils/order_continuation`（2026-09-24 合并：此前单机内联一份、
@@ -71,6 +67,5 @@ from autoflowcfd.core.utils.order_continuation import (  # noqa: F401
 )
 
 __all__ = [
-    "compute_distributed_p0_inviscid_residual",
     "cpu_traditional_interpolate_to_new_order",
 ]

@@ -76,15 +76,6 @@ class _DistributedStepMixin:
 
     def _inviscid_dudt_local(self, U_local: np.ndarray) -> np.ndarray:
         """无粘 dU/dt（含本次求值的 halo 交换），`(n_local, n_sps, n_vars)`。"""
-        if self.state.n_sps == 1:
-            # P0（Order Continuation 最低阶）：单机无粘残差在这个阶数完全绕开 flat-face
-            # 压缩抽象（core/fr_residual/inviscid.py::compute_inviscid_residual_fr 的
-            # `mesh.n_points_1d==1` 分支），P1+ 的 compact/halo 机制在这里不适用，见
-            # distributed_order_continuation.py::compute_distributed_p0_inviscid_residual。
-            from autoflowcfd.core.mpi.distributed_order_continuation import (
-                compute_distributed_p0_inviscid_residual,
-            )
-            return compute_distributed_p0_inviscid_residual(self, U_local)
         from autoflowcfd.core.mpi.distributed_compute import distributed_compute_inviscid_residual
 
         ls = self.local_solver

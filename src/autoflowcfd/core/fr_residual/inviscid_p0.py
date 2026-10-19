@@ -74,23 +74,21 @@ def compute_inviscid_residual_fv_p0(
 
     Q_all = conserved_to_primitive(U[..., :5])[:, 0, :]  # (n_cells,5)
 
-    fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
-    n_faces = fc.n_faces
+    n_faces = flat.n_faces
 
-    # --- 提取 flat 面几何数组 ---
-    unit_normals, area_weights = p0_face_geometry(ffp_list)
+    # --- 面几何：连接关系与着色取 `flat`，P0 法向 / 面积取 `p0_face_arrays`（两者是同一个面表）---
+    unit_normals, area_weights = p0_face_arrays(mesh)
+    if unit_normals.shape[0] != n_faces:
+        raise ValueError(f"P0 面几何有 {unit_normals.shape[0]} 个面，面连接关系有 {n_faces} 个（不是同一个面表）")
 
     # --- 预计算边界幽灵态 ---
     ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fv_p0")
-    Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces, unit_normals)
+    Q_ghost = _precompute_ghost_states(flat, flat, ghost_provider, Q_all, n_faces, unit_normals)
 
     # --- numba 并行 kernel：按面着色逐颜色组累加 ---
-    if flat.n_faces != n_faces:
-        raise ValueError(f"面着色所属的面几何有 {flat.n_faces} 个面，face_connectivity 有 {n_faces} 个（不是同一网格）")
-    owner_cell = fc.owner_cell.astype(np.int64)
-    neighbor_cell = fc.neighbor_cell.astype(np.int64)
-    is_boundary = fc.is_boundary.astype(np.bool_)
+    owner_cell = np.asarray(flat.owner_cell, dtype=np.int64)
+    neighbor_cell = np.asarray(flat.neighbor_cell, dtype=np.int64)
+    is_boundary = np.asarray(flat.is_boundary, dtype=np.bool_)
     residual5 = np.zeros((n_cells, 5))
     for face_indices in flat.color_face_indices:
         if len(face_indices) == 0:
@@ -102,6 +100,24 @@ def compute_inviscid_residual_fv_p0(
             face_indices, residual5, mach_ref,
         )
     return residual5[:, None, :]
+
+
+def p0_face_arrays(mesh):
+    """`mesh` 的面表上的 P0 `(unit_normals, area_weights)`。
+
+    单机：`p0_face_geometry(mesh.face_flux_points)`（全局面表）。CPU 分布式（`mesh` 为 `DistributedMeshAdapter`）：
+    分布式面几何构造时从全局 P0 面几何按本 rank 面表切出的那一份（`distributed_flat_face/build.py`，完全分布式
+    加载下由 root 算好随包下发）。2026-10-19（I-108）以前分布式 P0 无粘残差不在分区上算：每个 rank（完全分布式
+    下只有 root）把全局状态汇集起来算一遍全局残差再取自己那段，零并行加速、root 内存 O(全局)。
+    """
+    from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeometry
+
+    fc = mesh.face_connectivity
+    if isinstance(fc, DistributedFlatFaceGeometry):
+        if fc.p0_unit_normals is None:
+            raise RuntimeError("分布式面几何没有 P0 面几何（构造时网格不是 P0 阶）")
+        return fc.p0_unit_normals, fc.p0_area_weights
+    return p0_face_geometry(mesh.face_flux_points)
 
 
 def p0_face_geometry(ffp):
@@ -207,12 +223,14 @@ def _build_p0_face_geometry(ffp):
     return unit_normals, area_weights
 
 
-def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int, unit_normals):
+def _precompute_ghost_states(face_data, fc, ghost_provider, Q_all, n_faces: int, unit_normals):
     """需要幽灵态的面（真边界面 + 混合拆分面的边界子面记录）的 P0 幽灵态，按**面**索引。
 
     按面而不是按 owner 单元索引：同一个 P0 单元可同时挨着多个不同类型/法向的边界面（角点单元）。
 
     Args:
+        face_data: 提供 `mixed_bnd_face`（混合拆分面的边界子面记录）的面数据（`mesh.face_flux_points` 或面几何）
+        fc: 提供 `is_boundary` / `owner_cell` 的面连接关系（与 `face_data` 同一个面表）
         Q_all: (n_cells, 5) 单元原始变量
         unit_normals: (n_faces, 3)，`p0_face_geometry` 给出的面法向
 
@@ -220,8 +238,7 @@ def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int, 
         Q_ghost: (n_faces, 5)，只有需要幽灵态的面的行有意义，其余为零（kernel 不读）。
     """
     Q_ghost = np.zeros((n_faces, 5), dtype=Q_all.dtype)
-    mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
-    need = fc.is_boundary if mixed_bnd_face is None else (fc.is_boundary | mixed_bnd_face)
+    need = np.asarray(fc.is_boundary, dtype=bool) | np.asarray(face_data.mixed_bnd_face, dtype=bool)
     faces = np.flatnonzero(need)
     if faces.size:
         Q_owner = Q_all[fc.owner_cell[faces]][:, np.newaxis, :]

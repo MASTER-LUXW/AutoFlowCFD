@@ -78,6 +78,10 @@ class DistributedFlatFaceGeometry:
     partition_boundary_mask: np.ndarray
     physical_boundary_mask: np.ndarray
     compact_cell_type: np.ndarray = None
+    # P0 网格上构造时附带：本 rank 面表上的 P0 法向 / 面积（全局 P0 面几何按 local_faces 切出，
+    # `fr_residual/inviscid_p0.py::p0_face_arrays`）；其余阶数为 None
+    p0_unit_normals: np.ndarray = None
+    p0_area_weights: np.ndarray = None
     perm: np.ndarray = None
     inv_perm: np.ndarray = None
     compact_global_ids: np.ndarray = None

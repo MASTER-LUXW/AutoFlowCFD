@@ -186,7 +186,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 6. 保存 solver kwargs 用于创建本地求解器
         self.solver_kwargs = solver_kwargs
         self._local_solver = None  # 延迟初始化
-        self._p0_global_boundary_ghost_provider = None  # P0 分布式残差路径专用，见 local_solver 属性文档
 
         # 6b. SST 湍流模型初始化（2026-09-02，见 core/mpi/
         # distributed_turbulence.py 模块文档）。turb_model 只按

@@ -358,6 +358,15 @@ def build_distributed_flat_face(
     # 从全局单元编号直接算出正确答案，不依赖调用方对排列约定的假设）。
     compact_cell_type = np.where(compact_global_ids < n_prism_global, 0, 1).astype(np.int8)
 
+    # P0：全局 P0 面几何（含多源面去重、混合拆分面两半的真实三角形几何）按本 rank 面表切出
+    p0_unit_normals = p0_area_weights = None
+    if mesh.n_points_1d == 1:
+        from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry
+
+        normals_global, areas_global = p0_face_geometry(mesh.face_flux_points)
+        p0_unit_normals = np.ascontiguousarray(normals_global[local_face_indices])
+        p0_area_weights = np.ascontiguousarray(areas_global[local_face_indices])
+
     return DistributedFlatFaceGeometry(
         base_flat=sub_flat,
         partition=partition,
@@ -370,4 +379,6 @@ def build_distributed_flat_face(
         perm=perm,
         inv_perm=inv_perm,
         compact_global_ids=compact_global_ids,
+        p0_unit_normals=p0_unit_normals,
+        p0_area_weights=p0_area_weights,
     )
