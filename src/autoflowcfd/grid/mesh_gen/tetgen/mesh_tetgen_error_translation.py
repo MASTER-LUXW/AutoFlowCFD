@@ -34,20 +34,16 @@ def translate_tetgen_failure(exc: RuntimeError) -> Optional[RuntimeError]:
         )
 
     if "removevertexbyflips" in message or "internal tetgen error" in message:
-        # 在真实案例上观察到，当 Stage B 的响应式 BL 厚度上限
-        # （mesh_repair.compute_bl_thickness_limit_override）需要限制
-        # 非常大比例的表面顶点时——本身已经是 Stage A 留下广泛、
-        # 非局部的错误单元的症状——产生足够多的近重合点，超过
-        # tetgen 自身的内部数值鲁棒性极限（tetgen 的实现限制，
-        # 不是本代码库的网格策略错误），而不是像上面自交情况那样
-        # 给出更清晰的诊断。
+        # 在真实案例上观察到：BL 挤出在大比例表面顶点上停长（收敛预算
+        # 耗尽、节点冻结在后续各层同一坐标）时产生大量近重合点，超过
+        # tetgen 自身的内部数值鲁棒性极限（tetgen 的实现限制），而不是
+        # 像上面自交情况那样给出更清晰的诊断。
         return RuntimeError(
             f"{exc}. tetgen hit an internal robustness limit - on a case "
-            f"seen directly, this followed a very widespread Stage B "
-            f"BL-thickness cap (a sign Stage A already found bad cells "
-            f"across much of the surface, not just a few corners). Try "
-            f"loosening --growth-rate/--min-cell-size/--bl-layers so "
-            f"Stage A has fewer bad cells to begin with."
+            f"seen directly, this followed boundary-layer extrusion stalling "
+            f"over a large fraction of the surface (many near-coincident "
+            f"points). Try loosening --growth-rate/--min-cell-size/--bl-layers "
+            f"so fewer BL columns stall."
         )
 
     return None

@@ -1,16 +1,18 @@
 """阶段 B'：生成后体网格修复的局部空腔重铺。
 
-remesh_core_cavity 仅对仍然不合格的单元（经过阶段 A 平滑和阶段 B 的
-BL 厚度上限，均在 mesh_repair.py / mesh_repair_bl_thickness.py 中）加上
+remesh_core_cavity 仅对阶段 A 平滑（mesh_repair.py）后仍然不合格的单元加上
 一圈良好邻居单元的缓冲区进行局部重新四面体化，而不是微调节点（阶段 A）
 或重新生成整个网格。提取空腔自身的边界（用 `n_buffer_rings` 圈良好单元
 做缓冲，使空腔的新边界位于已经良好的区域中，而非穿过已退化的单元），
 仅将这个小的封闭壳体交给独立的 tetgen 调用（nobisect=True，无竞争区域/
 体积约束——与本包核心填充在所有其他地方使用的同一默认、已验证可靠的
 tetgen 用法相同），然后将结果拼回被移除单元的位置。这在结构上不可能像
-旧的核心侧区域方法那样向外泄漏细化（见 mesh_repair_bl_thickness.py 的
-历史说明），因为空腔自己的 tetgen 调用完全看不到域的其余部分——没有东西
-可以泄漏进去。对替换单元有严格的质量改进门控——如果局部重铺实际上没有
+旧的核心侧区域方法那样向外泄漏细化（按区域细化的 tetgen 会把细化扩散到区域外），
+因为空腔自己的 tetgen 调用完全看不到域的其余部分——没有东西可以泄漏进去。
+
+截止条件全部是确定性的（簇数上限、空腔规模上限、每簇至多扩两圈重试），同一输入在任何机器、任何负载下
+得到同一网格；耗时只在汇总日志里报告。2026-10-20 以前另有 400 s 挂钟上限（超时剩余坏单元保持原样），
+结果随机器速度与负载变化、不可复现。对替换单元有严格的质量改进门控——如果局部重铺实际上没有
 帮助，则保留原始单元，算例继续进入下一个修复阶段。
 
 作用域（核心单元 vs. 接触自身壁面的 BL 单元）记录在 remesh_core_cavity
@@ -32,6 +34,8 @@ mesh_repair_cavity_cluster_attempt.py 的 _attempt_cavity_retile_clusters，
 """
 
 from typing import List, Tuple, TYPE_CHECKING
+
+import time
 
 import numpy as np
 from loguru import logger
@@ -62,7 +66,6 @@ def remesh_core_cavity(
     n_buffer_rings: int = 1,
     max_cavity_cells: int = 20_000,
     max_clusters_attempted: int = 15_000,
-    max_seconds: float = 400.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """阶段 B'：对仍然不合格的单元（加上良好邻居缓冲区）按其自身固定边界
     局部重新四面体化，而非微调节点（阶段 A）或重新生成整个网格（阶段 B，
@@ -108,10 +111,6 @@ def remesh_core_cavity(
             静默留下 7,013 个完全未尝试之后，远在质量门控拒绝问题
             （见下方）进入视野之前——离线网格生成已有分钟可花在此处，
             且每个附加簇尝试都便宜。
-        max_seconds: 本次调用自身总挂钟时间的安全上限，在簇间检查
-            （不中断已在进行中的）。纯簇数上限在簇大小/tetgen 难度
-            差异很大时本身不能约束成本；这是该情况的第二道独立安全网。
-            与 max_clusters_attempted 一起从早期 90 秒提高，原因相同。
 
     Returns:
         (new_nodes, new_cells, new_bad_cell_mask, action_log) - 如果未找到合格空腔或每个候选空腔都未通过接受
@@ -155,14 +154,16 @@ def remesh_core_cavity(
     # （原文件超过 400 行上限）——两阶段设计（先只读原始数组决定每个簇的
     # 取舍，最后才一次性拼接进新网格）的原因见本文件模块文档字符串顶部，
     # 这里不重复。
+    start_time = time.perf_counter()
     accepted, claimed, n_skipped_size, n_rejected, n_failed, n_skipped_budget = (
         _attempt_cavity_retile_clusters(
             nodes, cells, bad_cell_mask, validator,
             seed_idx, labels, n_clusters,
             owner, neighbor,
-            n_buffer_rings, max_cavity_cells, max_clusters_attempted, max_seconds,
+            n_buffer_rings, max_cavity_cells, max_clusters_attempted,
         )
     )
+    elapsed = time.perf_counter() - start_time
 
     from ..tetgen.mesh_tetgen_core import repair_nonmanifold_cells
 
@@ -175,7 +176,7 @@ def remesh_core_cavity(
         logger.info(
             f"Stage B': 0/{n_clusters} cavity cluster(s) remeshed "
             f"(skipped_size={n_skipped_size}, rejected={n_rejected}, "
-            f"failed={n_failed}, skipped_budget={n_skipped_budget})"
+            f"failed={n_failed}, skipped_budget={n_skipped_budget}; {elapsed:.1f} s)"
         )
         return nodes, cells, bad_cell_mask, actions
 
@@ -255,7 +256,7 @@ def remesh_core_cavity(
     logger.info(
         f"Stage B': {len(accepted)}/{n_clusters} cavity cluster(s) remeshed "
         f"(skipped_size={n_skipped_size}, rejected={n_rejected}, "
-        f"failed={n_failed}, skipped_budget={n_skipped_budget})"
+        f"failed={n_failed}, skipped_budget={n_skipped_budget}; {elapsed:.1f} s)"
     )
 
     return new_nodes, new_cells, new_bad_cell_mask, actions

@@ -8,7 +8,6 @@ cavity 边界、调用 tetgen 局部重新四面体化、按质量门槛决定�
 的文档字符串，这里不重复。
 """
 
-import time
 from typing import List, Tuple
 
 import numpy as np
@@ -35,7 +34,6 @@ def _attempt_cavity_retile_clusters(
     n_buffer_rings: int,
     max_cavity_cells: int,
     max_clusters_attempted: int,
-    max_seconds: float,
 ) -> Tuple[List[dict], np.ndarray, int, int, int, int]:
     """对每个连通的坏单元簇分别尝试局部 cavity 重新四面体化。
 
@@ -87,20 +85,9 @@ def _attempt_cavity_retile_clusters(
             f"remainder is left for whichever repair stage runs next"
         )
 
-    start_time = time.perf_counter()
     for cluster_id in range(n_clusters):
         if cluster_id >= max_clusters_attempted:
             n_skipped_budget = n_clusters - cluster_id
-            break
-        elapsed = time.perf_counter() - start_time
-        if elapsed > max_seconds:
-            n_skipped_budget = n_clusters - cluster_id
-            logger.warning(
-                f"Stage B': stopping after {elapsed:.1f}s (max_seconds="
-                f"{max_seconds:.0f}) with {cluster_id}/{n_clusters} clusters "
-                f"attempted - remaining {n_skipped_budget} left for "
-                f"whichever repair stage runs next"
-            )
             break
 
         cluster_seed_mask = np.zeros(n_cells, dtype=bool)
@@ -116,21 +103,8 @@ def _attempt_cavity_retile_clusters(
         # 相邻单元体积比等其他全局指标不变——V2.0 专项攻关记录），这里
         # 只是把同一条已验证安全的路径再延伸一档，不是新机制；是否值得
         # 再扩到 +3 由这次 +2 的真实收益/时间开销数据决定，不预先假设。
-        # 复用与外层循环相同的 max_seconds 预算（下面提前 return 时用
-        # 同一个 n_skipped_budget 语义）。
         result = None
         for attempt_rings in (n_buffer_rings, n_buffer_rings + 1, n_buffer_rings + 2):
-            elapsed = time.perf_counter() - start_time
-            if elapsed > max_seconds:
-                n_skipped_budget = n_clusters - cluster_id
-                logger.warning(
-                    f"Stage B': stopping after {elapsed:.1f}s (max_seconds="
-                    f"{max_seconds:.0f}) with {cluster_id}/{n_clusters} clusters "
-                    f"attempted - remaining {n_skipped_budget} left for "
-                    f"whichever repair stage runs next"
-                )
-                return accepted, claimed, n_skipped_size, n_rejected, n_failed, n_skipped_budget
-
             cavity_mask = _grow_cavity_rings(
                 cluster_seed_mask, owner, neighbor, claimed, attempt_rings
             )

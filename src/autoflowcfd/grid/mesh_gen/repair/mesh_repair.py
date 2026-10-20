@@ -6,14 +6,10 @@
 这两类节点既不承载物理几何含义，也不像交界面那样对已生成的相邻几何有
 支撑作用（见 compute_movable_node_mask 自己的文档字符串）。
 
-阶段 B（BL 侧厚度封顶）和阶段 B'（局部 cavity 重新铺网）在
-mesh_repair_cavity.py 里，纯粹为了控制本文件行数才拆出去——在本文件底部
-重新转出，让现有调用方（`from .mesh_repair import smooth_bad_cells,
-compute_bl_thickness_limit_override, remesh_core_cavity`）不受影响。完整
-的阶段 B/B' 说明见 mesh_repair_cavity.py 自己的模块文档字符串，包括
-阶段 B 之前一个基于 core 侧区域的对应方案为什么被移除（实际效果是净负面
-的——tetgen 按区域细化会向外泄漏，见 mesh_background.py 自己的历史记录），
-以及阶段 B' 为什么现在也覆盖 BL 单元，而不只是纯 core 单元。
+阶段 B'（局部 cavity 重新铺网）在 mesh_repair_cavity.py 里，在本文件底部重新转出
+（`from .mesh_repair import smooth_bad_cells, remesh_core_cavity`）。说明见该模块文档字符串，包括
+基于 core 侧区域的旧方案为什么被移除（tetgen 按区域细化会向外泄漏），以及阶段 B' 为什么也覆盖 BL 单元。
+阶段 B（按残留坏单元封顶 BL 厚度、整体重新生成）已于 2026-10-09 删除，见 mesh_repair_stage_b.py。
 """
 
 from typing import List, Optional, Tuple, TYPE_CHECKING

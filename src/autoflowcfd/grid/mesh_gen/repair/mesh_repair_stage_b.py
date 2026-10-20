@@ -70,9 +70,8 @@ def run_stage_b_repair(
         # 数量，在 remesh_core_cavity 内部触发 IndexError
         # (touches_physical_boundary[...] = True)），在修复管线有机会
         # 报告或导出任何东西之前就中断了。每次迭代都无条件重新
-        # 提取（而不仅仅是检测到变化时才提取），因为下面的
-        # compute_bl_thickness_limit_override 调用也需要当前的面数据，
-        # 而"是否变化"的判断出错是比一次冗余提取更严重的故障模式。
+        # 提取（而不仅仅是检测到变化时才提取）："是否变化"的判断出错
+        # 是比一次冗余提取更严重的故障模式。
         node_arr = NodeArray.from_array(merged_nodes)
         pre_repair_faces = FaceExtractor.extract_faces(merged_cells.astype(np.int32), node_arr)
 

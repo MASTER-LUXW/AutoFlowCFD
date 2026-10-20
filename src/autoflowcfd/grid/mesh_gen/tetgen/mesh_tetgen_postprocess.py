@@ -35,9 +35,8 @@ def _dedupe_coincident_points(
     两个调用场景：一是 fill_core_volume 中的原始回退，用于 tetgen
     未返回完全保形边界的情况；二是 mesh_background.generate_hybrid_mesh
     对整体合并网格的最终防御性传递，用于一个在真实案例中发现的
-    不同失败模式——当 mesh_repair.compute_bl_thickness_limit_override
-    的响应式 BL 厚度上限需要限制非常大比例的表面顶点时（这本身
-    就是上游产生广泛而非局部的坏单元的症状），许多节点的
+    不同失败模式——当 BL 挤出的收敛预算在大比例表面顶点上同时
+    收紧时，许多节点的
     `remaining_budget` 在相同的几层内恰好达到零，将它们冻结在
     后续每层的相同坐标上——但每个仍然获得自己的独立全局节点
     索引（每层无条件一个新索引），所以结果是在不同索引下产生
