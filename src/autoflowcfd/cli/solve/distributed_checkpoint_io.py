@@ -17,7 +17,8 @@ from typing import Optional
 
 import click
 
-from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
 
 
@@ -76,8 +77,6 @@ def rebuild_distributed_solver_from_checkpoint(
         重建所用的完整 metadata 字典
     """
     from autoflowcfd.core.utils.checkpoint_load import load_checkpoint_header
-    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
-    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     # 每个 rank 只读头信息（属性、收敛历史、数据集形状）：数组由 root 在 distributed_load_checkpoint 里读取后按 rank
     # 分发。2026-10-19 以前这里每个 rank 都把整个 checkpoint（全局 U_sps 与湍流场）读进内存（I-103）
@@ -111,140 +110,24 @@ def rebuild_distributed_solver_from_checkpoint(
     # 攻角/侧滑角此前在这里四条构造路径上**全部**没有恢复，续算静默变成零攻角。
     from autoflowcfd.cli.solve.checkpoint_io import physics_from_metadata
     physics = physics_from_metadata(metadata)
-    rho_inf, vel_inf, p_inf = physics["rho_inf"], physics["vel_inf"], physics["p_inf"]
-    aoa_deg, aos_deg = physics["aoa_deg"], physics["aos_deg"]
-    mu_molecular = physics["mu_molecular"]
-    turbulence_intensity = physics["turbulence_intensity"]
-    viscosity_ratio = physics["viscosity_ratio"]
-    av_kwargs = dict(artificial_viscosity_enabled=physics["artificial_viscosity_enabled"],
-                     artificial_viscosity_alpha=physics["artificial_viscosity_alpha"],
-                     wall_treatment=physics["wall_treatment"])
     from autoflowcfd.cli.solve.checkpoint_io.rebuild import (
         resolve_resume_low_mach_precond, resolve_resume_time_accurate, resolve_resume_time_scheme,
     )
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
-    # 不是物理参数（不改定常解），但与 av_kwargs 走同样的四条构造路径
-    av_kwargs["low_mach_precond"] = resolve_resume_low_mach_precond(low_mach_precond, metadata)
-    av_kwargs["time_accurate"] = resolve_resume_time_accurate(time_scheme, metadata)
 
-    if multi_gpu and fully_distributed:
-        # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被
-        # 直接拒绝，见 MultiGPUDistributedSolver.from_fully_distributed_
-        # package/gpu_distributed_fully_distributed.py 模块文档）。
-        from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
-        from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
+    from autoflowcfd.cli.solve.distributed_build import build_distributed_solver
 
-        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
-                      "aoa_deg": aoa_deg, "aos_deg": aos_deg}
-        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
-        volume_data = None          # 只在 root 的 `_root_context` 里
-        package, root_context = distributed_mesh_load_v2(
-            input_file, order, resolved_surface_mesh, n_ranks,
-            freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
-            enable_viscous=True, skip_quality_check=skip_quality_check,
-            turb_model_name=turbulence_model.upper(),
-            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            **av_kwargs,
-            time_scheme=scheme,
-        )
-        solver = MultiGPUDistributedSolver.from_fully_distributed_package(
-            package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
-        )
-        loaded_metadata, loaded_iteration = solver.load_checkpoint_distributed(checkpoint_path)
-        metadata = loaded_metadata or metadata
-        iteration = loaded_iteration
-
-    elif multi_gpu:
-        from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
-        from autoflowcfd.fr.operators import generate_fr_operators
-
-        mesh, volume_data = load_mesh_for_solver(
-            input_file, order, surface_mesh=resolved_surface_mesh,
-            skip_quality_check=skip_quality_check,
-        )
-        ops = generate_fr_operators(order)
-        solver = MultiGPUDistributedSolver(
-            mesh=mesh, ops=ops, n_ranks=n_ranks, device_id=gpu_device,
-            mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
-            turb_model=turbulence_model.upper(),
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
-            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            **av_kwargs,
-            time_scheme=scheme.value,
-        )
-        # GPU 版 checkpoint 加载是求解器自身方法（见
-        # gpu_distributed_init.py::load_checkpoint_distributed），内部
-        # 直接写回 self.state.U/self.U_gpu，不需要调用方再手动切片。
-        loaded_metadata, loaded_iteration = solver.load_checkpoint_distributed(checkpoint_path)
-        metadata = loaded_metadata or metadata
-        iteration = loaded_iteration
-
-    elif fully_distributed:
-        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
-        from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-        from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
-
-        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
-                      "aoa_deg": aoa_deg, "aos_deg": aos_deg}
-        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
-        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
-        volume_data = None          # 只在 root 的 `_root_context` 里
-        package, root_context = distributed_mesh_load_v2(
-            input_file, order, resolved_surface_mesh, n_ranks,
-            freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
-            enable_viscous=True, skip_quality_check=skip_quality_check,
-            turb_model_name=turbulence_model.upper(),
-            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            **av_kwargs,
-            time_scheme=scheme,
-        )
-        solver = DistributedFRSolver.from_fully_distributed_package(
-            package, n_ranks=n_ranks, root_context=root_context,
-        )
-
-        U_local, loaded_metadata, loaded_iteration = distributed_load_checkpoint(checkpoint_path, solver)
-        n_local = solver.partition.n_local_cells
-        solver.state.U[:n_local] = U_local
-        solver.state.Q[:n_local] = conserved_to_primitive(U_local[..., :5])
-        metadata = loaded_metadata or metadata
-        iteration = loaded_iteration
-
-    else:
-        # CPU MPI"传统模式"：每个 rank 独立加载完整网格，与 CLI
-        # `solve steady --n-ranks` 的对应分支完全一致的构造方式。
-        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
-        from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
-        from autoflowcfd.fr.operators import generate_fr_operators
-
-        mesh, volume_data = load_mesh_for_solver(
-            input_file, order, surface_mesh=resolved_surface_mesh,
-            skip_quality_check=skip_quality_check,
-        )
-        ops = generate_fr_operators(order)
-        solver = DistributedFRSolver(
-            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=n_ranks, order=order,
-            turb_model_name=turbulence_model, time_scheme=scheme,
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
-            n_threads=threads, turbulence_intensity=turbulence_intensity,
-            viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
-            rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            **av_kwargs,
-        )
-
-        U_local, loaded_metadata, loaded_iteration = distributed_load_checkpoint(checkpoint_path, solver)
-        n_local = solver.partition.n_local_cells
-        solver.state.U[:n_local] = U_local
-        solver.state.Q[:n_local] = conserved_to_primitive(U_local[..., :5])
-        metadata = loaded_metadata or metadata
-        iteration = loaded_iteration
+    # 按 checkpoint 时的阶数构造（与保存的状态形状一致），物理参数全部取自 checkpoint
+    solver, volume_data = build_distributed_solver(
+        multi_gpu=multi_gpu, fully_distributed=fully_distributed, input_file=input_file, order=order,
+        surface_mesh=resolved_surface_mesh, skip_quality_check=skip_quality_check, n_ranks=n_ranks,
+        gpu_device=gpu_device, threads=threads, turbulence_model=turbulence_model, time_scheme=scheme,
+        physics=physics, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
+        time_accurate=resolve_resume_time_accurate(time_scheme, metadata),
+        dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS, sem_num_eddies=_SEM_DEFAULT_NUM_EDDIES)
+    loaded_metadata, iteration = solver.load_checkpoint_distributed(checkpoint_path)
+    metadata = loaded_metadata or metadata
 
     # Order Continuation resume 支持（2026-09-02）：与单机
     # rebuild_solver_from_checkpoint 同一处修复同一个理由——构造时为了
@@ -258,8 +141,7 @@ def rebuild_distributed_solver_from_checkpoint(
     # 2026-09-02 接入，见 gpu_distributed_order_continuation.py/
     # gpu_distributed_fully_distributed.py 模块文档）同样支持 Order
     # Continuation，这两个属性对它同样生效，不是无害占位。
-    if hasattr(solver, "order"):
-        solver.order = target_order
+    solver.order = target_order
     # 收敛历史接着 checkpoint 往下记（各 rank 都读了同一份 checkpoint，历史一致）
     from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
 

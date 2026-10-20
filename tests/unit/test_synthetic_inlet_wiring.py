@@ -121,15 +121,14 @@ def test_transient_distributed_cli_forwards_the_eddy_count(tmp_path):
     from click.testing import CliRunner
 
     from autoflowcfd.cli.main import cli
-    from tests.unit.test_solve_transient_distributed_cli import _arg
 
     mesh_file = tmp_path / "mesh.pkl"
     mesh_file.write_bytes(b"")
-    with patch("autoflowcfd.cli.solve.transient._solve_transient_distributed") as mock_distributed:
+    with patch("autoflowcfd.cli.solve.run.run_solve") as run:
         result = CliRunner().invoke(cli, ["solve", "transient", str(mesh_file), "--n-ranks", "2",
                                           "--sem-num-eddies", "77", "--max-iter", "1"])
     assert result.exit_code == 0, result.output
-    assert _arg(mock_distributed, "sem_num_eddies") == 77
+    assert run.call_args.args[0].sem_num_eddies == 77
 
 
 @pytest.mark.parametrize("tu,vr", [(0.05, 5.0), (0.002, 200.0)])

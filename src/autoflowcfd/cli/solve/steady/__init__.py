@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `solve steady` 命令（包）。
 
-`command`：click 命令本体与后端分派；`multi_gpu`/`cpu_mpi`/`single_node`：三个后端分支（单机分支覆盖 CPU 与单 GPU）。
+`command`：click 命令本体；按后端执行在 `cli/solve/run.py`（与 `solve transient` 共用）。
 """
 
 from .command import solve_steady  # noqa: F401

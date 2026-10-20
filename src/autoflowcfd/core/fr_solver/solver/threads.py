@@ -150,7 +150,7 @@ class blas_threads_limited:
 DEFAULT_N_THREADS = 8
 
 
-def configure_numba_threads(n_threads: int, mesh) -> int:
+def configure_numba_threads(n_threads: int) -> int:
     """设置 numba 全局线程数（求解器生命周期内只设一次，必须在任何残差
     kernel 被调用之前）；返回实际生效的线程数。取值依据见函数体注释与 `FRSolver.__init__` 的 `n_threads` 文档。
 

@@ -366,16 +366,40 @@ class TestDistributedCheckpointRoundTrip:
             assert got[k] == pytest.approx(v), f"{k}: 写入 {v}、读回 {got[k]}"
         assert metadata.get("surface_mesh") == "dummy_surface.nas"
 
-    def test_every_distributed_resume_path_restores_the_flow_angles(self):
-        """四条分布式 resume 构造路径（CPU 传统 / CPU 完全分布式 / 多 GPU 传统 /
-        多 GPU 完全分布式）都必须把攻角与侧滑角交给求解器或来流字典。"""
-        import inspect
+    @pytest.mark.parametrize("multi_gpu,fully_distributed", [(False, False), (False, True), (True, False),
+                                                              (True, True)])
+    def test_every_distributed_resume_path_restores_the_flow_angles(self, multi_gpu, fully_distributed):
+        """四条分布式 resume 构造路径（CPU 传统 / CPU 完全分布式 / 多 GPU 传统 / 多 GPU 完全分布式）都经唯一的构造
+        入口（`distributed_build.build_distributed_solver`），物理参数（含攻角与侧滑角）原样取自 checkpoint。"""
+        from unittest.mock import patch
 
-        from autoflowcfd.cli.solve import distributed_checkpoint_io as mod
-        src = inspect.getsource(mod.rebuild_distributed_solver_from_checkpoint)
-        assert src.count("aoa_deg=aoa_deg, aos_deg=aos_deg") == 2
-        assert src.count('"aoa_deg": aoa_deg, "aos_deg": aos_deg') == 2
-        assert "physics_from_metadata(metadata)" in src
+        from autoflowcfd.cli.solve.checkpoint_io import physics_from_metadata
+        from autoflowcfd.cli.solve.distributed_checkpoint_io import rebuild_distributed_solver_from_checkpoint
+
+        metadata = dict(input_file="m.pkl", order=1, turbulence_model="none", time_scheme="ssp_rk3",
+                        time_accurate=False, low_mach_precond=True, rho_inf=1.1, vel_inf=21.0, p_inf=99000.0,
+                        aoa_deg=4.0, aos_deg=-2.0, mu_molecular=1.9e-5, turbulence_intensity=0.02,
+                        viscosity_ratio=7.0, artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
+                        wall_treatment="resolved")
+
+        class Built(Exception):
+            pass
+
+        seen = {}
+
+        def build(**kw):
+            seen.update(kw)
+            raise Built
+
+        with patch("autoflowcfd.core.utils.checkpoint_load.load_checkpoint_header",
+                   return_value=({}, 3, dict(metadata), {"U_sps": (4, 6, 5)})), \
+             patch("autoflowcfd.cli.solve.distributed_build.build_distributed_solver", side_effect=build), \
+             pytest.raises(Built):
+            rebuild_distributed_solver_from_checkpoint("c.h5", n_ranks=2, multi_gpu=multi_gpu,
+                                                       fully_distributed=fully_distributed)
+        assert seen["physics"] == physics_from_metadata(metadata)
+        assert (seen["physics"]["aoa_deg"], seen["physics"]["aos_deg"]) == (4.0, -2.0)
+        assert seen["multi_gpu"] is multi_gpu and seen["fully_distributed"] is fully_distributed
 
     def test_solve_checkpoint_callback_invoked_at_right_iterations(self, mesh_and_ops):
         """真实 bug 回归测试：此前 `DistributedFRSolver.solve()` 的

@@ -159,8 +159,8 @@ class TestDistributedEntriesForwardCfl:
     #: 硬编码 `.py` 路径在拆包后直接 FileNotFoundError。`module_source`
     #: 会把包的全部子模块拼进来，新增子模块也不用维护清单。
     _MODULES = [
-        "autoflowcfd.cli.solve.steady",
-        "autoflowcfd.cli.solve.transient_distributed",
+        "autoflowcfd.cli.solve.run",
+        "autoflowcfd.cli.solve.distributed_build",
         "autoflowcfd.cli.solve.distributed_checkpoint_io",
         "autoflowcfd.cli.solve.checkpoint_io",
     ]

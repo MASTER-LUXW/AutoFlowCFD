@@ -345,6 +345,15 @@ class DistributedSolveLoopMixin(SolveLoopMixin):
     def _divergence_hint(self) -> str:
         return f"分布式路径：{self.n_ranks} 个 rank，残差是全域 allreduce 值（各 rank 一致，同时抛出）"
 
+    def pull_host_state(self) -> None:
+        """计算状态同步到主机侧 `state.U`（CPU 分布式本来就在主机上；多 GPU 覆盖为设备 -> 主机拷贝）。"""
+
+    def push_host_state(self) -> None:
+        """主机侧 `state.U` 同步到计算状态（CPU 分布式无事可做；多 GPU 覆盖为主机 -> 设备拷贝）。"""
+
+    def cleanup(self) -> None:
+        """求解结束后释放后端资源（CPU 分布式没有；多 GPU 覆盖为释放设备内存）。"""
+
     def owned_cell_is_prism(self) -> np.ndarray:
         """本 rank 的 local 单元（原生排列）是否为棱柱（分布式 local 排列里棱柱 / 四面体交错）。"""
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism

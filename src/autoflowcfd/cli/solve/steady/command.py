@@ -1,7 +1,5 @@
-"""`solve steady` 命令：click 选项、公共前段（`--config` 覆盖与物理量范围校验）与后端分派。
-
-四个后端分支在同目录的 `multi_gpu`/`single_gpu`/`cpu_mpi`/`cpu_single` 模块
-（2026-09-25 从单文件 `cli/solve/steady.py` 拆出）；命令组定义见 `cli/solve/commands.py`。
+"""`solve steady` 命令：click 选项、公共前段（`--config` 覆盖与物理量范围校验），按后端执行交给
+`cli/solve/run.py::run_solve`（与 `solve transient` 同一份）；命令组定义见 `cli/solve/commands.py`。
 """
 
 import click
@@ -15,10 +13,6 @@ from autoflowcfd.config.solver_config import SteadyConfig
 
 _TURBULENCE_CHOICES = ['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']
 _TIME_SCHEME_CHOICES = ['rk3', 'newton-krylov']
-
-from .multi_gpu import _run_multi_gpu
-from .cpu_mpi import _run_cpu_mpi
-from .single_node import _run_single_node
 
 
 @solve.command(name='steady')
@@ -68,129 +62,32 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     import-volume` 的输出）或 .nas 体网格（需要配合 --surface-mesh 反推边界
     分组）。求解前会强制检查网格质量门，除非传了 --skip-quality-check。
     """
-    print("=== Starting Steady FR Simulation ===")
+    from autoflowcfd.core.mpi import is_root
+
+    if is_root():
+        print("=== Starting Steady FR Simulation ===")
     # .nas 体网格按 --units 导入并转存成输出目录下的米制 volume_mesh.pkl，之后全程用它
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
     input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir)
 
     # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
     check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)
-    print(f"\nInput Grid : {input_file}")
-    print(f"Backend    : {backend} | Order: P{order} | Method: {time_scheme}")
-    print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
-    if n_ranks > 1:
-        print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
-    if init_checkpoint:
-        print(f"Init From  : {init_checkpoint}")
-    print("Wall Dist : exact point-to-wall-surface distance (AABB tree)\n")
 
-    # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）。单机（n_ranks == 1）的 CPU 与单 GPU 同一个分支
+    from autoflowcfd.cli.solve.run import SolveRun, physics_from_options, run_solve
+    from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS, STEADY_DT, scheme_from_name
+
     validate_backend_options(backend, n_ranks, multi_gpu)
-    if backend == 'gpu' and multi_gpu:
-        _run_multi_gpu(
-            aoa_deg=aoa_deg,
-            artificial_viscosity_alpha=artificial_viscosity_alpha,
-            wall_treatment=wall_treatment,
-            low_mach_precond=low_mach_precond,
-            artificial_viscosity_enabled=artificial_viscosity_enabled,
-            aos_deg=aos_deg,
-            cfl_max=cfl_max,
-            cfl_min=cfl_min,
-            cfl_start=cfl_start,
-            checkpoint_interval=checkpoint_interval,
-            fully_distributed=fully_distributed,
-            gpu_device=gpu_device,
-            init_checkpoint=init_checkpoint,
-            input_file=input_file,
-            max_iter=max_iter,
-            mu_molecular=mu_molecular,
-            n_ranks=n_ranks,
-            order=order,
-            output_dir=output_dir,
-            p_inf=p_inf,
-            phase_max_iter=phase_max_iter,
-            reference_area=reference_area,
-            residual_drop_threshold=residual_drop_threshold,
-            rho_inf=rho_inf,
-            skip_quality_check=skip_quality_check,
-            surface_mesh=surface_mesh,
-            time_scheme=time_scheme,
-            tol=tol,
-            turbulence_intensity=turbulence_intensity,
-            turbulence_model=turbulence_model,
-            vel_inf=vel_inf,
-            viscosity_ratio=viscosity_ratio,
-            sem_num_eddies=sem_num_eddies,
-        )
-    elif n_ranks > 1:
-        _run_cpu_mpi(
-            aoa_deg=aoa_deg,
-            artificial_viscosity_alpha=artificial_viscosity_alpha,
-            wall_treatment=wall_treatment,
-            low_mach_precond=low_mach_precond,
-            artificial_viscosity_enabled=artificial_viscosity_enabled,
-            aos_deg=aos_deg,
-            cfl_max=cfl_max,
-            cfl_min=cfl_min,
-            cfl_start=cfl_start,
-            checkpoint_interval=checkpoint_interval,
-            fully_distributed=fully_distributed,
-            init_checkpoint=init_checkpoint,
-            input_file=input_file,
-            max_iter=max_iter,
-            mu_molecular=mu_molecular,
-            n_ranks=n_ranks,
-            order=order,
-            output_dir=output_dir,
-            p_inf=p_inf,
-            phase_max_iter=phase_max_iter,
-            reference_area=reference_area,
-            residual_drop_threshold=residual_drop_threshold,
-            rho_inf=rho_inf,
-            skip_quality_check=skip_quality_check,
-            surface_mesh=surface_mesh,
-            threads=threads,
-            time_scheme=time_scheme,
-            tol=tol,
-            turbulence_intensity=turbulence_intensity,
-            turbulence_model=turbulence_model,
-            vel_inf=vel_inf,
-            viscosity_ratio=viscosity_ratio,
-            sem_num_eddies=sem_num_eddies,
-        )
-    else:
-        _run_single_node(
-            aoa_deg=aoa_deg,
-            aos_deg=aos_deg,
-            artificial_viscosity_alpha=artificial_viscosity_alpha,
-            wall_treatment=wall_treatment,
-            low_mach_precond=low_mach_precond,
-            artificial_viscosity_enabled=artificial_viscosity_enabled,
-            backend=backend,
-            cfl_max=cfl_max,
-            cfl_min=cfl_min,
-            cfl_start=cfl_start,
-            checkpoint_interval=checkpoint_interval,
-            gpu_device=gpu_device,
-            init_checkpoint=init_checkpoint,
-            input_file=input_file,
-            max_iter=max_iter,
-            mu_molecular=mu_molecular,
-            order=order,
-            output_dir=output_dir,
-            p_inf=p_inf,
-            phase_max_iter=phase_max_iter,
-            reference_area=reference_area,
-            residual_drop_threshold=residual_drop_threshold,
-            rho_inf=rho_inf,
-            sem_num_eddies=sem_num_eddies,
-            skip_quality_check=skip_quality_check,
-            surface_mesh=surface_mesh,
-            threads=threads,
-            time_scheme=time_scheme,
-            tol=tol,
-            turbulence_intensity=turbulence_intensity,
-            turbulence_model=turbulence_model,
-            vel_inf=vel_inf,
-            viscosity_ratio=viscosity_ratio,
-        )
+    run_solve(SolveRun(
+        input_file=input_file, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
+        output_dir=output_dir, checkpoint_interval=checkpoint_interval,
+        backend=backend, n_ranks=n_ranks, multi_gpu=multi_gpu, fully_distributed=fully_distributed,
+        gpu_device=gpu_device, threads=threads,
+        order=order, turbulence_model=turbulence_model, time_scheme=scheme_from_name(time_scheme),
+        time_accurate=False, dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, low_mach_precond=low_mach_precond,
+        physics=physics_from_options(rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, mu_molecular, turbulence_intensity,
+                                     viscosity_ratio, artificial_viscosity_enabled, artificial_viscosity_alpha,
+                                     wall_treatment),
+        sem_num_eddies=sem_num_eddies, reference_area=reference_area, init_checkpoint=init_checkpoint, probes=(),
+        max_iter=max_iter, dt=STEADY_DT, tol=tol, phase_max_iter=phase_max_iter,
+        residual_drop_threshold=residual_drop_threshold))

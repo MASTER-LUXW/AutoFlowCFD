@@ -121,8 +121,8 @@ def test_multi_gpu_default_device_lets_each_rank_pick_its_own(tmp_path):
 
     mesh = tmp_path / "m.pkl"
     mesh.write_bytes(b"")
-    with patch("autoflowcfd.cli.solve.steady.command._run_multi_gpu") as run:
+    with patch("autoflowcfd.cli.solve.run.run_solve") as run:
         res = CliRunner().invoke(cli, ["solve", "steady", str(mesh), "--backend", "gpu", "--multi-gpu",
                                        "--n-ranks", "2"])
     assert res.exit_code == 0, res.output
-    assert run.call_args.kwargs["gpu_device"] is None
+    assert run.call_args.args[0].gpu_device is None

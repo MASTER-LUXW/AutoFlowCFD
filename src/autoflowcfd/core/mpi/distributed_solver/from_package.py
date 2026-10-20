@@ -25,7 +25,7 @@ class _DistributedFromPackageMixin:
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,
-                                        root_context: Optional[dict] = None):
+                                        root_context: Optional[dict] = None, n_threads: int = -1):
         """真正的"完全分布式加载"构造入口（2026-09-02，见 core/mpi/
         distributed_mesh_loader.py::distributed_mesh_load_v2/
         build_fully_distributed_rank_package 模块文档）。
@@ -60,6 +60,8 @@ class _DistributedFromPackageMixin:
                 时（None）意味着这个 solver 实例无法执行 Order
                 Continuation（目标阶数 >= 1 时 `solve()` 会 fail-fast
                 拒绝而不是静默跳过升阶爬坡）。
+            n_threads: 本 rank 的 numba 线程数（与单机 FRSolver 同名参数、同一取值规则）。2026-10-20 以前完全分布式
+                加载从不设置，numba 按全部核数开线程（每节点多个 rank 时超订），`--threads` 被忽略。
 
         Returns:
             DistributedFRSolver 实例
@@ -67,6 +69,9 @@ class _DistributedFromPackageMixin:
         import types
         from autoflowcfd.fr.operators import generate_fr_operators
 
+        from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
+
+        configure_numba_threads(n_threads)
         self = cls.__new__(cls)
         self.rank = rank if rank is not None else get_rank()
         self._is_fully_distributed = True

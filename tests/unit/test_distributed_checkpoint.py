@@ -148,6 +148,11 @@ class TestGpuDistributedCheckpointRoundtrip:
         # 写盘的单元积分平均要本 rank 几何（单 rank：local 即全局顺序）
         det = np.asarray(mesh.jacobians["det_jacs"]).reshape(mesh.n_cells, -1)
         solver.local_cell_geometry = lambda: (det[:n_local], np.arange(n_local) < mesh.n_prism_cells)
+        # 主机 / 设备状态同步是求解器方法（保存前拉回主机、载入后写回设备）
+        from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+
+        solver.pull_host_state = types.MethodType(MultiGPUDistributedSolver.pull_host_state, solver)
+        solver.push_host_state = types.MethodType(MultiGPUDistributedSolver.push_host_state, solver)
         return solver
 
     def test_save_then_load_roundtrip_preserves_state(self, tmp_path, monkeypatch):

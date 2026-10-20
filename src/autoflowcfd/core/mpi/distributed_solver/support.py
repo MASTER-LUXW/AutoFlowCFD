@@ -26,6 +26,17 @@ class _DistributedSupportMixin:
             self, output_dir, iteration, input_file, order, turbulence_model, "cpu",
             target_order=target_order, surface_mesh=surface_mesh)
 
+    def load_checkpoint_distributed(self, path: str):
+        """把 checkpoint 的状态载入本求解器（集体操作；与多 GPU 同名同签名）。返回 `(metadata, iteration)`。"""
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
+
+        U_local, metadata, iteration = distributed_load_checkpoint(path, self)
+        n_local = self.partition.n_local_cells
+        self.state.U[:n_local] = U_local
+        self.state.Q[:n_local] = conserved_to_primitive(U_local[..., :5])
+        return metadata, iteration
+
     def local_cell_geometry(self):
         """本 rank local 单元（原生排列，与 `state.U[:n_local]` 同序）的 `(det_jacs (n_local, n_sps), 是否棱柱)`。
 

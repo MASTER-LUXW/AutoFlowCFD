@@ -148,13 +148,11 @@ def test_steady_init_from_a_lower_order_checkpoint_file(tmp_path):
     assert abs(after - before) < 0.5 * abs(before - rho_u_inf), "初场被重置回来流"
 
 
-@pytest.mark.parametrize("extra, runner", [
-    ([], "_run_single_node"),
-    (["--n-ranks", "2"], "_run_cpu_mpi"),
-    (["--backend", "gpu", "--multi-gpu", "--n-ranks", "2"], "_run_multi_gpu"),
-])
-def test_steady_init_from_reaches_every_backend_branch(tmp_path, monkeypatch, extra, runner):
-    """`--init-from` 逐名传到三个后端分支（单机 CPU / 单 GPU 同一个分支）。"""
+@pytest.mark.parametrize("extra", [[], ["--n-ranks", "2"], ["--backend", "gpu", "--multi-gpu", "--n-ranks", "2"]])
+def test_steady_init_from_reaches_every_backend(tmp_path, monkeypatch, extra):
+    """`--init-from` 进入运行参数（单机 / CPU 分布式 / 多 GPU 同一个 `run_solve`）。"""
+    from unittest.mock import patch
+
     from click.testing import CliRunner
 
     from autoflowcfd.cli.solve.steady import command
@@ -163,24 +161,22 @@ def test_steady_init_from_reaches_every_backend_branch(tmp_path, monkeypatch, ex
     grid.write_bytes(b"")
     ckpt = tmp_path / "checkpoint_iter_000007.h5"
     ckpt.write_bytes(b"")
-    seen = {}
-    monkeypatch.setattr(command, runner, lambda **kw: seen.update(kw))
-    monkeypatch.setattr(command, "validate_backend_options", lambda *a, **k: None)
-    out = CliRunner().invoke(command.solve_steady, [str(grid), "--order", "2", "--init-from", str(ckpt)] + extra)
+    with patch("autoflowcfd.cli.solve.run.run_solve") as run:
+        out = CliRunner().invoke(command.solve_steady, [str(grid), "--order", "2", "--init-from", str(ckpt)] + extra)
     assert out.exit_code == 0, out.output
-    assert seen["init_checkpoint"] == str(ckpt) and "Init From" in out.output
+    assert run.call_args.args[0].init_checkpoint == str(ckpt)
 
 
-@pytest.mark.parametrize("module, call", [
-    ("single_node", "start_single_node_from_checkpoint(solver, init_checkpoint)"),
-    ("cpu_mpi", "start_distributed_from_checkpoint(solver, init_checkpoint)"),
-    ("multi_gpu", "start_distributed_from_checkpoint(solver, init_checkpoint, sync_device=True)"),
-])
-def test_steady_branches_start_from_the_checkpoint_before_solving(module, call):
-    """三个分支在构造求解器之后、`solve()` 之前调用共用入口（多 GPU 同步设备数组）。"""
-    import importlib
+def test_every_backend_starts_from_the_checkpoint_before_solving():
+    """单机与分布式都在构造求解器之后、`solve()` 之前从 checkpoint 起步（`run.py::_build`）。"""
     import inspect
 
-    src = inspect.getsource(importlib.import_module(f"autoflowcfd.cli.solve.steady.{module}"))
-    assert src.count(call) == 1
-    assert src.index(call) < src.index("result = solver.solve(")
+    from autoflowcfd.cli.solve import run
+
+    build = inspect.getsource(run._build)
+    assert build.count("start_single_node_from_checkpoint(solver, run.init_checkpoint)") == 1
+    assert build.count("start_distributed_from_checkpoint(solver, run.init_checkpoint)") == 1
+    assert inspect.getsource(run.run_solve).index("_build(run)") < inspect.getsource(run.run_solve).index(
+        "solver.solve(")
+
+

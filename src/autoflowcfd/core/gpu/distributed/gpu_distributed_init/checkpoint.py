@@ -65,11 +65,9 @@ class _GPUDistributedCheckpointMixin:
         Returns:
             checkpoint 文件路径（仅 root rank 有值）
         """
-        cp = get_cupy()
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_save_checkpoint
 
-        n_local = self.partition.n_local_cells
-        self.state.U[:n_local] = cp.asnumpy(self.U_gpu)
+        self.pull_host_state()
 
         return distributed_save_checkpoint(
             self, output_dir, iteration, input_file, order, turbulence_model, "gpu",
@@ -84,13 +82,21 @@ class _GPUDistributedCheckpointMixin:
         Returns:
             (metadata, iteration)：见 distributed_load_checkpoint 返回值
         """
-        cp = get_cupy()
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
 
         U_local, metadata, iteration = distributed_load_checkpoint(path, self)
-        n_local = self.partition.n_local_cells
-        self.state.U[:n_local] = U_local
-        with cp.cuda.Device(self.device_id):
-            self.U_gpu = cp.asarray(U_local)
+        self.state.U[:self.partition.n_local_cells] = U_local
+        self.push_host_state()
         self.iteration = iteration
         return metadata, iteration
+
+    def pull_host_state(self) -> None:
+        """设备上的本 rank 状态拷到主机侧 `state.U[:n_local]`（写 checkpoint / 结果之前）。"""
+        cp = get_cupy()
+        self.state.U[:self.partition.n_local_cells] = cp.asnumpy(self.U_gpu)
+
+    def push_host_state(self) -> None:
+        """主机侧 `state.U[:n_local]` 写回设备（恢复 checkpoint、`--init-from` 之后）。"""
+        cp = get_cupy()
+        with cp.cuda.Device(self.device_id):
+            self.U_gpu = cp.asarray(self.state.U[:self.partition.n_local_cells])

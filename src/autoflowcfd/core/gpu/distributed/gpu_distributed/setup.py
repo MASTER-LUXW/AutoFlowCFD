@@ -201,11 +201,11 @@ class _MultiGPUSetupMixin:
         return n_sps, n_local
 
     def _setup_time_integration(self, time_scheme, cfl_start, cfl_max, cfl_min, *, adaptive_cfl=True,
-                                time_accurate=False, low_mach_precond=True):
+                                time_accurate=False, low_mach_precond=True, dual_time_inner_iter):
         """时间积分器、CFL 策略与低马赫预处理开关（均为全后端唯一来源）。"""
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(
-            scheme=require_distributed_scheme(time_scheme))
+            scheme=require_distributed_scheme(time_scheme), dual_time_steps=int(dual_time_inner_iter))
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
         init_production_ramp(self, time_scheme)
         # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）：与 CPU

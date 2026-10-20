@@ -31,12 +31,11 @@ def start_single_node_from_checkpoint(solver, checkpoint_path: str) -> None:
     print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 
 
-def start_distributed_from_checkpoint(solver, checkpoint_path: str, *, sync_device: bool = False) -> None:
+def start_distributed_from_checkpoint(solver, checkpoint_path: str) -> None:
     """分布式（CPU MPI 传统模式 / 完全分布式加载 / 多 GPU）：各 rank 恢复自己那一段并从它起步。
 
-    `sync_device`（多 GPU）：`restore_distributed_state_from_checkpoint` 只写主机侧的 `solver.state.U`
-    （与 CPU 路径共用的接口），真正参与计算的是设备上的 `solver.U_gpu`，恢复后显式同步（与
-    `load_checkpoint_distributed` 同一个模式）。
+    `restore_distributed_state_from_checkpoint` 只写主机侧的 `solver.state.U`，随后 `push_host_state` 同步到计算
+    状态（多 GPU 写回设备数组；2026-10-20 以前由调用方传 `sync_device=True` 决定）。
     """
     from autoflowcfd.core.mpi import is_root
     from autoflowcfd.core.mpi.distributed_checkpoint import restore_distributed_state_from_checkpoint
@@ -44,13 +43,7 @@ def start_distributed_from_checkpoint(solver, checkpoint_path: str, *, sync_devi
     if is_root():
         print("\n🔄 从 checkpoint 加载初场...")
     ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(checkpoint_path, solver)
-    if sync_device:
-        from autoflowcfd.core.gpu import get_cupy
-
-        cp = get_cupy()
-        n_local = solver.partition.n_local_cells
-        with cp.cuda.Device(solver.device_id):
-            solver.U_gpu = cp.asarray(solver.state.U[:n_local])
+    solver.push_host_state()
     start_from_checkpoint_field(solver, ckpt_order, report=is_root())
     if is_root():
         print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")

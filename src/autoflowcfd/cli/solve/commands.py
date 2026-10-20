@@ -52,9 +52,7 @@ def solve():
 # 只做转发的 solve_steady_commands.py 中间层）
 from autoflowcfd.cli.solve import steady as _steady_cmd  # noqa: F401,E402
 from autoflowcfd.cli.solve import transient as _transient_cmd  # noqa: F401,E402
-from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
-    _report_aerodynamic_coefficients, report_distributed_aerodynamic_coefficients,
-)
+from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients  # noqa: E402
 
 
 
@@ -224,29 +222,10 @@ def _resume_distributed(
     low_mach_precond: Optional[bool] = None,
     output_dir: Optional[str] = None,
 ) -> None:
-    """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
-    一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
-    重建入口 `rebuild_distributed_solver_from_checkpoint`，之后的续算
-    循环 + 中途 checkpoint 保存 + 最终保存与单机分支同一个设计
-    （`checkpoint_callback`），只是三种求解器的 `solve()` 返回值/最终
-    保存调用各自的真实签名不同，分别处理。
-
-    真实 bug 修复（2026-09-05，用户直接问"--residual-drop-threshold
-    phase_max_iter 可以在 resume 重置吗"发现）：`resume()` 命令顶层
-    确实解析了这两个 CLI 选项，但此前本函数的签名根本不接收它们，两处
-    `solver.solve(...)` 调用（多GPU分支/CPU MPI分支）也完全没有传递
-    ——`DistributedFRSolver.solve`/`MultiGPUDistributedSolver.solve`
-    早在 2026-09-02（Order Continuation 分布式移植当天）就已经真正
-    支持这两个参数（签名完全对应单机 `run_order_continuation`），只是
-    CLI 这一层从未把用户在命令行传的值接力传下去——用户传了
-    `--phase-max-iter`/`--residual-drop-threshold` 也会被静默忽略，
-    分布式/多GPU resume 时这两个 Order Continuation 参数永远等于
-    `DistributedFRSolver.solve`/`MultiGPUDistributedSolver.solve` 自己
-    的函数签名默认值（`None`/`100.0`），不是用户的真实意图。CLI
-    帮助文本此前写的"仅 CPU 后端支持"因此也是过时/错误的说法，一并
-    改正。
-
-    收尾时与单机一样报告气动系数（汇总到 root，`aero_coefficients.py::report_distributed_aerodynamic_coefficients`）。
+    """`resume` 的分布式分支：CPU MPI 传统模式 / 完全分布式加载 / 多 GPU 共用同一个重建入口
+    `rebuild_distributed_solver_from_checkpoint`，续算（中间 checkpoint 的文件名按续算起点的绝对迭代数偏移）后
+    与 `solve steady/transient` 同一个收尾（`distributed_build.py::finish_distributed`：final_state.pkl、结束时
+    的 checkpoint、气动系数）。Order Continuation 的 `--phase-max-iter` / `--residual-drop-threshold` 照常生效。
     """
     from autoflowcfd.core.mpi import is_root
     from autoflowcfd.cli.solve.distributed_checkpoint_io import (
@@ -278,54 +257,19 @@ def _resume_distributed(
             f"continuing for {max_iter} more iterations..."
         )
     resume_dt = _resume_dt(dt, metadata, solver)
+    from autoflowcfd.cli.solve.distributed_build import finish_distributed
 
-    if multi_gpu:
-        _checkpoint_cb = distributed_periodic_checkpoint_callback(
-            checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
-
-        result = solver.solve(
-            max_iter=max_iter, dt=resume_dt, tol=run_tolerance(tol, solver), checkpoint_callback=_checkpoint_cb,
-            phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
-        )
-        total_iterations = iteration + result.iterations
-        if is_root():
-            print(
-                f"\n✅ Resumed multi-GPU simulation finished: "
-                f"total_iterations={total_iterations}, "
-                f"Residual={result.final_residual:.6e}"
-            )
-        saved_path = solver.save_checkpoint_distributed(
-            output_dir, total_iterations, input_file,
-            solver.current_order, turbulence_model,
-            target_order=solver.order, surface_mesh=resolved_surface_mesh,
-        )
-        if saved_path and is_root():
-            print(f"   Checkpoint saved: {saved_path}")
-        report_distributed_aerodynamic_coefficients(solver, solver._report_reference_area)
-        solver.cleanup()
-        return
-
-    # CPU MPI（"传统模式"/"完全分布式加载"共用同一个 solve()/checkpoint 格式）。
-    from autoflowcfd.core.mpi.distributed_checkpoint import (
-        distributed_save_results,
-    )
-
-    _checkpoint_cb = distributed_periodic_checkpoint_callback(
-        checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
-
-    result = solver.solve(max_iter=max_iter, dt=resume_dt, tol=run_tolerance(tol, solver),
-                          checkpoint_callback=_checkpoint_cb,
-                          phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
+    result = solver.solve(
+        max_iter=max_iter, dt=resume_dt, tol=run_tolerance(tol, solver),
+        checkpoint_callback=distributed_periodic_checkpoint_callback(
+            checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh,
+            iteration_offset=iteration),
+        phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
     total_iterations = iteration + result.iterations
     if is_root():
-        print(f"\n✅ Resumed distributed simulation finished: total_iterations={total_iterations}")
-
-    distributed_save_results(solver, output_dir)
-    solver.save_checkpoint_distributed(
-        output_dir, total_iterations, input_file, solver.current_order, turbulence_model,
-        target_order=solver.order, surface_mesh=resolved_surface_mesh,
-    )
-    report_distributed_aerodynamic_coefficients(solver, solver._report_reference_area)
+        print(f"\n✅ 续算结束：累计 {total_iterations} 步，最终残差 {result.final_residual:.6e}，状态 {solver.solve_status}")
+    finish_distributed(solver, output_dir, total_iterations, input_file, turbulence_model, resolved_surface_mesh,
+                       solver._report_reference_area)
 
 
 @solve.command()

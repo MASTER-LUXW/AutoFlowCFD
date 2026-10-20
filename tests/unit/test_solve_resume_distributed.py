@@ -41,7 +41,7 @@ def _aero_report_calls(monkeypatch):
     """收尾气动系数报告要汇总真实求解器状态（替身求解器没有），这里只记录调用——报告本身与单机逐位一致
     由 test_distributed_aero_report.py 验证。"""
     calls = []
-    monkeypatch.setattr("autoflowcfd.cli.solve.commands.report_distributed_aerodynamic_coefficients",
+    monkeypatch.setattr("autoflowcfd.cli.solve.aero_coefficients.report_distributed_aerodynamic_coefficients",
                         lambda solver, area: calls.append((solver, area)))
     return calls
 
@@ -156,7 +156,9 @@ class TestResumeDistributedMultiGpu(object):
         with patch(
             "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 500, fake_metadata),
-        ) as mock_rebuild:
+        ) as mock_rebuild, patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
+        ) as mock_results:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
@@ -177,6 +179,10 @@ class TestResumeDistributedMultiGpu(object):
         # 最终 checkpoint 记录实际跑到的绝对步数（500 + 10）
         assert written_iterations[-1] == 510
         fake_solver.cleanup.assert_called_once()
+        # 多 GPU 与 CPU MPI 同一个收尾：先把设备状态拉回主机，再写 final_state.pkl（此前多 GPU 不写）
+        fake_solver.pull_host_state.assert_called_once()
+        mock_results.assert_called_once()
+        assert mock_results.call_args.args[0] is fake_solver
 
 
 class TestResumeDistributedPhaseMaxIterForwarding(object):
@@ -234,7 +240,9 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         with patch(
             "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 500, fake_metadata),
-        ):
+        ), patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
+        ) as mock_results:
             runner = CliRunner()
             result = runner.invoke(
                 cli,

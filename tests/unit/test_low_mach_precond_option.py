@@ -132,7 +132,8 @@ def test_distributed_rebuild_paths_receive_the_switch(tmp_path, multi_gpu, fully
     with patch(target, side_effect=_capture), \
          patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(MagicMock(), MagicMock())), \
          patch("autoflowcfd.fr.operators.generate_fr_operators", return_value=MagicMock()), \
-         patch("autoflowcfd.cli.solve.distributed_checkpoint_io.wall_distance_source_if_needed", return_value=None), \
+         patch("autoflowcfd.cli.solve.wall_distance.wall_distance_source_if_needed", return_value=None), \
+         patch("autoflowcfd.cli.solve.distributed_build.require_distributed_runtime"), \
          pytest.raises(_Built):
         rebuild_distributed_solver_from_checkpoint(
             ckpt, n_ranks=2, multi_gpu=multi_gpu, fully_distributed=fully_distributed, low_mach_precond=override)
@@ -144,14 +145,13 @@ def test_steady_option_reaches_every_backend_branch(tmp_path):
     mesh = tmp_path / "m.pkl"
     mesh.write_bytes(b"")
     base = ["solve", "steady", str(mesh), "-o", str(tmp_path / "out")]
-    for extra, fn in ((["--backend", "cpu"], "_run_single_node"),
-                      (["--backend", "cpu", "--n-ranks", "2"], "_run_cpu_mpi"),
-                      (["--backend", "gpu", "--multi-gpu", "--n-ranks", "2"], "_run_multi_gpu")):
-        for flag, expected in (([], True), (["--no-low-mach-precond"], False)):
-            with patch(f"autoflowcfd.cli.solve.steady.command.{fn}") as run:
+    for extra in (["--backend", "cpu"], ["--backend", "cpu", "--n-ranks", "2"],
+                  ["--backend", "gpu", "--multi-gpu", "--n-ranks", "2"]):
+        for flag, expected in (([], True), (["--no-low-mach-precond"], False), (["--low-mach-precond"], True)):
+            with patch("autoflowcfd.cli.solve.run.run_solve") as run:
                 res = CliRunner().invoke(cli, base + extra + flag)
             assert res.exit_code == 0, res.output
-            assert run.call_args.kwargs["low_mach_precond"] is expected, (fn, flag)
+            assert run.call_args.args[0].low_mach_precond is expected, (extra, flag)
 
 
 def _fake_resume_solver():
@@ -181,7 +181,7 @@ def test_resume_option_is_forwarded(tmp_path, flag, expected):
     with patch("autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint") as reb, \
          patch("autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_checkpoint"), \
          patch("autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"), \
-         patch("autoflowcfd.cli.solve.commands.report_distributed_aerodynamic_coefficients"):
+         patch("autoflowcfd.cli.solve.aero_coefficients.report_distributed_aerodynamic_coefficients"):
         reb.return_value = (_fake_resume_solver(), 150, dict(_META))
         res = CliRunner().invoke(cli, ["solve", "resume", str(ck), "-n", "1", "--n-ranks", "2"] + flag)
     assert res.exit_code == 0, res.output

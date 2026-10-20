@@ -112,6 +112,11 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
                 与单机相同）
         """
         _check_solver_kwargs(solver_kwargs)
+        # numba 线程数在任何核调用之前设置（与单机 FRSolver 同一规则）；此前要等本地求解器在第一步惰性构造时才设置，
+        # 构造期的几何核按全部核数开线程
+        from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
+
+        configure_numba_threads(_kwarg(solver_kwargs, 'n_threads'))
         turb_model_name = solver_kwargs['turb_model_name']
         turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
         from autoflowcfd.core.turbulence.registry import require_supported

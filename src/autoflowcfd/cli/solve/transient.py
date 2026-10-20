@@ -1,6 +1,5 @@
-"""`solve transient` 命令 (DES/LES)
-
-命令组定义见同目录 `commands.py`。
+"""`solve transient` 命令（URANS / DES / LES）：选项与公共前段，按后端执行交给 `cli/solve/run.py::run_solve`
+（与 `solve steady` 同一份）；命令组定义见同目录 `commands.py`。
 """
 
 from typing import Optional
@@ -9,19 +8,13 @@ import click
 
 
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
-from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
-from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
-from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
-from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients, resolve_reference_area
 from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.solve.shared_options import config_default, shared_solve_options
 from autoflowcfd.config.solver_config import TransientConfig
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
 _TIME_METHOD_CHOICES = ["dual-time", "rk3"]
-from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
-from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
 
 @solve.command(name='transient')
@@ -102,124 +95,41 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
         probes: 探针位置（米），每个物理步采样（`core/probes`）
     """
-    print("=== Starting Transient FR Simulation (DES/LES) ===")
+    from autoflowcfd.core.mpi import is_root
+
+    if is_root():
+        print("=== Starting Transient FR Simulation ===")
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
     input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir)
 
     # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
     check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)
-    print(f"\nInput Grid : {input_file}")
-    print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
-    print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
-    if init_checkpoint:
-        print(f"Init From  : {init_checkpoint}")
     if physical_time:
         from autoflowcfd.core.time_integration.base import physical_time_steps
         max_iter = physical_time_steps(float(physical_time), dt)
-        print(f"Physical Time: {physical_time}s | Iterations: {max_iter}\n")
-    else:
-        print(f"Iterations : {max_iter}\n")
 
-    # 词汇->枚举唯一事实来源（见 core/time_integration/base.py）。
+    from autoflowcfd.cli.solve.run import SolveRun, physics_from_options, run_solve
     from autoflowcfd.core.time_integration.base import scheme_from_name
 
-    # 后端组合校验（与 `solve steady/resume` 同一个函数）
     validate_backend_options(backend, n_ranks, multi_gpu)
-    # 显式档做时间精确推进（全场同一物理步长的子步，time_integration/time_accurate.py）；dual-time 本身时间精确
-    time_accurate = scheme_from_name(time_method) != scheme_from_name("dual-time")
-
-    if n_ranks > 1:
-        # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有
-        # 分布式支持，DUAL_TIME/DES/LES 瞬态仿真只能单机跑，与
-        # solve_steady_command.py 已有的分布式覆盖不一致；同一批还
-        # 补齐了 DistributedFRSolver/MultiGPUDistributedSolver 对
-        # DUAL_TIME 本身的支持，见 core/mpi/distributed_solver.py 与
-        # core/gpu/distributed/gpu_distributed.py 对应说明——没有这里
-        # 的 CLI 入口，那两处修复也无法被真正用到）。
-        # --init-from（2026-09-02 续接）：三条分布式路径已真正接入
-        # （`restore_distributed_state_from_checkpoint`，见 core/mpi/
-        # distributed_checkpoint.py 模块文档——复用 `gather_global_
-        # state`/`scatter_local_state` 这套既有基础设施，"没有实现"
-        # 从一开始就不是设计上的限制，只是没人接上），不再拒绝。
-        # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
-        # 三条分布式路径已真正接入 Order Continuation（见
-        # solve_steady_command.py 同一处修复文档），不再拒绝，直接
-        # 透传给 `_solve_transient_distributed`。
-        _solve_transient_distributed(
-            input_file, order, surface_mesh, skip_quality_check,
-            scheme_from_name(time_method), dual_time_inner_iter,
-            turbulence_model, max_iter, dt, output_dir,
-            reference_area, threads, turbulence_intensity, viscosity_ratio, sem_num_eddies,
-            mu_molecular, rho_inf, vel_inf, p_inf,
-            n_ranks, multi_gpu, fully_distributed, gpu_device,
-            checkpoint_interval, phase_max_iter, residual_drop_threshold,
-            init_checkpoint,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
-            artificial_viscosity_enabled=artificial_viscosity_enabled,
-            artificial_viscosity_alpha=artificial_viscosity_alpha,
-            wall_treatment=wall_treatment,
-            aoa_deg=aoa_deg, aos_deg=aos_deg, probes=probes,
-        )
-        return
-
-    # 1. 网格加载与处理（含求解前质量门检查）
-    mesh, volume_data = load_mesh_for_solver(
-        input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
-    )
-
-    # 2. 映射时间推进方法
     time_scheme = scheme_from_name(time_method)
-
-    # 3. 初始化求解器（CPU / 单 GPU；输运湍流模型（含 DES）带上壁距，LES/WMLES 不需要）
-    solver = build_single_node_solver(
-        backend, mesh, volume_data,
-        gpu_device=gpu_device,
-        order=order,
-        turb_model_name=turbulence_model.upper(),
-        time_scheme=time_scheme,
-        dual_time_inner_iter=dual_time_inner_iter,
-        n_threads=threads,
-        turbulence_intensity=turbulence_intensity,
-        viscosity_ratio=viscosity_ratio,
-        sem_num_eddies=sem_num_eddies,
-        mu_molecular=mu_molecular,
-        rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-        aoa_deg=aoa_deg, aos_deg=aos_deg,
+    run_solve(SolveRun(
+        input_file=input_file, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
+        output_dir=output_dir, checkpoint_interval=checkpoint_interval,
+        backend=backend, n_ranks=n_ranks, multi_gpu=multi_gpu, fully_distributed=fully_distributed,
+        gpu_device=gpu_device, threads=threads,
+        order=order, turbulence_model=turbulence_model, time_scheme=time_scheme,
+        # 显式档做时间精确推进（全场同一物理步长的子步，time_integration/time_accurate.py）；dual-time 本身时间精确
+        time_accurate=time_scheme != scheme_from_name("dual-time"), dual_time_inner_iter=dual_time_inner_iter,
         # CFL：rk3 档为显式子步的固定 CFL（cfl_start），dual-time 档为内迭代伪时间 CFL 的 SER 律参数
-        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
-        artificial_viscosity_enabled=artificial_viscosity_enabled,
-        artificial_viscosity_alpha=artificial_viscosity_alpha,
-        wall_treatment=wall_treatment,
-    )
-
-    # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）
-    if init_checkpoint:
-        start_single_node_from_checkpoint(solver, init_checkpoint)
-
-    # 参考面积（未给时沿来流方向自动估算，与 solve steady 同一个函数）
-    reference_area = resolve_reference_area(solver, volume_data, reference_area)
-    from autoflowcfd.core.probes import attach_probes
-
-    attach_probes(solver, probes, output_dir)
-
-    # 5. 执行瞬态求解（瞬态不用收敛判据 tol，跑满指定步数；--checkpoint-interval 定期落盘）
-    try:
-        result = solver.solve(
-            max_iter=max_iter, dt=dt, tol=0.0,
-            checkpoint_callback=periodic_checkpoint_callback(
-                checkpoint_interval, output_dir, input_file, turbulence_model, backend,
-                surface_mesh=surface_mesh),
-            phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold)
-        print(f"\n✅ Transient Simulation Finished: Steps={result.iterations}, Final Residual={result.final_residual:.6e}")
-
-        # 6. 结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）与气动系数
-        write_single_node_outputs(solver, output_dir, result.iterations, input_file, turbulence_model, backend,
-                                  surface_mesh=surface_mesh)
-        _report_aerodynamic_coefficients(solver.host_view(), reference_area)
-
-    except Exception as e:
-        print(f"\n❌ Transient Simulation Failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise click.Abort()
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        # 低马赫伪时间预处理的请求值：dual-time 不用它，显式时间精确推进强制关闭（configure_time_stepping）
+        low_mach_precond=True,
+        physics=physics_from_options(rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, mu_molecular, turbulence_intensity,
+                                     viscosity_ratio, artificial_viscosity_enabled, artificial_viscosity_alpha,
+                                     wall_treatment),
+        sem_num_eddies=sem_num_eddies, reference_area=reference_area, init_checkpoint=init_checkpoint,
+        probes=tuple(probes),
+        # 瞬态不以残差为停止条件，跑满指定步数（tol=0）
+        max_iter=max_iter, dt=dt, tol=0.0, phase_max_iter=phase_max_iter,
+        residual_drop_threshold=residual_drop_threshold))

@@ -36,6 +36,7 @@ from .timestep import _MultiGPUTimeStepMixin
 
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 
 class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _MultiGPUResidualMixin,
@@ -66,7 +67,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         rho_inf: float,
         vel_inf: float,
         p_inf: float,
-        turb_model: str,
+        turb_model_name: str,
         rank: Optional[int] = None,
         device_id: Optional[int] = None,
         # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向硬编码
@@ -86,6 +87,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         artificial_viscosity_alpha: float = 1.0,
         sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
         wall_treatment: str = DEFAULT_WALL_TREATMENT,
+        dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
     ):
         """初始化多 GPU 分布式求解器（"传统模式"：每个 rank 持有完整全局网格，root 用 METIS 分区后广播）。
         只有 root 持有完整网格的"完全分布式加载"走 `from_fully_distributed_package`。
@@ -108,6 +110,9 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
                 粘性（与单机 FRSolver 同名参数、同一实现）
             sem_num_eddies: 合成湍流入口（SEM）的涡核数（与单机同名参数；此前写死 200）
             wall_treatment: RANS 近壁处理方式（与单机同名参数，`turbulence/wall_model/treatment.py`）
+            turb_model_name: 湍流模型名（大小写不敏感，与单机 / CPU 分布式同名参数）
+            dual_time_inner_iter: dual-time 每个物理步的内迭代次数上限（与单机同名参数）；2026-10-20 以前多 GPU
+                没有这个构造参数，由调用方在构造后改 `time_integrator.dual_time_steps`
         """
         # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
@@ -116,13 +121,14 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
         self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
         self.wall_treatment = validate_wall_treatment(wall_treatment)
+        turb_model = str(turb_model_name).upper()
         self._setup_identity_and_device(
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)
         n_sps, n_local = self._setup_partition_and_geometry(mesh, ops, n_ranks)
         self._setup_time_integration(time_scheme, cfl_start, cfl_max, cfl_min,
                                      adaptive_cfl=adaptive_cfl, time_accurate=time_accurate,
-                                     low_mach_precond=low_mach_precond)
+                                     low_mach_precond=low_mach_precond, dual_time_inner_iter=dual_time_inner_iter)
         self._setup_turbulence(mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                                turbulence_intensity, viscosity_ratio)
         self._setup_state_and_boundary(n_local, n_sps)

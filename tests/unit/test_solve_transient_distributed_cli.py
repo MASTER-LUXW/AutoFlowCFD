@@ -1,13 +1,6 @@
-"""`solve transient --n-ranks`/`--multi-gpu`/`--fully-distributed` CLI
-wiring 验证（2026-09-02，见 solve_transient_command.py/
-solve_transient_distributed.py 文档）——此前本命令完全没有分布式支持。
-
-与既有的 `test_solve_resume_distributed.py` 同一个方法论：mock 掉
-`_solve_transient_distributed`（分布式重建/求解逻辑本身复用的
-`DistributedFRSolver`/`MultiGPUDistributedSolver`/`load_mesh_for_
-solver` 都已在各自的单元测试里决定性验证过），只验证 CLI 层的
-wiring：参数解析、time_scheme 映射是否正确、不允许的参数组合是否
-真的被拒绝。
+"""`solve transient --n-ranks` / `--multi-gpu` / `--fully-distributed` 的 CLI 接线：参数解析与时间格式映射进入
+运行参数（`cli/solve/run.py::SolveRun`），交给与稳态共用的 `run_solve`。分布式求解器的构造本身由
+`tests/unit/test_distributed_build.py` 逐项核对。
 """
 
 from unittest.mock import patch
@@ -17,101 +10,43 @@ from click.testing import CliRunner
 from autoflowcfd.cli.main import cli
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
-
-def _arg(mock, name):
-    """按 `_solve_transient_distributed` 的签名把被 mock 的调用绑定到参数名（此前按位置下标取，
-    签名每增删一个参数就整体错位）。"""
-    import inspect
-
-    from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
-
-    args, kwargs = mock.call_args
-    return inspect.signature(_solve_transient_distributed).bind(*args, **kwargs).arguments[name]
+_RUN = "autoflowcfd.cli.solve.run.run_solve"
 
 
-class TestSolveTransientDistributedCliWiring:
-    def test_n_ranks_dispatches_to_distributed_with_dual_time_scheme(self, tmp_path):
-        mesh_file = tmp_path / "mesh.pkl"
-        mesh_file.write_bytes(b"")
+def _invoke(tmp_path, *extra):
+    mesh_file = tmp_path / "mesh.pkl"
+    mesh_file.write_bytes(b"")
+    with patch(_RUN) as run:
+        result = CliRunner().invoke(cli, ["solve", "transient", str(mesh_file), "--max-iter", "3", *extra])
+    assert result.exit_code == 0, result.output
+    run.assert_called_once()
+    return run.call_args.args[0]
 
-        with patch(
-            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
-        ) as mock_distributed:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["solve", "transient", str(mesh_file), "--n-ranks", "2",
-                 "--time-method", "dual-time", "--max-iter", "3"],
-            )
 
-        assert result.exit_code == 0, result.output
-        mock_distributed.assert_called_once()
-        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
+def test_n_ranks_runs_distributed_dual_time(tmp_path):
+    run = _invoke(tmp_path, "--n-ranks", "2", "--time-method", "dual-time")
+    assert run.distributed and run.time_scheme is TimeIntegrationScheme.DUAL_TIME and run.time_accurate is False
+    assert run.tol == 0.0 and run.max_iter == 3
 
-    def test_fully_distributed_accepts_dual_time(self, tmp_path):
-        """2026-09-02 起 `--fully-distributed` + `--time-method
-        dual-time` 不再被拒绝——`distributed_mesh_load_v2`/
-        `build_fully_distributed_rank_package` 已接入 `time_scheme`/
-        `dual_time_inner_iter` 字段（见 core/mpi/distributed_mesh_
-        loader.py 模块文档）。"""
-        mesh_file = tmp_path / "mesh.pkl"
-        mesh_file.write_bytes(b"")
 
-        with patch(
-            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
-        ) as mock_distributed:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["solve", "transient", str(mesh_file), "--n-ranks", "2",
-                 "--fully-distributed", "--time-method", "dual-time", "--max-iter", "3"],
-            )
+def test_fully_distributed_accepts_dual_time(tmp_path):
+    run = _invoke(tmp_path, "--n-ranks", "2", "--fully-distributed", "--time-method", "dual-time")
+    assert run.fully_distributed is True and run.time_scheme is TimeIntegrationScheme.DUAL_TIME
 
-        assert result.exit_code == 0, result.output
-        mock_distributed.assert_called_once()
-        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
-        assert _arg(mock_distributed, "fully_distributed") is True
 
-    def test_init_from_dispatches_with_distributed(self, tmp_path):
-        """2026-09-02 起 `--init-from` + `--n-ranks`/`--multi-gpu`/
-        `--fully-distributed` 不再被拒绝——`restore_distributed_state_
-        from_checkpoint`（见 core/mpi/distributed_checkpoint.py 模块
-        文档）已接入三条分布式路径。"""
-        mesh_file = tmp_path / "mesh.pkl"
-        mesh_file.write_bytes(b"")
-        ckpt_file = tmp_path / "ckpt.h5"
-        ckpt_file.write_bytes(b"")
+def test_init_from_reaches_the_distributed_run(tmp_path):
+    ckpt_file = tmp_path / "ckpt.h5"
+    ckpt_file.write_bytes(b"")
+    assert _invoke(tmp_path, "--n-ranks", "2", "--init-from", str(ckpt_file)).init_checkpoint == str(ckpt_file)
 
-        with patch(
-            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
-        ) as mock_distributed:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["solve", "transient", str(mesh_file), "--n-ranks", "2",
-                 "--init-from", str(ckpt_file), "--max-iter", "3"],
-            )
 
-        assert result.exit_code == 0, result.output
-        mock_distributed.assert_called_once()
-        assert _arg(mock_distributed, "init_checkpoint") == str(ckpt_file)
+def test_multi_gpu_with_explicit_scheme_is_time_accurate(tmp_path):
+    run = _invoke(tmp_path, "--n-ranks", "2", "--backend", "gpu", "--multi-gpu", "--time-method", "rk3",
+                  "--dual-time-inner-iter", "9")
+    assert run.multi_gpu is True and run.time_scheme is TimeIntegrationScheme.SSP_RK3 and run.time_accurate is True
+    assert run.dual_time_inner_iter == 9
 
-    def test_multi_gpu_dispatches_with_dual_time_default(self, tmp_path):
-        mesh_file = tmp_path / "mesh.pkl"
-        mesh_file.write_bytes(b"")
 
-        with patch(
-            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
-        ) as mock_distributed:
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["solve", "transient", str(mesh_file), "--n-ranks", "2",
-                 "--backend", "gpu", "--multi-gpu", "--max-iter", "3"],
-            )
-
-        assert result.exit_code == 0, result.output
-        mock_distributed.assert_called_once()
-        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
-        assert _arg(mock_distributed, "time_accurate") is False
-        assert _arg(mock_distributed, "multi_gpu") is True
+def test_physical_time_sets_the_step_count(tmp_path):
+    run = _invoke(tmp_path, "--dt", "1e-3", "--physical-time", "0.01")
+    assert run.max_iter == 10 and run.dt == 1e-3

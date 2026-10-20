@@ -146,7 +146,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
             wall_treatment: RANS 湍流模型的近壁处理方式（resolved | auto，见
                 `core/turbulence/wall_model/treatment.py`）
         """
-        resolved_n_threads = configure_numba_threads(n_threads, mesh)
+        resolved_n_threads = configure_numba_threads(n_threads)
         self.wall_treatment = validate_wall_treatment(wall_treatment)
 
         self._setup_options(mesh, order, artificial_viscosity_enabled, artificial_viscosity_alpha)

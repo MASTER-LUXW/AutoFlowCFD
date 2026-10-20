@@ -35,8 +35,9 @@ result = solver.solve(max_iter=1000, dt=1e-3, tol=1e-6)
 print(result.converged, result.iterations, result.final_residual)
 ```
 
-分布式求解器由 `solve steady/transient --n-ranks N`（多 GPU 加 `--backend gpu --multi-gpu`）构造，见
-`cli/solve/steady/` 与 `cli/solve/transient_distributed.py`。
+分布式求解器由 `solve steady/transient --n-ranks N`（多 GPU 加 `--backend gpu --multi-gpu`，只有 root 加载
+完整网格加 `--fully-distributed`）构造，四种组合的唯一构造入口见 `cli/solve/distributed_build.py`，按后端执行
+（构造、初场、探针、求解、落盘）见 `cli/solve/run.py`。
 
 ## 测试
 

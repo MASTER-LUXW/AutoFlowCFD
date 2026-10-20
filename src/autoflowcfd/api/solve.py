@@ -34,59 +34,54 @@ def _resolved_config(config_cls, config, fields: dict):
 class _APISolveMixin:
     """求解入口：稳态、瞬态、从 checkpoint 续算"""
 
-    def _solve_and_write(self, solver, volume_mesh, config, **solve_kwargs):
-        """求解并按配置的 `output_dir` / `checkpoint_interval` 落盘（中间 checkpoint + 收尾结果），与 CLI 同一组写出函数。
+    def _solve_and_write(self, solver, run):
+        """求解并按 `run.output_dir` / `checkpoint_interval` 落盘（中间 checkpoint + 收尾结果），与 CLI 同一组写出函数。
 
         2026-10-19 以前 API 从不写结果：配置里的 `output_dir`、`checkpoint_interval` 被静默忽略，长程计算中断即丢失。
         """
         from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
-        from autoflowcfd.config.turbulence_names import turbulence_solver_name
 
-        from autoflowcfd.cli.solve.mesh_loader import save_volume_mesh_cache
-
-        input_file = save_volume_mesh_cache(volume_mesh, config.output_dir)
-        names = (turbulence_solver_name(config.turbulence), config.backend.value)
+        names = (run.turbulence_model, run.backend)
         result = solver.solve(
-            checkpoint_callback=periodic_checkpoint_callback(config.checkpoint_interval, config.output_dir, input_file,
+            max_iter=run.max_iter, dt=run.dt, tol=run.tol,
+            checkpoint_callback=periodic_checkpoint_callback(run.checkpoint_interval, run.output_dir, run.input_file,
                                                              *names),
-            phase_max_iter=config.phase_max_iter, residual_drop_threshold=config.residual_drop_threshold,
-            **solve_kwargs)
-        write_single_node_outputs(solver, config.output_dir, result.iterations, input_file, *names)
+            phase_max_iter=run.phase_max_iter, residual_drop_threshold=run.residual_drop_threshold)
+        write_single_node_outputs(solver, run.output_dir, result.iterations, run.input_file, *names)
         return result
 
-    def _build_solver(self, volume_mesh: VolumeMeshData, config, *, aoa_deg: float, aos_deg: float,
-                      skip_quality_check: bool, reference_area: Optional[float], **solver_kwargs):
-        """质量门 + 高阶网格 + 求解器（CPU / 单 GPU），与 `solve steady/transient` 的单机分支同一组构造参数。"""
+    def _build_solver(self, volume_mesh: VolumeMeshData, run):
+        """质量门 + 高阶网格 + 求解器（CPU / 单 GPU）+ 初场 + 参考面积 + 探针，构造参数与 CLI 单机分支同一份
+        （`cli/solve/run.py::single_node_solver_kwargs`）。"""
+        from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
+        from autoflowcfd.cli.solve.run import single_node_solver_kwargs
         from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
-        from autoflowcfd.config.turbulence_names import turbulence_solver_name
+        from autoflowcfd.core.probes import attach_probes
         from autoflowcfd.grid.validation.solve_gate import high_order_mesh_for_solver
 
-        mesh = high_order_mesh_for_solver(volume_mesh, config.order, skip_quality_check=skip_quality_check)
-        solver = build_single_node_solver(
-            config.backend.value, mesh, volume_mesh,
-            gpu_device=config.gpu_device,
-            order=config.order,
-            turb_model_name=turbulence_solver_name(config.turbulence),
-            time_scheme=config.time_scheme,
-            n_threads=config.n_threads,
-            cfl_start=config.cfl_init, cfl_max=config.cfl_max, cfl_min=config.cfl_min,
-            turbulence_intensity=config.turbulence_intensity,
-            viscosity_ratio=config.viscosity_ratio,
-            mu_molecular=config.mu_molecular,
-            rho_inf=config.rho_inf, vel_inf=config.vel_inf, p_inf=config.p_inf,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
-            artificial_viscosity_enabled=config.artificial_viscosity_enabled,
-            artificial_viscosity_alpha=config.artificial_viscosity_alpha,
-            wall_treatment=config.wall_treatment,
-            **solver_kwargs,
-        )
-        # 参考面积（未给时沿来流方向自动估算）：每步日志的 Cd/Cl/Cs 读它，与 CLI 同一个函数
-        from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
+        mesh = high_order_mesh_for_solver(volume_mesh, run.order, skip_quality_check=run.skip_quality_check)
+        solver = build_single_node_solver(run.backend, mesh, volume_mesh, gpu_device=run.gpu_device,
+                                          **single_node_solver_kwargs(run))
+        if run.init_checkpoint:
+            from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
 
-        resolve_reference_area(solver, volume_mesh, reference_area)
+            start_single_node_from_checkpoint(solver, run.init_checkpoint)
+        # 参考面积（未给时沿来流方向自动估算）：每步日志的 Cd/Cl/Cs 读它，与 CLI 同一个函数
+        resolve_reference_area(solver, volume_mesh, run.reference_area)
+        attach_probes(solver, run.probes, run.output_dir)
         self.volume_mesh = volume_mesh
         self.solver = solver
         return solver
+
+    def _run(self, volume_mesh: VolumeMeshData, config, **run_fields):
+        """配置 -> 运行参数（`cli/solve/run.py::solve_run_from_config`）-> 构造 -> 求解与落盘。体网格先存成输出
+        目录下的 volume_mesh.pkl（checkpoint 记录它，`solve resume` 与后处理用它）。"""
+        from autoflowcfd.cli.solve.mesh_loader import save_volume_mesh_cache
+        from autoflowcfd.cli.solve.run import solve_run_from_config
+
+        run = solve_run_from_config(config, input_file=save_volume_mesh_cache(volume_mesh, config.output_dir),
+                                    **run_fields)
+        return self._solve_and_write(self._build_solver(volume_mesh, run), run)
 
     def run_steady(self, volume_mesh: VolumeMeshData, config: Optional[SteadyConfig] = None, *,
                    aoa_deg: float = 0.0, aos_deg: float = 0.0, reference_area: Optional[float] = None,
@@ -113,11 +108,10 @@ class _APISolveMixin:
         config = _resolved_config(SteadyConfig, config, fields)
         logger.info(f"Starting steady-state FR simulation: P{config.order}, {config.turbulence.value}, "
                     f"{config.time_scheme.value}")
-        solver = self._build_solver(volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg,
-                                    skip_quality_check=skip_quality_check, reference_area=reference_area,
-                                    low_mach_precond=config.low_mach_precond)
-        result = self._solve_and_write(solver, volume_mesh, config,
-                                       max_iter=config.max_iter, dt=STEADY_DT, tol=config.convergence_tol)
+        result = self._run(volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
+                           skip_quality_check=skip_quality_check, time_accurate=False,
+                           low_mach_precond=config.low_mach_precond, max_iter=config.max_iter, dt=STEADY_DT,
+                           tol=config.convergence_tol)
         logger.info(f"Simulation complete: {result.iterations} iterations, converged={result.converged}")
         return result
 
@@ -136,20 +130,14 @@ class _APISolveMixin:
         config = _resolved_config(TransientConfig, config, fields)
         logger.info(f"Starting transient FR simulation: P{config.order}, {config.turbulence.value}, "
                     f"{config.time_scheme.value}, {config.n_steps} steps x dt={config.dt}")
-        solver = self._build_solver(
-            volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg, skip_quality_check=skip_quality_check,
-            reference_area=reference_area,
+        result = self._run(
+            volume_mesh, config, aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
+            skip_quality_check=skip_quality_check,
             # 瞬态的显式格式做时间精确推进（全场同一物理步长的子步）；双时间步本身时间精确
-            time_accurate=config.time_scheme != TimeIntegrationScheme.DUAL_TIME)
-        if config.init_from_checkpoint:
-            from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
-
-            start_single_node_from_checkpoint(solver, config.init_from_checkpoint)
-        from autoflowcfd.core.probes import attach_probes
-
-        attach_probes(solver, probes, config.output_dir)
-        result = self._solve_and_write(solver, volume_mesh, config,
-                                       max_iter=config.n_steps, dt=config.dt, tol=0.0)
+            time_accurate=config.time_scheme != TimeIntegrationScheme.DUAL_TIME,
+            # 低马赫伪时间预处理的请求值：dual-time 不用它，显式时间精确推进强制关闭
+            low_mach_precond=True, max_iter=config.n_steps, dt=config.dt, tol=0.0,
+            init_checkpoint=config.init_from_checkpoint, probes=probes)
         logger.info(f"Transient simulation complete: {result.iterations} steps")
         return result
 

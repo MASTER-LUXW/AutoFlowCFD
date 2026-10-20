@@ -152,26 +152,19 @@ def _invoke(tmp_path, command):
 def test_cli_steady_forwards_the_wall_treatment(tmp_path):
     from unittest.mock import patch
 
-    with patch("autoflowcfd.cli.solve.steady.command._run_single_node") as run:
+    with patch("autoflowcfd.cli.solve.run.run_solve") as run:
         result = _invoke(tmp_path, "steady")
     assert result.exit_code == 0, result.output
-    assert run.call_args.kwargs["wall_treatment"] == "auto"
+    assert run.call_args.args[0].physics["wall_treatment"] == "auto"
 
 
 def test_cli_transient_forwards_the_wall_treatment(tmp_path):
     from unittest.mock import patch
 
-    class Stop(Exception):
-        pass
-
-    seen = {}
-
-    def build(*a, **kw):
-        seen.update(kw)
-        raise Stop
-    with patch("autoflowcfd.cli.solve.transient.load_mesh_for_solver", return_value=(object(), object())),             patch("autoflowcfd.cli.solve.transient.build_single_node_solver", side_effect=build):
-        _invoke(tmp_path, "transient")
-    assert seen["wall_treatment"] == "auto"
+    with patch("autoflowcfd.cli.solve.run.run_solve") as run:
+        result = _invoke(tmp_path, "transient")
+    assert result.exit_code == 0, result.output
+    assert run.call_args.args[0].physics["wall_treatment"] == "auto"
 
 
 def test_checkpoint_records_the_wall_treatment():

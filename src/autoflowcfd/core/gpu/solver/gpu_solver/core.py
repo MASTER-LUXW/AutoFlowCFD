@@ -144,7 +144,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
         turb_model_upper = require_supported(turb_model_name)
         from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
-        configure_numba_threads(n_threads, mesh)
+        configure_numba_threads(n_threads)
         if ops is None:
             from autoflowcfd.fr.operators import generate_fr_operators
             ops = generate_fr_operators(order)
