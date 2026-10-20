@@ -150,6 +150,7 @@ class _DistributedStepMixin:
                 与旧实现的报告口径一致，用于跨迭代收敛监控）
         """
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
@@ -306,7 +307,6 @@ class _DistributedStepMixin:
             # 否则 implicit/newton/mean_flow_step.py），归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局
             # 一致着色里本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）。稳态一步一个
             # Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步（implicit/newton/physical_time.py）
-            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
@@ -388,8 +388,6 @@ class _DistributedStepMixin:
         from autoflowcfd.core.time_integration.residual_norm import explicit_turbulence_residual, monitor_residuals
 
         red = MPIReductions(np)
-        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-
         residual_norm, self._residual_per_equation = monitor_residuals(
             red, self.state.dU_dt[:n_local], cell_is_prism, order_now,
             _reference_scales(self.local_solver.freestream, n_vars))
