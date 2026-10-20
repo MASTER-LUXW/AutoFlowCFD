@@ -209,23 +209,16 @@ def compute_viscous_residual_fr_gpu(
         from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
         flat_face_gpu = build_gpu_flat_face(flat_face, device_id)
 
-    # 边界幽灵态：ghost_provider 是任意 Python 可调用对象，numba/CuPy 都
-    # 调不了，只能在 CPU 上跑（复用已验证的 P1+ CPU 实现，只循环边界面，
-    # 约占全部面的 3%，不是新逻辑）——与 gpu_inviscid.py::
-    # _compute_boundary_ghost_states_gpu 现在用的是同一个 CPU round-trip
-    # 模式（此前那边有个真实 bug：完全没调用 ghost_provider，用"owner
-    # cell 零梯度外插"代替，V2.0 专家组盲审发现并已修复，两处现已一致）。
+    # 边界幽灵态：设备上计算（与 CPU、GPU 无粘残差同一份 compute_boundary_ghost_states）
     from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_viscous_residual_fr_gpu")
-    Q_cpu = cp.asnumpy(Q)
-    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, ghost_provider)
+    Q_ghost_gpu = compute_boundary_ghost_states(flat_face_gpu, Q[..., :5], ghost_provider)
     # 边界面公共粘性通量按粘性边界种类分派，与 CPU
     # core/fr_operators/flux_kernels/viscous_bc.py 同一份分类。
     from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
     vbc_kind_np = build_viscous_boundary_kind(flat_face.n_faces, flat_face.is_boundary, ghost_provider)
     with cp.cuda.Device(device_id):
-        Q_ghost_gpu = cp.asarray(Q_ghost_np)
         vbc_kind_gpu = cp.asarray(vbc_kind_np)
 
     if mu_t_field is None:

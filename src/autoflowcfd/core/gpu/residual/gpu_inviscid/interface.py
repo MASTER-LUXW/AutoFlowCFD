@@ -180,7 +180,7 @@ def _compute_interface_correction_gpu(
 
             n_fp = Q_o.shape[1]
             # Q_ghost_gpu 现在是逐 FP 幽灵态 (n_faces,n_fp,5)（见
-            # _compute_boundary_ghost_states_gpu 文档），直接按 FP 对齐
+            # fr_residual/inviscid_kernel.py::compute_boundary_ghost_states），直接按 FP 对齐
             # 使用，不再对该面全部 FP 广播同一个值。
             Q_ghost_face = Q_ghost_gpu[idx_o]  # (nO, n_fp, 5)
             Q_n = cp.where(

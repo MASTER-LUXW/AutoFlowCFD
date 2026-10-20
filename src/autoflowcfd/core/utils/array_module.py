@@ -74,3 +74,15 @@ def scatter_add(xp, out, index, values) -> None:
     import cupyx
 
     cupyx.scatter_add(out, index, values)
+
+
+def to_host(a):
+    """把数组取回主机（CuPy 数组 `.get()`，其余 `numpy.asarray`），返回 numpy 数组。
+
+    唯一实现：2026-10-19 以前七个模块各写一个 `_host`（类型转换各不相同）。需要特定 dtype / 内存连续的调用方
+    在外面再套 `numpy.ascontiguousarray(..., dtype=...)`。
+    """
+    import numpy as np
+
+    get = getattr(a, "get", None)
+    return get() if get is not None else np.asarray(a)

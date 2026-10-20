@@ -5,7 +5,7 @@ CPU 版 `core/fr_operators/corrected_gradient.py::source_velocity_gradient` 的�
 提升算法（`corrected_gradient`）都只有那一份。这里注入 GPU 的两个原语：按坐标系外插
 两侧（`_extrapolate_scalar_pair_gpu`）与两侧跳变提升（`_lift_side_jumps_gpu`），两者与
 CPU 的 numba 核逐项对应、已有逐位对照测试。边界幽灵态与 GPU 平均流残差同一个函数
-（`_compute_boundary_ghost_states_gpu`）。
+（`fr_residual/inviscid_kernel.py::compute_boundary_ghost_states`，设备上计算）。
 """
 
 from autoflowcfd.core.fr_operators.corrected_gradient import corrected_gradient, needs_lifting
@@ -17,8 +17,8 @@ def source_velocity_gradient_gpu(cp, Q, mesh_data, ops_data, flat_face_gpu, flat
 
     Args:
         Q: `(n_cells, n_sps, >=5)` 原始变量（CuPy），前 5 列是 `(rho, u, v, w, p)`。
-        flat_face_gpu / flat_face_cpu: 同一份面几何的设备端与主机端（幽灵态在主机上
-            调用任意 Python 提供者，见 `_compute_boundary_ghost_states_gpu` 文档）。
+        flat_face_gpu / flat_face_cpu: 同一份面几何的设备端与主机端（幽灵态在设备端面几何上算，
+            `fr_residual/inviscid_kernel.py::compute_boundary_ghost_states`）。
         halo_refresh: 多 GPU 紧凑空间上刷新 halo 行（`mpi/compact_halo.py`，只在提升时需要）。
     """
     from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
@@ -28,15 +28,14 @@ def source_velocity_gradient_gpu(cp, Q, mesh_data, ops_data, flat_face_gpu, flat
     if not needs_lifting(vel.shape[1]):
         return grad_broken
 
-    from autoflowcfd.core.gpu.residual.gpu_inviscid import _compute_boundary_ghost_states_gpu
+    from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.faces import (
         _extrapolate_scalar_pair_gpu, _lift_side_jumps_gpu,
     )
 
     n_cells, n_sps = Q.shape[:2]
     det_jacs = mesh_data["det_jacs"]
-    Q_ghost = _compute_boundary_ghost_states_gpu(cp.ascontiguousarray(Q[..., :5]), flat_face_cpu,
-                                                 ghost_provider, device_id)
+    Q_ghost = compute_boundary_ghost_states(flat_face_gpu, cp.ascontiguousarray(Q[..., :5]), ghost_provider)
 
     def extrapolate_pair(comp, frame):
         return _extrapolate_scalar_pair_gpu(cp, flat_face_gpu, comp, frame)

@@ -8,6 +8,8 @@
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 
@@ -58,16 +60,16 @@ class GpuTurbulenceBackend:
 
         s, cp, m = self.solver, self.xp, self.model
         grad_vel, d_wall = self._inputs
-        Q_h = _host(s.Q_gpu)
+        Q_h = to_host(s.Q_gpu)
         flat = get_flat_face_geometry(s.mesh, s.ops)
         faces, values, pointwise, strong_rows, k_slope = gpu_linearization_parts(
             cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular), s.flat_face_gpu, s._wall_mask_gpu,
             s.mesh_data, s.ops_data, des=des_length_for(s.ddes_model_gpu, s._iddes_h_max_gpu, s._iddes_h_wn_gpu))
         ctx = TurbulenceLinearization(
-            mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
+            mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=to_host(grad_vel), d_wall=to_host(d_wall),
             mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], s.mesh, s.ops, flat),
-            dirichlet_faces=faces, dirichlet_values=values, open_face=_host(s._open_mask_gpu),
+            dirichlet_faces=faces, dirichlet_values=values, open_face=to_host(s._open_mask_gpu),
             pointwise=pointwise, strong_rows=strong_rows, wall_target_k_slope=k_slope)
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
@@ -164,8 +166,6 @@ class GpuCoupledBackend:
         turb.rates(commit=True)
 
 
-def _host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)
 
 
 def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data,
@@ -175,7 +175,7 @@ def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, w
     壁面 omega 目标值、其对 k 的导数与逐点求值器取 GPU 残差同一份（`des`：与残差同一个 DES 长度尺度求值器）。"""
     from autoflowcfd.core.turbulence.sa import SAModel
 
-    wall_zero = _host(wall_mask_gpu)
+    wall_zero = to_host(wall_mask_gpu)
     if isinstance(model, SAModel):
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
         from autoflowcfd.core.turbulence.jacobian.backend import sa_linearization_parts
@@ -188,9 +188,9 @@ def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, w
     omega_wall, has_wall, k_slope = compute_omega_wall_target_gpu(
         cp, flat_face_gpu, wall_mask_gpu, d_wall, Q, mu, model.beta1, omega_max=model.omega_max,
         turb_k_field=model.k_field, wall_treatment=model.wall_treatment, with_k_slope=True)
-    faces, values = sst_dirichlet_spec(wall_zero, _host(omega_wall), _host(has_wall), model.wall_treatment)
+    faces, values = sst_dirichlet_spec(wall_zero, to_host(omega_wall), to_host(has_wall), model.wall_treatment)
     return (faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu, des), None,
-            sst_wall_target_k_slope(_host(k_slope), model.wall_treatment))
+            sst_wall_target_k_slope(to_host(k_slope), model.wall_treatment))
 
 
 def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu, des=None):

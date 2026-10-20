@@ -23,7 +23,7 @@ AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 实现
 """
 
 from .interface import _lift_native_contrib, _native_self_extrap, _scatter_add_to_correction  # noqa: F401
-from .residual import _compute_boundary_ghost_states_gpu, compute_inviscid_residual_fr_gpu  # noqa: F401
+from .residual import compute_inviscid_residual_fr_gpu  # noqa: F401
 
 __all__ = [
     "compute_inviscid_residual_fr_gpu",

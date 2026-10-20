@@ -21,6 +21,8 @@
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega_gradient_source, omega_from_log
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 
@@ -63,7 +65,7 @@ class TurbulencePointwise:
         finally:
             turb.field_restore(snap)
         S_w = Sw / omega + log_omega_gradient_source(Gw, gw, xp)
-        return _host(xp.stack([Sk, S_w], axis=-1)), _host(xp.stack([Gk, Gw], axis=-1))
+        return to_host(xp.stack([Sk, S_w], axis=-1)), to_host(xp.stack([Gk, Gw], axis=-1))
 
 
 def cpu_turbulence_pointwise(turb, Q, grad_vel, d_wall, mu, des=None) -> TurbulencePointwise:
@@ -104,9 +106,9 @@ def turbulence_pointwise_partials(evaluate, u, g, scales):
             gg = g.copy()
             gg[..., v, b] += h
         S1, G1 = evaluate(uu, gg)
-        dS[..., :, j] = _host((S1 - S0) / h[..., None])
-        dG[..., :, j] = _host((G1 - G0) / h[..., None])
-    return _host(S0), _host(G0), dS, dG
+        dS[..., :, j] = to_host((S1 - S0) / h[..., None])
+        dG[..., :, j] = to_host((G1 - G0) / h[..., None])
+    return to_host(S0), to_host(G0), dS, dG
 
 
 def _array_module(a):
@@ -114,5 +116,3 @@ def _array_module(a):
     return array_module(a)
 
 
-def _host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)

@@ -12,6 +12,8 @@ distribute_from_root`）交给 `model.restore_transported`（SST 的 omega 可�
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from .state import gather_global_state
 
 
@@ -26,7 +28,8 @@ def transported_model(solver):
 
 
 def _host(a):
-    return np.asarray(a.get() if hasattr(a, "get") else a, dtype=np.float64)
+    """取回主机的 float64 数组（`to_host`）。"""
+    return np.asarray(to_host(a), dtype=np.float64)
 
 
 def global_cell_is_prism(solver, n_global: int):

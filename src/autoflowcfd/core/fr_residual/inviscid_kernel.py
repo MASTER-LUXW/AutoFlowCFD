@@ -219,7 +219,21 @@ def compute_inviscid_interface_correction_kernel(
                     correction[nc, s, v] += -contrib_neighbor[s, v] / dj
 
 
-def compute_boundary_ghost_states(flat, Q: np.ndarray, ghost_provider) -> np.ndarray:
+def boundary_ghost_faces(flat) -> np.ndarray:
+    """需要幽灵态的面（活跃边界面 + 混合拆分面的边界子面记录），主机 int64 数组，按面几何对象缓存（面表构造后
+    不变；设备端面几何只在第一次调用时把三个掩码取回主机）。"""
+    cached = getattr(flat, "_ghost_face_ids", None)
+    if cached is not None:
+        return cached
+    from autoflowcfd.core.utils.array_module import to_host
+
+    mask = to_host(flat.is_boundary).astype(bool) & (
+        to_host(flat.owner_is_primary).astype(bool) | to_host(flat.mixed_bnd_face).astype(bool))
+    flat._ghost_face_ids = np.flatnonzero(mask).astype(np.int64)
+    return flat._ghost_face_ids
+
+
+def compute_boundary_ghost_states(flat, Q, ghost_provider):
     """全部活跃边界面（含混合拆分面的边界子面记录）通量点上的幽灵态。
 
     本侧状态按面算子 `boundary_extrap_native[owner_face_op]` 外插到通量点（四面体 [6,10)、
@@ -227,16 +241,25 @@ def compute_boundary_ghost_states(flat, Q: np.ndarray, ghost_provider) -> np.nda
     混合拆分面的边界子面 owner_is_primary 为 False（不参与残差累加），但它的幽灵态仍被配对的
     内部面逐通量点读取，所以同样要算。
 
+    CPU 与 GPU 共用（`flat` 为主机 `FlatFaceGeometry` 或设备 `GPUFlatFaceGeometry`，`Q` 在同一端）：GPU 的外插与
+    常规边界条件都在设备上算。2026-10-19（I-119）以前 GPU 残差（无粘、粘性、源项梯度提升）每次求值都把整份 Q
+    拷回主机、在主机上算、再把全部面大小的数组传回设备——隐式下每次 J v 两次全场 PCIe 往返。
+
     Returns:
-        Q_ghost: (n_faces, n_fp, 5)，只有活跃边界面的行有意义。
+        Q_ghost: (n_faces, n_fp, 5)，只有活跃边界面的行有意义（与 `Q` 同一数组模块）。
     """
-    Q_ghost = np.zeros((flat.n_faces, flat.n_fp, 5))
-    faces = np.flatnonzero(flat.is_boundary & (flat.owner_is_primary | flat.mixed_bnd_face))
+    from autoflowcfd.core.utils.array_module import array_module
+
+    xp = array_module(Q)
+    n_fp = flat.true_normal.shape[1]
+    Q_ghost = xp.zeros((flat.n_faces, n_fp, 5))
+    faces = boundary_ghost_faces(flat)
     if faces.size == 0:
         return Q_ghost
-    E_o = flat.boundary_extrap_native[flat.owner_face_op[faces]]
-    Q_o = np.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[faces]])
-    Q_ghost[faces] = ghost_provider.ghost_states(faces, Q_o, flat.true_normal[faces])
+    idx = faces if xp is np else xp.asarray(faces)
+    E_o = flat.boundary_extrap_native[flat.owner_face_op[idx]]
+    Q_o = xp.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[idx]])
+    Q_ghost[idx] = ghost_provider.ghost_states(faces, Q_o, flat.true_normal[idx])
     return Q_ghost
 
 

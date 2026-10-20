@@ -101,11 +101,7 @@ def compute_inviscid_residual_fr_gpu(
     )
 
     # ── 2. 界面项 ──
-    # flat_face（CPU 侧）恒需要获取——即便调用方已经预构建好
-    # flat_face_gpu，边界幽灵态计算仍要用 CPU 侧 flat_face（见下方
-    # _compute_boundary_ghost_states_gpu 文档）；get_flat_face_geometry
-    # 有单进程单槽缓存（face_kernels.py），同一 mesh/ops 再次调用是
-    # 缓存命中，不会重复构建。
+    # flat_face（CPU 侧）用于在调用方没有预构建 flat_face_gpu 时构建它。
     #
     # #1（2026-08-28）：`flat_face_cpu` 显式传入时优先使用，不再无条件
     # 调用 get_flat_face_geometry(mesh, ops)——分布式多 GPU 路径下这里
@@ -132,12 +128,12 @@ def compute_inviscid_residual_fr_gpu(
     adj_j = mesh_data['adj_j']
     det_jacs = mesh_data['det_jacs']
 
-    # 边界幽灵态：必须调用真实 ghost_provider 才能正确处理 WALL 无滑移/
-    # INLET/FARFIELD/SYMMETRY 边界（CPU 上计算，然后上传到 GPU——见
-    # _compute_boundary_ghost_states_gpu 文档）。
-    Q_ghost_gpu = _compute_boundary_ghost_states_gpu(
-        Q_gpu, flat_face, boundary_ghost_provider, device_id,
-    )
+    # 边界幽灵态：真实 ghost_provider，设备上计算（与 CPU 同一份 compute_boundary_ghost_states）
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
+    from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
+
+    Q_ghost_gpu = compute_boundary_ghost_states(
+        flat_face_gpu, Q_gpu, require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fr_gpu"))
 
     # 界面校正（按图着色逐色处理）
     correction = _compute_interface_correction_gpu(
@@ -152,45 +148,3 @@ def compute_inviscid_residual_fr_gpu(
     # `GPU -> CPU -> GPU` 往返**：那一步是为了复用 CPU 的 numba 实现而
     # 把整个残差场与守恒场都拷回主机再拷回来。
     return cp.asnumpy(residual) if input_is_numpy else residual
-
-
-def _compute_boundary_ghost_states_gpu(
-    Q_gpu, flat_face, ghost_provider, device_id,
-):
-    """计算边界面每个 FP 各自的真实边界条件幽灵态。
-
-    真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里完全
-    没有调用 `ghost_provider`——无论调用方传入 `None` 还是真实的
-    `BoundaryGhostStateProvider`，都恒定用"owner cell SP0 值零梯度
-    外插、对该面全部 FP 广播同一个值"代替（参数被静默丢弃）。等价于
-    让 WALL/INLET/OUTLET/FARFIELD/SYMMETRY 全部边界面在无粘通量计算
-    里"对该边界不可见"（镜像内部值），P>=1 阶数的 GPU 无粘残差路径上
-    车身壁面、来流边界、出口条件形同虚设——CLI `solve steady/transient
-    --backend gpu` 默认 order=2，恒定触发这条路径。
-
-    `ghost_provider` 是任意 Python 可调用对象，numba/CuPy 都调不了，
-    只能在 CPU 上跑（复用已验证的 P1+ CPU 实现
-    `inviscid_kernel.py::compute_boundary_ghost_states`，只循环边界面，
-    约占全部面的 3%，性能可接受）——与 `gpu_viscous.py` 里粘性残差
-    的同类边界幽灵态计算用的是同一个 CPU round-trip 模式。
-
-    Args:
-        Q_gpu: (n_cells, n_sps, 5) 当前原变量（GPU）
-        flat_face: CPU 侧 FlatFaceGeometry（get_flat_face_geometry 返回）
-        ghost_provider: 边界幽灵态提供者（必须显式给出，`require_ghost_provider`）
-        device_id: GPU 设备 ID
-
-    Returns:
-        Q_ghost_gpu: (n_faces, n_fp, 5)，每个边界面每个 FP 各自的
-            幽灵态（只有边界面对应的行有意义），与 CPU 版
-            `compute_boundary_ghost_states` 返回形状一致
-    """
-    cp = get_cupy()
-    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
-    from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
-
-    provider = require_ghost_provider(ghost_provider, "compute_inviscid_residual_fr_gpu")
-    Q_cpu = cp.asnumpy(Q_gpu)
-    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, provider)
-    with cp.cuda.Device(device_id):
-        return cp.asarray(Q_ghost_np)

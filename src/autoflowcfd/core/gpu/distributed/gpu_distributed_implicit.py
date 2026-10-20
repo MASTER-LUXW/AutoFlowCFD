@@ -88,7 +88,8 @@ class MultiGpuTurbulenceBackend:
     def block_assembler(self):
         """解析单元块装配器（最近一次 `prepare_inputs` 的视图）：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
-        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_linearization_parts
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_linearization_parts
+        from autoflowcfd.core.utils.array_module import to_host
         from autoflowcfd.core.mpi.distributed_compute import distributed_mesh_adapter
         from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
@@ -99,16 +100,16 @@ class MultiGpuTurbulenceBackend:
         dist_fc = s.dist_flat_face
         mesh = distributed_mesh_adapter(s.partition, dist_fc, s.mesh, s.ops)
         flat = dist_fc.base_flat
-        Q_h = _host(ctx.Q)
+        Q_h = to_host(ctx.Q)
         faces, values, pointwise, strong_rows, k_slope = gpu_linearization_parts(
             cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular), s.flat_face_gpu,
             tr._wall_mask_gpu, s.mesh_data, s.ops_data,
             des=des_length_for(s.ddes_model_gpu, s.iddes_h_max_compact, s.iddes_h_wn_compact))
         lin = TurbulenceLinearization(
-            mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
-            d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
+            mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=to_host(ctx.grad_vel),
+            d_wall=to_host(ctx.d_wall), mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], mesh, s.ops, flat),
-            dirichlet_faces=faces, dirichlet_values=values, open_face=_host(tr._open_mask_gpu),
+            dirichlet_faces=faces, dirichlet_values=values, open_face=to_host(tr._open_mask_gpu),
             pointwise=pointwise, strong_rows=strong_rows, wall_target_k_slope=k_slope)
         return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
                                         row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])

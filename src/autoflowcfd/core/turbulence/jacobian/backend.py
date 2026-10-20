@@ -11,6 +11,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from autoflowcfd.core.fr_residual.jacobian.backend import select_rows
 
 from .assemble import TurbulenceLinearization, assemble_turbulence_blocks
@@ -41,7 +43,8 @@ class TurbulenceBlockAssembler:
 
 
 def _host(a):
-    return np.ascontiguousarray(a.get() if hasattr(a, "get") else a, dtype=np.float64)
+    """取回主机的连续 float64 数组（`to_host`）。"""
+    return np.ascontiguousarray(to_host(a), dtype=np.float64)
 
 
 def sa_linearization_parts(xp, model, Q, grad_vel, d_wall, mu, grad_rho, wall_zero_face):

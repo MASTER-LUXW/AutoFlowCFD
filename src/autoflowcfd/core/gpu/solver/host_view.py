@@ -17,11 +17,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from autoflowcfd.core.gpu import get_cupy
 
 
-def _host(a):
-    return np.asarray(a.get() if hasattr(a, "get") else a)
 
 
 class _HostTurbulence:
@@ -32,8 +32,8 @@ class _HostTurbulence:
         object.__setattr__(self, "_model", model)
         object.__setattr__(self, "_restored", None)
         for name in model.TRANSPORTED_FIELDS:
-            object.__setattr__(self, name, _host(getattr(model, name)).copy())
-        object.__setattr__(self, "nu_t", None if model.nu_t is None else _host(model.nu_t).copy())
+            object.__setattr__(self, name, to_host(getattr(model, name)).copy())
+        object.__setattr__(self, "nu_t", None if model.nu_t is None else to_host(model.nu_t).copy())
         object.__setattr__(self, "production_factor", float(model.production_factor))
 
     def __getattr__(self, name):
@@ -76,9 +76,9 @@ class GPUHostView:
 
     def _pull_state(self):
         s = self._solver
-        U = _host(s.U_gpu).copy()
+        U = to_host(s.U_gpu).copy()
         n_cells, n_sps, n_vars = U.shape
-        return SimpleNamespace(U=U, Q=_host(s.Q_gpu).copy(), n_cells=n_cells, n_sps=n_sps, n_vars=n_vars,
+        return SimpleNamespace(U=U, Q=to_host(s.Q_gpu).copy(), n_cells=n_cells, n_sps=n_sps, n_vars=n_vars,
                                _update_primitives=self._update_primitives)
 
     def _pull_turb_model(self):
@@ -87,7 +87,7 @@ class GPUHostView:
 
     def _pull_sgs_model(self):
         sgs = self._solver.sgs_model_gpu
-        return None if sgs is None else SimpleNamespace(nu_t=None if sgs.nu_t is None else _host(sgs.nu_t))
+        return None if sgs is None else SimpleNamespace(nu_t=None if sgs.nu_t is None else to_host(sgs.nu_t))
 
     def _update_primitives(self) -> None:
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive

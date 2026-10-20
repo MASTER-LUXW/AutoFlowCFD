@@ -10,6 +10,8 @@
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 
 from .pointwise import sa_diffusivity, sa_gradient_source, sa_source_terms, vorticity_magnitude
 
@@ -38,7 +40,7 @@ class SAPointwise:
         source, _ = sa_source_terms(nt, self.nu, self.d_wall, self.omega_mag, self.production_factor, xp)
         S = self.rho * source + sa_gradient_source(nt, self.rho, self.mu, gnt, self.grad_rho, xp)
         Gamma = sa_diffusivity(nt, self.rho, self.mu, xp)
-        return _host(S[..., None]), _host(Gamma[..., None])
+        return to_host(S[..., None]), to_host(Gamma[..., None])
 
 
 def sa_dirichlet_spec(wall_zero_face):
@@ -48,8 +50,6 @@ def sa_dirichlet_spec(wall_zero_face):
 
 def sa_strong_rows(d_wall):
     """`(n_cells, n_sps, 1)` 布尔：壁面解点的行（Jacobian 置零）。"""
-    return np.asarray(_host(d_wall) == 0.0)[..., None]
+    return np.asarray(to_host(d_wall) == 0.0)[..., None]
 
 
-def _host(a):
-    return a.get() if hasattr(a, "get") else np.asarray(a)

@@ -23,15 +23,12 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import to_host
+
 from .assemble import MeanFlowLinearization, assemble_mean_flow_blocks
 from .coupling import CouplingBlocks, CouplingGroup
 
 
-def _host(a):
-    if isinstance(a, np.ndarray):
-        return a
-    get = getattr(a, "get", None)
-    return get() if get is not None else np.asarray(a)
 
 
 def unsupported_reason(*, order: int) -> Optional[str]:
@@ -55,8 +52,8 @@ class MeanFlowBlockAssembler:
         self.ctx = MeanFlowLinearization(
             mesh=mesh, ops=ops, ghost_provider=ghost_provider, mu=float(mu), mach_ref=float(mach_ref),
             low_mach=bool(low_mach),
-            mu_t=None if mu_t is None else np.ascontiguousarray(_host(mu_t), dtype=np.float64),
-            nu_av=None if nu_av is None else np.ascontiguousarray(_host(nu_av), dtype=np.float64), flat=flat,
+            mu_t=None if mu_t is None else np.ascontiguousarray(to_host(mu_t), dtype=np.float64),
+            nu_av=None if nu_av is None else np.ascontiguousarray(to_host(nu_av), dtype=np.float64), flat=flat,
             wall_model=wall_model)
         self.n_sps = int(n_sps)
         self.compact_state = compact_state
@@ -65,12 +62,12 @@ class MeanFlowBlockAssembler:
 
     def __call__(self, u0_flat, r0_flat):
         u_dev = u0_flat.reshape(-1, self.n_sps, u0_flat.shape[-1])
-        r = _host(r0_flat).reshape(u_dev.shape[0], self.n_sps, -1)
+        r = to_host(r0_flat).reshape(u_dev.shape[0], self.n_sps, -1)
         if self.row_compact is None:
-            return assemble_mean_flow_blocks(self.ctx, _host(u_dev), residual=r,
+            return assemble_mean_flow_blocks(self.ctx, to_host(u_dev), residual=r,
                                              want_coupling=self.want_coupling)
         # halo 交换在状态自己的数组模块上做（多 GPU 的交换器收 cupy 数组），再搬回主机
-        U = np.ascontiguousarray(_host(self.compact_state(u_dev)))
+        U = np.ascontiguousarray(to_host(self.compact_state(u_dev)))
         R = np.zeros(U.shape[:2] + (r.shape[-1],))
         R[self.row_compact] = r
         out = assemble_mean_flow_blocks(self.ctx, U, residual=R, want_coupling=self.want_coupling)

@@ -20,6 +20,10 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import array_module, to_host
+
+# 幽灵态公式按 `array_module` 取数组模块：CPU 残差传 numpy、GPU 残差传 CuPy，同一份公式（2026-10-19，I-119：此前
+# GPU 残差每次求值把整份原始变量拷回主机算幽灵态、再把全部面大小的数组传回设备）。
 
 
 def wall_ghost_state(
@@ -76,17 +80,18 @@ def wall_ghost_state(
     另外新增 BC 类型与壁面热通量闭合，那是独立的功能项，不是本构造的
     近似。这里把它写明，避免读者误以为绝热是偶然结果。
     """
+    xp = array_module(Q_int, normal)
     Q_ghost = Q_int.copy()
     if is_no_slip:
-        v_wall = np.zeros(3) if wall_velocity is None else np.asarray(wall_velocity)
+        v_wall = xp.zeros(3) if wall_velocity is None else xp.asarray(wall_velocity, dtype=Q_int.dtype)
         # 镜像构造：幽灵态速度 = 2*v_wall - 内部速度，使得黎曼求解器在界面上
         # （L、R 平均意义下）恢复出恰好等于 v_wall 的速度，是标准的无滑移
         # 幽灵单元构造方式（避免直接令幽灵态=v_wall 时界面平均速度实际上是
         # (v_int+v_wall)/2 而非 v_wall 本身的偏差）。
-        Q_ghost[:, 1:4] = 2.0 * v_wall[np.newaxis, :] - Q_int[:, 1:4]
+        Q_ghost[:, 1:4] = 2.0 * v_wall[None, :] - Q_int[:, 1:4]
     else:
         vel = Q_int[:, 1:4]
-        vel_n = np.sum(vel * normal, axis=1, keepdims=True)
+        vel_n = xp.sum(vel * normal, axis=1, keepdims=True)
         # 滑移壁面：法向速度镜像反号（不可穿透），切向速度保持
         Q_ghost[:, 1:4] = vel - 2.0 * vel_n * normal
     return Q_ghost
@@ -100,7 +105,8 @@ def farfield_ghost_state(Q_int: np.ndarray, Q_free: np.ndarray) -> np.ndarray:
     亚声速远场所需的"扰动波可以传出、来流可以传入"的迎风行为，物理上
     比固定惩罚系数的强 Dirichlet 更合理。
     """
-    return np.tile(np.asarray(Q_free), (Q_int.shape[0], 1))
+    xp = array_module(Q_int)
+    return xp.tile(xp.asarray(Q_free, dtype=Q_int.dtype), (Q_int.shape[0], 1))
 
 
 def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray) -> np.ndarray:
@@ -118,9 +124,10 @@ def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray) -> np.ndarray:
         Q_inlet: 形状 (5,)（全入口面统一常量）或 (n_fp,5)（逐通量点不同——合成湍流入口 SEM 喂入
             随时间演化的脉动速度，见 boundary/synthetic_inlet.py 与本文件 InletSEMGhostState）。
     """
-    Q_inlet_arr = np.asarray(Q_inlet, dtype=Q_int.dtype)
+    xp = array_module(Q_int)
+    Q_inlet_arr = xp.asarray(Q_inlet, dtype=Q_int.dtype)
     if Q_inlet_arr.ndim == 1:
-        return np.tile(Q_inlet_arr, (Q_int.shape[0], 1))
+        return xp.tile(Q_inlet_arr, (Q_int.shape[0], 1))
     return Q_inlet_arr.copy()
 
 
@@ -192,9 +199,10 @@ def outlet_ghost_state(Q_int: np.ndarray, p_outlet: float, normal: np.ndarray) -
     `inlet_ghost_state` 的实测：只把出口换成切换写法，6 次精确 Newton 后 ||G|| 仍在 1e-3 量级，
     Jacobian 最小特征值实部在 -8e2 ~ -9e3 1/s 之间跳）。
     """
+    xp = array_module(Q_int, normal)
     rho = Q_int[:, 0]
-    vel_n = np.sum(Q_int[:, 1:4] * normal, axis=1)
-    backflow = np.minimum(vel_n, 0.0)
+    vel_n = xp.sum(Q_int[:, 1:4] * normal, axis=1)
+    backflow = xp.minimum(vel_n, 0.0)
 
     Q_ghost = Q_int.copy()
     Q_ghost[:, 4] = p_outlet - 0.5 * rho * backflow ** 2
@@ -203,9 +211,10 @@ def outlet_ghost_state(Q_int: np.ndarray, p_outlet: float, normal: np.ndarray) -
 
 def symmetry_ghost_state(Q_int: np.ndarray, normal: np.ndarray) -> np.ndarray:
     """对称面幽灵态：法向速度反号镜像，切向速度、密度、压力延拓。"""
+    xp = array_module(Q_int, normal)
     Q_ghost = Q_int.copy()
     vel = Q_int[:, 1:4]
-    vel_n = np.sum(vel * normal, axis=1, keepdims=True)
+    vel_n = xp.sum(vel * normal, axis=1, keepdims=True)
     Q_ghost[:, 1:4] = vel - 2.0 * vel_n * normal
     return Q_ghost
 
@@ -253,8 +262,12 @@ class GhostStateProvider:
             Q_owner: (m, n_fp, 5) 各面通量点上的本侧原始变量
             normals: (m, n_fp, 3) 单位外法向
         Returns:
-            (m, n_fp, 5)
+            (m, n_fp, 5)，与 `Q_owner` 同一数组模块（逐面 `__call__` 在主机上执行，设备数组经主机往返——只有
+            没有按组批量实现的提供者走这里）
         """
+        xp = array_module(Q_owner, normals)
+        if xp is not np:
+            return xp.asarray(self.ghost_states(to_host(faces), to_host(Q_owner), to_host(normals)))
         out = np.empty_like(Q_owner)
         for k, f in enumerate(faces):
             out[k] = self(int(f), Q_owner[k], normals[k])
@@ -331,22 +344,27 @@ class BoundaryGhostStateProvider(GhostStateProvider):
 
     def ghost_states(self, faces: np.ndarray, Q_owner: np.ndarray, normals: np.ndarray) -> np.ndarray:
         """按边界组批量构造：同一组共享一份配置，底层幽灵态函数本身按任意长度向量化（SEM 入口按面查缓存的
-        瞬时速度，同样整组一次）。"""
-        faces = np.asarray(faces, dtype=np.int64)
-        out = np.empty_like(Q_owner)
+        瞬时速度，同样整组一次）。
+        `faces` 是主机面号；`Q_owner` / `normals` 可在主机或设备上（按 `array_module`），常规边界条件整组在
+        同一数组模块上算，SEM 入口（涡核在主机上）只把该组的面经主机往返。
+        """
+        xp = array_module(Q_owner, normals)
+        faces = np.asarray(to_host(faces), dtype=np.int64)
+        out = xp.empty_like(Q_owner)
         if faces.size == 0:
             return out
         n_fp = Q_owner.shape[1]
         codes = np.asarray(self.group_code)[faces]
         for code in np.unique(codes):
-            sel = np.flatnonzero(codes == code)
+            sel_host = np.flatnonzero(codes == code)
+            sel = sel_host if xp is np else xp.asarray(sel_host)
             cfg = self.config_of_code(code)
             sem_ghost = cfg.get("sem") if cfg["type"] == "INLET" else None
             if sem_ghost is not None:
-                out[sel] = sem_ghost.ghost_states(faces[sel], Q_owner[sel])
+                out[sel] = xp.asarray(sem_ghost.ghost_states(faces[sel_host], to_host(Q_owner[sel])))
                 continue
             out[sel] = ghost_state_for_config(
-                cfg, Q_owner[sel].reshape(-1, 5), normals[sel].reshape(-1, 3)).reshape(len(sel), n_fp, 5)
+                cfg, Q_owner[sel].reshape(-1, 5), normals[sel].reshape(-1, 3)).reshape(len(sel_host), n_fp, 5)
         return out
 
 
