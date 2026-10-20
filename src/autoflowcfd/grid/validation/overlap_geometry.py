@@ -227,3 +227,79 @@ def triangle_triangle_min_distance(
             dists.append(segment_to_segment_distance(ea0, ea1, eb0, eb1))
 
     return np.min(np.stack(dists, axis=0), axis=0)
+
+
+def faces_share_node(face_nodes: np.ndarray, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
+    """面对是否共享节点（普通相邻拓扑：一条边、一个顶点，或同一个面——不是缺陷）。"""
+    fi, fj = face_nodes[row_idx], face_nodes[col_idx]
+    shared = np.zeros(len(row_idx), dtype=bool)
+    for a in range(3):
+        for b in range(3):
+            shared |= fi[:, a] == fj[:, b]
+    return shared
+
+
+def candidate_face_pairs(
+    face_nodes: np.ndarray,
+    query_centroids: np.ndarray,
+    query_radius: np.ndarray,
+    tree_centroids: np.ndarray,
+    tree_radius: np.ndarray,
+    chunk_size: int,
+    symmetric: bool = False,
+):
+    """广相位（唯一实现：BL 前沿碰撞检测与网格重叠检查共用）：产出 (row_idx, col_idx)，质心距离不超过
+    query_radius[row] + tree_radius[col]、非自对、不共享节点的面对，按查询面分块（内存有界）。
+
+    取 radius = 外接半径（质心到顶点的最大距离）时对"两三角形相交"完备——相交必须外接球相交；再加上接近阈值
+    即对"间隙小于阈值"完备。树侧按 tree_radius 分档（每档上限是下一档的 2 倍），每档一棵 KD 树、以
+    query_radius + 档上限查询再精确过滤；tree_radius 全为 0 时只有一档，即普通定半径查询。
+
+    `symmetric=True`：查询侧与树侧是同一组面，每对只出一次，且只从 (tree_radius, 下标) 较小的一侧查询——大面
+    只查同档或更大的面，不会因自身半径大而一次取回大量小面（小面对大面由小面一侧查到）。
+    """
+    from scipy.spatial import cKDTree
+
+    n_query = len(query_centroids)
+    positive = tree_radius > 0
+    r0 = float(tree_radius[positive].min()) if positive.any() else 0.0
+    level = np.zeros(len(tree_radius), dtype=np.int64)
+    if r0 > 0:
+        level[positive] = np.ceil(np.log2(tree_radius[positive] / r0)).astype(np.int64) + 1
+    bins = []
+    for k in np.unique(level):
+        members = np.flatnonzero(level == k)
+        cap = 0.0 if k == 0 else r0 * 2.0 ** (k - 1)
+        bins.append((k, members, cap, cKDTree(tree_centroids[members])))
+    exact = len(bins) > 1 or bins[0][2] > 0
+
+    for start in range(0, n_query, chunk_size):
+        idx_chunk = np.arange(start, min(start + chunk_size, n_query))
+        rows, cols = [], []
+        for k, members, cap, tree in bins:
+            query = idx_chunk[level[idx_chunk] <= k] if symmetric else idx_chunk
+            if len(query) == 0:
+                continue
+            lists = tree.query_ball_point(query_centroids[query], r=query_radius[query] + cap, workers=-1)
+            counts = np.fromiter((len(x) for x in lists), dtype=np.int64, count=len(lists))
+            if counts.sum() == 0:
+                continue
+            rows.append(np.repeat(query, counts))
+            cols.append(members[np.concatenate([np.asarray(x, dtype=np.int64) for x in lists if len(x)])])
+        if not rows:
+            continue
+        row_idx, col_idx = np.concatenate(rows), np.concatenate(cols)
+        if symmetric:
+            ri, rj = tree_radius[row_idx], tree_radius[col_idx]
+            keep = (rj > ri) | ((rj == ri) & (col_idx > row_idx))
+        else:
+            keep = row_idx != col_idx
+        if exact:
+            gap = np.linalg.norm(query_centroids[row_idx] - tree_centroids[col_idx], axis=1)
+            keep &= gap <= query_radius[row_idx] + tree_radius[col_idx]
+        row_idx, col_idx = row_idx[keep], col_idx[keep]
+        if len(row_idx) == 0:
+            continue
+        keep = ~faces_share_node(face_nodes, row_idx, col_idx)
+        if np.any(keep):
+            yield row_idx[keep], col_idx[keep]

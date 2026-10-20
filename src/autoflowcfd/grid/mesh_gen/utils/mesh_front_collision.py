@@ -54,10 +54,11 @@ import itertools
 import numpy as np
 from loguru import logger
 
-from ...validation.overlap_geometry import triangle_triangle_intersect, triangle_triangle_min_distance
+from ...validation.overlap_geometry import (
+    candidate_face_pairs, triangle_triangle_intersect, triangle_triangle_min_distance,
+)
 from .mesh_front_collision_detect import (
     _face_geometry,
-    _iter_candidate_pairs,
     find_self_colliding_faces,
     find_cross_state_colliding_faces,
 )
@@ -156,7 +157,7 @@ def clamp_budget_for_convergence(
     budget_before = remaining_budget.copy()
 
     # 接近度判据：质心距离不超过查询面自身 search_multiplier x sqrt(面积)（树侧半径为 0）
-    for row_idx, col_idx in _iter_candidate_pairs(
+    for row_idx, col_idx in candidate_face_pairs(
         faces, centroids, search_multiplier * face_size, centroids, np.zeros(n_faces), chunk_size
     ):
         # 仅实际会聚的对——沿它们的自身法向移动会缩小它们之间的距离——

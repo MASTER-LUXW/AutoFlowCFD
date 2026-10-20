@@ -6,15 +6,16 @@
 单步推进过快导致的"穿透"）。`clamp_budget_for_convergence`（事前预算裁剪）
 和 `freeze_self_colliding_nodes`（事后冻结）仍留在 mesh_front_collision.py。
 
-广相位只有一份实现（`_iter_candidate_pairs`）：查询面 i 与树侧面 j 的质心距离不超过 r_i + r_j。两个检测函数取
-r = 外接半径（质心到顶点的最大距离）——两三角形相交必须外接球相交，所以候选完备。2026-10-20 以前半径是
+广相位是 validation/overlap_geometry.py::candidate_face_pairs（与网格重叠检查同一份）：查询面 i 与树侧面 j 的
+质心距离不超过 r_i + r_j。两个检测函数取 r = 外接半径（质心到顶点的最大距离）——两三角形相交必须外接球相交，
+所以候选完备。2026-10-20 以前半径是
 2 x sqrt(面积)：细长三角形（BL 前沿上常见）顶点到质心的距离远大于 sqrt(面积)（长 1、宽 0.01 的针形三角形
 sqrt(A) = 0.07，顶点离质心 0.67），两个细长面在尖端附近相交时两侧都查不到对方。
 """
 
 import numpy as np
 
-from ...validation.overlap_geometry import triangle_triangle_intersect
+from ...validation.overlap_geometry import candidate_face_pairs, triangle_triangle_intersect
 
 
 def _face_geometry(nodes: np.ndarray, faces: np.ndarray):
@@ -27,71 +28,6 @@ def _face_geometry(nodes: np.ndarray, faces: np.ndarray):
     normal = cross / np.maximum(cross_norm, 1e-300)[:, np.newaxis]
     circumradius = np.linalg.norm(tri - centroids[:, np.newaxis, :], axis=2).max(axis=1)
     return tri, centroids, face_size, normal, circumradius
-
-
-def _shares_node(faces: np.ndarray, row_idx: np.ndarray, col_idx: np.ndarray) -> np.ndarray:
-    """面对是否共享节点（普通相邻拓扑，不是缺陷——与 mesh_overlap_check.py 的过滤规则相同）。"""
-    fi, fj = faces[row_idx], faces[col_idx]
-    shared = np.zeros(len(row_idx), dtype=bool)
-    for a in range(3):
-        for b in range(3):
-            shared |= fi[:, a] == fj[:, b]
-    return shared
-
-
-def _iter_candidate_pairs(
-    faces: np.ndarray,
-    query_centroids: np.ndarray,
-    query_radius: np.ndarray,
-    tree_centroids: np.ndarray,
-    tree_radius: np.ndarray,
-    chunk_size: int,
-    unordered: bool = False,
-):
-    """产出 (row_idx, col_idx)：质心距离 <= query_radius[row] + tree_radius[col]、非自对、不共享节点的面对，按
-    查询面分块（内存有界）。
-
-    树侧按 tree_radius 分档（每档上限是下一档的 2 倍），每档一棵 KD 树、以 query_radius + 档上限查询再精确过滤，
-    大面不漏、候选数有界；tree_radius 全为 0 时只有一档，即普通的定半径查询。`unordered=True`（查询侧与树侧是
-    同一组面、判据对称）时只保留 row < col，每对只出一次。
-    """
-    from scipy.spatial import cKDTree
-
-    n_query = len(query_centroids)
-    positive = tree_radius > 0
-    r0 = float(tree_radius[positive].min()) if positive.any() else 0.0
-    level = np.zeros(len(tree_radius), dtype=np.int64)
-    if r0 > 0:
-        level[positive] = np.ceil(np.log2(tree_radius[positive] / r0)).astype(np.int64) + 1
-    bins = []
-    for k in np.unique(level):
-        members = np.flatnonzero(level == k)
-        cap = 0.0 if k == 0 else r0 * 2.0 ** (k - 1)
-        bins.append((members, cap, cKDTree(tree_centroids[members])))
-
-    for start in range(0, n_query, chunk_size):
-        idx_chunk = np.arange(start, min(start + chunk_size, n_query))
-        rows, cols = [], []
-        for members, cap, tree in bins:
-            lists = tree.query_ball_point(query_centroids[idx_chunk], r=query_radius[idx_chunk] + cap, workers=-1)
-            counts = np.fromiter((len(x) for x in lists), dtype=np.int64, count=len(lists))
-            if counts.sum() == 0:
-                continue
-            rows.append(np.repeat(idx_chunk, counts))
-            cols.append(members[np.concatenate([np.asarray(x, dtype=np.int64) for x in lists if len(x)])])
-        if not rows:
-            continue
-        row_idx, col_idx = np.concatenate(rows), np.concatenate(cols)
-        keep = (row_idx < col_idx) if unordered else (row_idx != col_idx)
-        if len(bins) > 1 or bins[0][1] > 0:
-            gap = np.linalg.norm(query_centroids[row_idx] - tree_centroids[col_idx], axis=1)
-            keep &= gap <= query_radius[row_idx] + tree_radius[col_idx]
-        row_idx, col_idx = row_idx[keep], col_idx[keep]
-        if len(row_idx) == 0:
-            continue
-        keep = ~_shares_node(faces, row_idx, col_idx)
-        if np.any(keep):
-            yield row_idx[keep], col_idx[keep]
 
 
 def _mark_intersecting(colliding, tri_a, tri_b, row_idx, col_idx) -> None:
@@ -130,8 +66,8 @@ def find_self_colliding_faces(
 
     tri, centroids, _size, _normal, circ = _face_geometry(nodes, faces)
     colliding = np.zeros(n_faces, dtype=bool)
-    for row_idx, col_idx in _iter_candidate_pairs(faces, centroids, circ, centroids, circ, chunk_size,
-                                                  unordered=True):
+    for row_idx, col_idx in candidate_face_pairs(faces, centroids, circ, centroids, circ, chunk_size,
+                                                 symmetric=True):
         _mark_intersecting(colliding, tri, tri, row_idx, col_idx)
     return np.flatnonzero(colliding)
 
@@ -180,6 +116,6 @@ def find_cross_state_colliding_faces(
     tri_new, c_new, _s1, _n1, circ_new = _face_geometry(new_nodes, faces)
     tri_cur, c_cur, _s2, _n2, circ_cur = _face_geometry(current_nodes, faces)
     colliding = np.zeros(n_faces, dtype=bool)
-    for row_idx, col_idx in _iter_candidate_pairs(faces, c_new, circ_new, c_cur, circ_cur, chunk_size):
+    for row_idx, col_idx in candidate_face_pairs(faces, c_new, circ_new, c_cur, circ_cur, chunk_size):
         _mark_intersecting(colliding, tri_new, tri_cur, row_idx, col_idx)
     return np.flatnonzero(colliding)

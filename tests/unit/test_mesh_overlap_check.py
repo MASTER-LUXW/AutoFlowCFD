@@ -1,17 +1,13 @@
 """validation/mesh_overlap_check.py 的单元测试。
 
-CANDIDATE_CAP_PER_FACE 的测试是一次真实卡死的回归：单个尺寸离群的巨大
-边界面（cube_demo 粗的远场/计算域外壳面片之一）的粗筛搜索半径随它自己
-巨大的尺寸放大，**一次**查询就能返回几十万个候选——实测 142,944 个，把
-一个 500 面的分块撑到 558 万候选对，整个检查要 6 分钟以上、数 GB 内存。
-修复是把任何一个面的候选集截断到最近的 CAP 个邻居。这些测试确认：网格里
-同时存在一张不相干的巨大面时，截断不会让真正的小面对小面的重叠被漏掉。
+巨大离群面的回归来自一次真实卡死：单个尺寸离群的巨大边界面（cube_demo 粗的远场/计算域外壳面片之一）的粗筛
+搜索半径随它自己巨大的尺寸放大，一次查询就能返回几十万个候选（实测 142,944 个，整个检查 6 分钟以上、数 GB
+内存）。此前的对策是把任何一个面的候选截断到最近的 2000 个——截断本身可能丢掉真实缺陷。现在广相位
+（overlap_geometry.candidate_face_pairs，I-189）只从外接半径较小的一侧查询，大面不查小面，候选数有界且完备。
 """
 
 import numpy as np
-import pytest
 
-from autoflowcfd.grid.validation import mesh_overlap_check
 from autoflowcfd.grid.validation.mesh_overlap_check import check_face_overlap_and_proximity
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
 from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
@@ -64,67 +60,40 @@ def _build_mesh(tets):
     return all_nodes, cells
 
 
-class TestCandidateCapPreservesCorrectness:
-    def test_small_overlap_still_found_next_to_a_huge_distractor_face(self, monkeypatch):
-        """一张巨大的面（在远处，不接触任何东西）迫使它自己的某次粗筛查询被截断；
-        网格里别处真正的小面对小面重叠仍必须被检出。
-        """
-        monkeypatch.setattr(mesh_overlap_check, "CANDIDATE_CAP_PER_FACE", 3)
+def _report(tets):
+    nodes, cells = _build_mesh(tets)
+    node_arr = NodeArray(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())
+    faces = FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
+    return check_face_overlap_and_proximity(nodes, cells, faces=faces)
 
+
+class TestHugeOutlierFace:
+    def test_small_overlap_found_and_huge_face_does_not_explode_the_candidates(self):
+        """远处一张巨大的面（不接触任何东西）：小面对小面的真实重叠照常检出，巨大单元不被牵连，候选对数有界
+        （巨大面只与同档或更大的面配对，不会把全部小面当候选）。"""
         tet_a = _cap_tet(A0, A1, A2)
         tet_b = _cap_tet(B0, B1, B2)
-
-        # 几个彼此分开、互不重叠的小四面体，用来填充那张巨大面自己那次查询的
-        # 候选数。
         distractors = [_tiny_tet(np.array([10.0 * i, 0.0, 0.0])) for i in range(1, 9)]
-
-        # 放在"簇中心"附近（在巨大面自己过大的搜索半径之内、靠近其余所有单元），
-        # 但离任何单个四面体都足够远，在几何上从不与之相交。
         huge = _huge_tet(HUGE_TET_CENTER, scale=HUGE_TET_SCALE)
-
         tets = [tet_a, tet_b] + distractors + [huge]
-        nodes, cells = _build_mesh(tets)
 
-        node_arr = NodeArray(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())
-        faces = FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
-
-        report = check_face_overlap_and_proximity(nodes, cells, faces=faces)
+        report = _report(tets)
 
         assert report.has_overlaps
-        # tet_a 是单元 0，tet_b 是单元 1（按 `cells` 的构造顺序）。
-        assert 0 in report.overlapping_cell_ids
-        assert 1 in report.overlapping_cell_ids
-        # 巨大的干扰单元不接触任何东西，不能因为截断引起的误报而被牵连进来。
-        huge_cell_id = len(tets) - 1
-        assert huge_cell_id not in report.overlapping_cell_ids
+        assert 0 in report.overlapping_cell_ids and 1 in report.overlapping_cell_ids
+        assert len(tets) - 1 not in report.overlapping_cell_ids
+        n_faces = 4 * len(tets)
+        assert report.n_candidate_pairs < n_faces * (n_faces - 1) // 2
 
-    def test_cap_actually_engages_for_the_huge_face(self, monkeypatch):
-        """对测试夹具本身的检查：不截断时，巨大面自己的查询确实超过一个小的上限
-        （否则上面的测试根本没有走到截断路径）。
-        """
-        monkeypatch.setattr(mesh_overlap_check, "CANDIDATE_CAP_PER_FACE", 3)
 
-        tet_a = _cap_tet(A0, A1, A2)
-        tet_b = _cap_tet(B0, B1, B2)
-        distractors = [_tiny_tet(np.array([10.0 * i, 0.0, 0.0])) for i in range(1, 9)]
-        huge = _huge_tet(HUGE_TET_CENTER, scale=HUGE_TET_SCALE)
-
-        tets = [tet_a, tet_b] + distractors + [huge]
-        nodes, cells = _build_mesh(tets)
-        node_arr = NodeArray(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())
-        faces = FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
-
-        boundary_idx = faces.get_boundary_face_indices()
-        centroids = faces.center[boundary_idx]
-        face_size = np.sqrt(np.maximum(faces.area[boundary_idx], 1e-300))
-        from scipy.spatial import cKDTree
-        tree = cKDTree(centroids)
-        search_radius = 3.0 * face_size
-        counts = np.array([
-            len(tree.query_ball_point(centroids[i], r=search_radius[i]))
-            for i in range(len(boundary_idx))
-        ])
-        assert counts.max() > 3, "fixture must produce a face whose uncapped candidate count exceeds the patched cap"
+class TestSlenderFaces:
+    def test_needle_faces_crossing_near_their_tips_are_reported(self):
+        """细长面顶点离质心远大于 sqrt(面积)：此前 3 x sqrt(面积) 的搜索半径两侧都查不到对方。"""
+        needle_a = _cap_tet(np.array([0., -0.005, 0.]), np.array([0., 0.005, 0.]), np.array([1., 0., 0.]), eps=1e-4)
+        needle_b = _cap_tet(np.array([0.95, -0.002, -1.]), np.array([0.95, 0.002, -1.]), np.array([0.95, 0., 1.]),
+                            eps=1e-4)
+        report = _report([needle_a, needle_b])
+        assert set(report.overlapping_cell_ids.tolist()) == {0, 1}
 
 
 class TestNoOverlapCleanMesh:
