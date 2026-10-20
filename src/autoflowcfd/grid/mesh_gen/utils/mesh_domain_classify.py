@@ -14,7 +14,7 @@
 只保留 classify_boundary_groups 这个上层分类编排逻辑。
 """
 
-from typing import List, NamedTuple, Tuple, TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
@@ -51,11 +51,10 @@ _CLOSED_OPEN_EDGE_FRACTION = 0.01
 _BBOX_TOUCH_RTOL = 1e-6
 
 
-class SubShell(NamedTuple):
-    """一个已分类、绕向已修正的边界分组子片段。"""
-    faces: np.ndarray          # (n, 3) int，共享节点数组中的索引
-    extrude: bool
-    group_name: str
+def _component_extent(nodes: np.ndarray, faces: np.ndarray) -> str:
+    """报错用：分量的坐标范围。"""
+    pts = nodes[np.unique(faces)]
+    return f"范围 {np.round(pts.min(axis=0), 6).tolist()} ~ {np.round(pts.max(axis=0), 6).tolist()} m"
 
 
 def classify_boundary_groups(
@@ -89,6 +88,12 @@ def classify_boundary_groups(
             计算域边界包围盒的壁面（地面/隧道）永远不是 hole——它是
             终止于计算域自身外边界的一张开放曲面，没有需要排除的
             封闭内部空间。
+
+    Raises:
+        ValueError: 需要挤出边界层的分量（bc 类型不在 NEVER_EXTRUDE_BC_TYPES）既不闭合、也不贴合包围盒单一面
+            （例如与地面焊接、接触口较大的车身，或零厚度板）——此前被静默归入核心 PLC、不挤出边界层，无滑移壁面
+            上没有边界层只在日志的"已挤出组名单"里间接体现；或闭合实体找不到可靠的内部点——此前只警告并跳过
+            tetgen 孔洞标记，tetgen 会在实体内部填四面体、与该实体的 BL 棱柱重叠。
     """
     L_char = float(np.max(bbox_max - bbox_min))
     tol = L_char * _BBOX_TOUCH_RTOL
@@ -159,21 +164,21 @@ def classify_boundary_groups(
                 any_extruded_in_group = True
 
                 hole_pt = find_point_inside_closed_shell(nodes, comp_faces)
-                if hole_pt is not None:
-                    hole_points.append(hole_pt)
-                else:
-                    logger.warning(
-                        f"Could not find a reliable interior point for closed "
-                        f"solid '{name}' (component with {len(comp_faces)} "
-                        f"faces) - skipping its tetgen hole marker. The core "
-                        f"fill may include spurious tetrahedra inside this "
-                        f"solid's own BL block."
-                    )
+                if hole_pt is None:
+                    raise ValueError(
+                        f"边界组 '{name}'（{bc_type}）的闭合分量（{len(comp_faces)} 个面，"
+                        f"{_component_extent(nodes, comp_faces)}）找不到可靠的内部点，无法给 tetgen 标记孔洞——"
+                        "不标记时核心填充会在实体内部生成四面体、与它的边界层重叠。请检查该分量是否自相交、"
+                        "法向不一致或存在极薄的部位。")
+                hole_points.append(hole_pt)
             else:
-                # 开放且不贴合 bbox：属于外壳壁面（入口/出口/隧道一类），
-                # 在别处有真正的自由边界。原样保留、作为核心 PLC 的一部分
-                # 使用。
-                core_face_rows.append(comp_faces)
+                # 开放且不贴合包围盒单一面：无法确定边界层向哪一侧生长（不闭合、也没有包围盒方向可依）
+                raise ValueError(
+                    f"边界组 '{name}'（{bc_type}）的一个分量（{len(comp_faces)} 个面，开放边比例 "
+                    f"{open_fraction:.2%}，{_component_extent(nodes, comp_faces)}）既不闭合、也不贴合计算域包围盒的"
+                    f"单一面，无法确定边界层挤出方向。无滑移壁面需要闭合的实体（零厚度板请建成有厚度的薄体，"
+                    f"与地面焊接的车身请把接触口闭合到小于 {_CLOSED_OPEN_EDGE_FRACTION:.0%} 的开放边），"
+                    "不需要边界层的面请用 --bc-type 指定为 SLIP_WALL / SYMMETRY 等类型。")
 
         if any_extruded_in_group:
             extruded_group_names.append(name)
