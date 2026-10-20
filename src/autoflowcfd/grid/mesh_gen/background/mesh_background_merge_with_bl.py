@@ -28,7 +28,6 @@ from ..tetgen.mesh_tetgen_core import (
     compute_local_thickness_limit,
     generate_core_background_points,
     fill_without_oversized_tetrahedra,
-    CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
 )
 
 
@@ -221,7 +220,6 @@ def _build_merged_mesh_with_bl(
         return fill_core_volume(
             core_plc_points, core_plc_faces, holes=hole_points, regions=regions,
             background_points=extra_points,
-            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
             force_preserve_boundary=True,
         )
 

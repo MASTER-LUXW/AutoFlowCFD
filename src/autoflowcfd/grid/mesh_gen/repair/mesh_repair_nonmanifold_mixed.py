@@ -115,7 +115,7 @@ def patch_nonmanifold_cavity_mixed(
     if prism_keep.all() and tet_keep.all():
         return nodes, prism_cells, tet_cells
 
-    from ..tetgen.mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from ..tetgen.mesh_tetgen_core import fill_core_volume
     from ...validation.quality_validator import MeshQualityValidator
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -285,7 +285,6 @@ def patch_nonmanifold_cavity_mixed(
         try:
             retiled_nodes, retiled_tets = fill_core_volume(
                 local_points, local_faces, verbose=False,
-                minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
             )
         except Exception as e:
             # 只计数会让排查为什么某个 cavity retile 失败变得很困难，

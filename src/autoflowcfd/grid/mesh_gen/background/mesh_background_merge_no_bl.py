@@ -19,7 +19,7 @@ from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_p
 from ..tetgen.mesh_tetgen_core import (
     fill_core_volume, generate_core_background_points,
     fill_without_oversized_tetrahedra,
-    CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL, CORE_VOLUME_CAP_FRACTION,
+    CORE_VOLUME_CAP_FRACTION,
 )
 
 
@@ -77,7 +77,6 @@ def _build_merged_mesh_no_bl(
             proc_nodes, proc_faces, holes=hole_points,
             regions=regions,
             background_points=extra_points,
-            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
         )
 
     if regions:

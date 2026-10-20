@@ -51,20 +51,16 @@ __all__ = [
     'fill_core_volume',
 ]
 
-# 核心填充 tetgen 质量/grading 参数，所有调用 fill_core_volume 的地方
-# 都使用本项目自己的收紧标准，而不是 tetgen 的出厂默认值
-# （minratio~2.0, mindihedral~0 实际无约束）。最初只在
-# mesh_background_merge.py（核心填充的主调用方）里定义——搬到这里，
-# 是因为 fill_core_volume 的每个调用方都已经 import 这个最低层模块，
-# 这样 mesh_repair_cavity.py 的 Stage B'（局部型腔重铺）也能用同样的
-# 标准来做自己的、规模小得多的 fill_core_volume 调用，而不是静默退回
-# tetgen 更宽松的默认值。那个不一致是实际测量到的问题，不是理论上的：
-# 在真实案例上，Stage B' 有约 72% 的型腔重铺尝试被判定为"没有改善"，
-# 而重铺本身也没有理由真的比原始（已经很差的）型腔更好——因为它用的
-# 形状质量界限比当初生成那些型腔邻居时还要宽松。
-CORE_TETGEN_MINRATIO = 1.15  # was 1.4; tetgen default ~2.0 (lower = stricter)
-CORE_TETGEN_MINDIHEDRAL = 15.0  # unchanged - dihedral wasn't the implicated metric
-CORE_VOLUME_CAP_FRACTION = 0.08  # was 0.15, of max_cell_size**3
+# tetgen 质量参数：fill_core_volume 的默认值，主填充与各处局部重铺（阶段 B'、非流形空腔修补）都用它，
+# 局部重铺不比当初生成其邻居时更宽松（真实案例上空腔重铺曾因用 tetgen 出厂默认值约 72% 被判"没有改善"）。
+# 这是 tetgen 实际收到的值：2026-10-20 以前常量写的是 1.15 / 15，fill_core_volume 内部再悄悄放宽成
+# max(1.1, minratio-0.2) / max(5, mindihedral-10)，实际生效一直是 1.1 / 5——此前全部生成结果与验证都是在
+# 这组值下得到的。最小二面角在 cube_demo 第 21 轮实测过 5/10/15/18（最终相邻体积比超阈值面 1818/1414/1312/
+# 1748，噪声量级），剩余薄片主要来自塌缩棱柱降级而不是 tetgen 主填充，提高它没有收益；薄片由优化阶段的
+# CORE_TETGEN_OPT_MAX_DIHEDRAL 处理。
+CORE_TETGEN_MINRATIO = 1.1       # 最大半径-边比（越小越严，tetgen 出厂约 2.0）
+CORE_TETGEN_MINDIHEDRAL = 5.0    # 最小二面角（度）
+CORE_VOLUME_CAP_FRACTION = 0.08  # 单元体积上限，占 max_cell_size**3 的比例
 
 # tetgen 精化完成后、边/面翻转+光顺的局部优化遍数（对应 tetgen 手册的 -O
 # 开关；Python 绑定里的 opt_iterations，默认 3）。这个优化阶段完全在已有
@@ -104,8 +100,8 @@ _VOLUME_SHAPE_FACTOR = 0.15
 def fill_core_volume(
     points: np.ndarray,
     faces: np.ndarray,
-    minratio: float = 1.4,
-    mindihedral: float = 15.0,
+    minratio: float = CORE_TETGEN_MINRATIO,
+    mindihedral: float = CORE_TETGEN_MINDIHEDRAL,
     holes: Optional[List[np.ndarray]] = None,
     regions: Optional[List[Tuple[np.ndarray, int, float]]] = None,
     background_points: Optional[np.ndarray] = None,
@@ -198,10 +194,6 @@ def fill_core_volume(
 
     points, faces = prepare_plc_input(points, faces, background_points)
 
-    # 稍微放宽质量约束以确保在复杂 BL 表面上收敛。
-    effective_minratio = max(1.1, minratio - 0.2)
-    effective_mindihedral = max(5.0, mindihedral - 10.0)
-
     # nobisect=True（无 regions 时）曾在这里无条件使用，用于绕过 tetgen
     # 在本项目自身 BL 外表面上真实挂起的问题——但当时那个表面来自
     # mesh_corner_split.py 的角分裂/倒角构造，自身存在真实缺陷（见
@@ -231,7 +223,7 @@ def fill_core_volume(
     log(
         f"Tetrahedralizing core volume: {len(points)} boundary points, "
         f"{len(faces)} boundary faces (tetgen, nobisect={force_nobisect}, "
-        f"minratio={effective_minratio:.1f}, mindihedral={effective_mindihedral:.1f})..."
+        f"minratio={minratio:.1f}, mindihedral={mindihedral:.1f})..."
     )
 
     tgen = tetgen.TetGen(points, faces)
@@ -254,7 +246,7 @@ def fill_core_volume(
     try:
         nodes, elems, _attr, _markers = tgen.tetrahedralize(
             plc=True, nobisect=force_nobisect, quality=True,
-            minratio=effective_minratio, mindihedral=effective_mindihedral,
+            minratio=minratio, mindihedral=mindihedral,
             # 仅取决于 `regions`，不取决于 force_nobisect——基于区域
             # 的内部精化只在四面体内部插入 Steiner 点（从不在边界上），
             # 所以无论 nobisect 为何为 True（完全没有 `regions`，或

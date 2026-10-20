@@ -69,10 +69,7 @@ def _attempt_cavity_retile_clusters(
     n_failed = 0
     n_skipped_budget = 0
 
-    from ..tetgen.mesh_tetgen_core import (
-        fill_core_volume,
-        CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
-    )
+    from ..tetgen.mesh_tetgen_core import fill_core_volume
 
     if n_clusters > max_clusters_attempted:
         logger.warning(
@@ -128,16 +125,9 @@ def _attempt_cavity_retile_clusters(
                 # 很多遍——每个单独调用自身的边界点数/Steiner 预算/
                 # 完成行单独来看没意义，只有本函数自身的逐空腔
                 # 和最终汇总行（分别在下方/末尾单独记录）才有意义。
-                # minratio/mindihedral: 与主核心填充使用的相同收紧标准
-                # （mesh_background_merge.py），而非 tetgen 自身更宽松的
-                # 默认值——使用比产生其自身（已经坏的）邻居更松的形状
-                # 质量边界的空腔重铺没有真正理由产出更好结果。已确认为
-                # 真实案例上的真实大效应：使用 tetgen 默认值时，约 72%
-                # 的尝试重铺被拒绝为"非改进"；参见 CORE_TETGEN_MINRATIO
-                # 自身文档字符串。
+                # 质量参数取 fill_core_volume 的默认值（与主填充相同，见 CORE_TETGEN_MINRATIO）。
                 retiled_nodes, retiled_tets = fill_core_volume(
                     local_points, local_faces, verbose=False,
-                    minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
                 )
             except Exception as e:
                 logger.warning(f"Stage B': cavity remesh failed ({e}), keeping original cells")

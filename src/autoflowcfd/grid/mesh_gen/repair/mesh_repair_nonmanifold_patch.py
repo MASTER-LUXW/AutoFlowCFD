@@ -81,7 +81,7 @@ def patch_nonmanifold_cavity(
     if keep_mask.all():
         return nodes, cells, bad_cell_mask
 
-    from ..tetgen.mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from ..tetgen.mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells
 
     n_cells = len(cells)
     all_faces = cells[:, _CAVITY_FACE_TEMPLATES].reshape(-1, 3)
@@ -129,7 +129,6 @@ def patch_nonmanifold_cavity(
     try:
         retiled_nodes, retiled_tets = fill_core_volume(
             local_points, local_faces, verbose=False,
-            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
         )
     except Exception as e:
         logger.warning(f"Non-manifold cavity patch: local retile failed ({e}), falling back to plain cell removal")
