@@ -106,6 +106,7 @@ def build_seam_taper_scale(
 
 def compute_local_thickness_limit(
     nodes: np.ndarray,
+    surface_faces: np.ndarray,
     extrude_faces: np.ndarray,
     extrude_node_idx: np.ndarray,
     domain_size: float,
@@ -118,13 +119,14 @@ def compute_local_thickness_limit(
     地板离地面几厘米）上相向生长时会在穿透前停止——而不是以均匀速率
     生长然后依赖 repair_nonmanifold_cells 来清理结果重叠。
 
-    间隙在未变形的（layer-0）表面上测量：对每个节点，搜索在
-    `domain_size * search_radius_fraction` 内的附近表面节点，只保留
-    那些大致在节点自身外法向"前方"的（在 `angle_threshold_deg`
-    内）——这区分了真正的相对间隙和节点自身的紧邻网格（它们总是
-    空间上很近，只是因为局部网格分辨率，不是真实间隙，而且大致在
-    面内而不是在法向前方）。最近合格点的距离就是局部间隙；
-    `safety_factor`（< 0.5）为相对表面的 BL 生长留出裕量。
+    间隙在未变形的（layer-0）表面上测量（`facing_gap.py`）：`domain_size * search_radius_fraction` 内，
+    最近点落在节点外法向"前方"锥内（半角 `angle_threshold_deg`）的面片的最短距离，与沿法向射线
+    命中面片的距离，取较小者——前方锥区分了真正的相对间隙和节点自身的紧邻网格（它们空间上很近，
+    但在面内而不是在法向前方）。`safety_factor`（< 0.5）为相对表面的 BL 生长留出裕量。
+
+    2026-10-20 以前按"锥内最近**节点**"测量：对面是大三角形、顶点都在搜索半径或锥外时（稀疏远场面、
+    细长间隙对面的粗面片）完全检测不到，挤出层可穿透对面（tetgen "self-intersection" 报错的来源之一）。
+    新的候选搜索以沿法向前移的球查询（见 facing_gap），cube_demo 上从约 27 s 降到约 1.5 s。
 
     这是几何启发式，不是非交叉的形式证明：它在未变形表面上评估
     一次，所以一个强烈弯曲的前端，其真实最近点在两侧都挤出时可能
@@ -132,9 +134,9 @@ def compute_local_thickness_limit(
     不是保证——repair_nonmanifold_cells 仍然作为安全网保留。
 
     Args:
-        nodes: (n_nodes, 3) 所有表面节点坐标（整个表面，不仅是
-            可挤出子集——限制某个壁 BL 增长的最近特征可能是另一个
-            壁）
+        nodes: (n_nodes, 3) 所有表面节点坐标
+        surface_faces: (k, 3) 全部表面三角形（限制某个壁 BL 增长的对面可能是任何边界：另一个壁、地面、
+            远场面）
         extrude_faces: (m, 3) 可 BL 挤出的面，仅用于计算每个节点的
             外（挤出）法向
         extrude_node_idx: 实际将被挤出的节点索引
@@ -159,7 +161,7 @@ def compute_local_thickness_limit(
         (n_nodes,) float 数组：每个节点的最大累积 BL 厚度（米），
         未找到附近相对特征处为 np.inf
     """
-    from scipy.spatial import cKDTree
+    from .facing_gap import facing_gap
 
     n_nodes = len(nodes)
     limit = np.full(n_nodes, np.inf, dtype=np.float64)
@@ -169,64 +171,12 @@ def compute_local_thickness_limit(
     face_normals = _face_normals(nodes, extrude_faces)
     avg_normal = _average_node_normals(n_nodes, extrude_faces, face_normals)
 
-    search_radius = domain_size * search_radius_fraction
-    cos_threshold = np.cos(np.radians(angle_threshold_deg))
-
-    tree = cKDTree(nodes)
-    query_points = nodes[extrude_node_idx]
-
-    # 分块查询和处理，而不是一次全部，并且对每个块内的候选做
-    # 向量化的角度/距离测试，而不是 Python 级别的每节点循环。在精细
-    # 表面网格上，域尺度的 search_radius 可以在每次查询中包围数万个
-    # 同片候选（角度测试会丢弃几乎所有——它们是面内邻居，不是真正的
-    # 相对特征）——一次性实现所有查询的完整候选列表（之前未分块的
-    # 行为）内存随 n_queries * avg_candidates 缩放，在约 25k 表面节点
-    # 的案例上达到多 GB 瞬态使用，随后的每节点 Python 循环（34k+
-    # 次迭代，每次做几个小 numpy 调用）主导了运行时间——每次调用
-    # 100+ 秒，每次 BL 挤出尝试都重复。这里产生数值相同的结果
-    # （相同半径、相同角度测试、相同最近前方点选择）——只改变了工作
-    # 的批处理方式。
-    chunk_size = 200
-    n_capped = 0
-    min_cap_seen = np.inf
-
-    for start in range(0, len(query_points), chunk_size):
-        end = min(start + chunk_size, len(query_points))
-        chunk_node_idx = extrude_node_idx[start:end]
-        neighbor_lists = tree.query_ball_point(
-            query_points[start:end], r=search_radius, workers=-1
-        )
-        counts = np.fromiter(
-            (len(lst) for lst in neighbor_lists), dtype=np.int64, count=len(neighbor_lists)
-        )
-        if counts.sum() == 0:
-            continue
-
-        row_idx = np.repeat(np.arange(len(chunk_node_idx)), counts)
-        flat_candidates = np.concatenate(
-            [np.asarray(lst, dtype=np.int64) for lst in neighbor_lists if len(lst) > 0]
-        )
-
-        node_idx_per_row = chunk_node_idx[row_idx]
-        d = nodes[flat_candidates] - nodes[node_idx_per_row]
-        dist = np.linalg.norm(d, axis=1)
-        real = dist > 1e-9
-        safe_dist = np.where(real, dist, 1.0)
-        cosang = np.einsum('ij,ij->i', d, avg_normal[node_idx_per_row]) / safe_dist
-        ahead = real & (cosang > cos_threshold)
-        if not np.any(ahead):
-            continue
-
-        dist_masked = np.where(ahead, dist, np.inf)
-        seg_min = np.full(len(chunk_node_idx), np.inf)
-        np.minimum.at(seg_min, row_idx, dist_masked)
-
-        has_match = np.isfinite(seg_min)
-        if np.any(has_match):
-            capped_vals = seg_min[has_match] * safety_factor
-            limit[chunk_node_idx[has_match]] = capped_vals
-            n_capped += int(has_match.sum())
-            min_cap_seen = min(min_cap_seen, float(capped_vals.min()))
+    gap, _ = facing_gap(nodes, np.asarray(surface_faces, dtype=np.int64), extrude_node_idx,
+                        avg_normal[extrude_node_idx], domain_size * search_radius_fraction, angle_threshold_deg)
+    has_match = np.isfinite(gap)
+    limit[extrude_node_idx[has_match]] = gap[has_match] * safety_factor
+    n_capped = int(has_match.sum())
+    min_cap_seen = float(limit[extrude_node_idx[has_match]].min()) if n_capped else np.inf
 
     if n_capped:
         logger.info(

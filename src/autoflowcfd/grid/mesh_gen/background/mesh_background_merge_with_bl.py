@@ -79,7 +79,7 @@ def _build_merged_mesh_with_bl(
     # 了解为何这是强缓解而非形式保证）。
     domain_size = float(np.linalg.norm(bbox_max - bbox_min))
     thickness_limit = compute_local_thickness_limit(
-        surface_nodes, extrude_faces, np.unique(extrude_faces), domain_size
+        surface_nodes, surface_faces, extrude_faces, np.unique(extrude_faces), domain_size
     )
 
     # 在挤出之前，将每个锐角/硬边顶点的挤出合格子网格拆分为每个
