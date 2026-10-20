@@ -250,7 +250,7 @@ class TestPost:
         """修复前缺省 reference_area=1.0：系数量级随网格单位任意。现在与 CLI 同一个估算函数。"""
         api = create_api()
         api.solver = MagicMock()
-        api.solver.host_view.return_value = SimpleNamespace(freestream={"vel_inf": 30.0})
+        api.solver.host_view.return_value = SimpleNamespace(freestream={"vel_inf": 30.0}, bc_overrides={})
         api.volume_mesh = MagicMock()
         coeffs = SimpleNamespace(to_dict=lambda: {"Cd": 0.3})
         with patch("autoflowcfd.cli.solve.aero_coefficients.reference_area_for", return_value=2.2) as area,              patch("autoflowcfd.postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr",

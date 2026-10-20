@@ -39,7 +39,7 @@ class _APIPostMixin:
         from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
         host = self.solver.host_view()
-        area = reference_area_for(host.freestream, self.volume_mesh, reference_area)
+        area = reference_area_for(host.freestream, self.volume_mesh, reference_area, host.bc_overrides)
         if area is None:
             raise ValueError("无法从体网格自动估算参考面积（体网格不带面网格数据），请给出 reference_area")
         return compute_aerodynamic_coefficients_fr(

@@ -18,23 +18,28 @@ from loguru import logger
 # 估算失败时看不到任何提示。改成本代码库统一使用的 loguru。
 
 
-def _compute_reference_area_auto(volume_data, direction=None) -> Optional[float]:
-    """从面网格自动计算参考面积（**沿来流方向**的正投影面积）。
+def _compute_reference_area_auto(volume_data, direction=None, bc_overrides=None) -> Optional[float]:
+    """面网格上物体面沿**来流方向**的迎风投影面积（未给 --reference-area 时的参考面积）。
 
-    当用户未指定 --reference-area 时调用，从保存的原始面网格数据计算
-    车身迎风面的投影面积，作为气动力系数的参考面积。
+    物体面与气动力积分取同一组：物理无滑移固壁（`boundary/wall_kind.py::physical_no_slip_wall_groups`，网格类型
+    WALL，被 `bc_overrides` 覆盖的组按覆盖后的配置判断）。2026-10-20 以前按组名子串（BODY/CAR/WALL，排除
+    INLET/OUTLET/SYMMETRY）选面——"TUNNEL_WALL" 这类名字含 WALL 而类型是 SLIP_WALL 的组被算进参考面积，而力积分
+    不含它；迎风投影为 0 时静默改用"|投影|总和 / 2"；任何异常只打印警告、返回 None。
 
     Args:
-        volume_data: VolumeMeshData 对象，应包含 surface_mesh 属性
-        direction: (3,) 来流单位方向。None 时取 +x —— 与此前把投影方向
-            硬编码成 X 的行为**逐位相同**，所以零攻角路径结果不变。
-            有攻角时必须传真实方向：迎风投影面积是"垂直于**来流**的
-            投影"，按 X 投影会系统性偏大（偏差因子 1/cos(alpha)，
-            15 度攻角就是 3.5%，直接进 Cd 的分母）。
+        volume_data: VolumeMeshData（需要 surface_mesh：节点、三角形与带边界类型的边界分组）
+        direction: (3,) 来流方向（不必归一化）；None 时取 +x。有攻角时必须传真实方向——按 X 投影会偏大
+            1/cos(alpha)，15 度就是 3.5%，直接进 Cd 的分母
+        bc_overrides: 求解器的边界条件覆盖（与气动力积分同一份）
 
     Returns:
-        参考面积 (m^2)，计算失败返回 None
+        参考面积 (m^2)；体网格不带面网格数据时为 None（无法估算，调用方提示指定 --reference-area）
+
+    Raises:
+        ValueError: direction 无效；面网格没有物理无滑移固壁组；物体面沿来流的迎风投影面积不为正
     """
+    from autoflowcfd.boundary.wall_kind import physical_no_slip_wall_groups
+
     if direction is None:
         d = np.array([1.0, 0.0, 0.0])
     else:
@@ -47,82 +52,25 @@ def _compute_reference_area_auto(volume_data, direction=None) -> Optional[float]
         d = d / nrm
     surface_mesh = getattr(volume_data, 'surface_mesh', None)
     if surface_mesh is None:
-        logger.debug("Auto reference area: surface_mesh is None")
+        logger.info("体网格不带面网格数据，无法自动估算参考面积")
         return None
 
-    try:
-        surface_nodes = surface_mesh.get('nodes')
-        surface_faces = surface_mesh.get('faces')
-        surface_boundaries = surface_mesh.get('boundaries')
-
-        if surface_nodes is None or surface_faces is None or surface_boundaries is None:
-            logger.debug(f"Auto reference area: missing data - nodes={surface_nodes is not None}, faces={surface_faces is not None}, boundaries={surface_boundaries is not None}")
-            return None
-
-        # 获取面网格边界名称
-        all_boundary_names = list(surface_boundaries.boundary_names)
-        logger.debug(f"Auto reference area: surface mesh boundaries = {all_boundary_names}")
-
-        # 查找车身边界面（BODY/CAR/WALL，排除 INLET/OUTLET/SYMMETRY 等）
-        body_boundary_names = [
-            name for name in all_boundary_names
-            if ('BODY' in name.upper() or 'CAR' in name.upper() or 'WALL' in name.upper())
-            and 'INLET' not in name.upper() and 'OUTLET' not in name.upper() and 'SYMMETRY' not in name.upper()
-        ]
-
-        if not body_boundary_names:
-            logger.debug(f"Auto reference area: no body boundary found in {all_boundary_names}")
-            return None
-
-        # 收集车身面索引
-        body_face_indices = []
-        for boundary_name in body_boundary_names:
-            face_indices = surface_boundaries.get_cell_indices(boundary_name)
-            body_face_indices.extend(face_indices)
-
-        if len(body_face_indices) == 0:
-            return None
-
-        body_face_indices = np.array(body_face_indices, dtype=np.int64)
-
-        # 取车身面的节点坐标
-        v0 = surface_nodes[surface_faces[body_face_indices, 0]]
-        v1 = surface_nodes[surface_faces[body_face_indices, 1]]
-        v2 = surface_nodes[surface_faces[body_face_indices, 2]]
-
-        # 计算面法向量和面积
-        e1 = v1 - v0
-        e2 = v2 - v0
-        normals = np.cross(e1, e2)
-        areas = 0.5 * np.linalg.norm(normals, axis=1)
-
-        # 归一化法向量
-        norms = np.linalg.norm(normals, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-10)
-        unit_normals = normals / norms
-
-        # 沿**来流方向**的投影面积（迎风面：法向与来流方向的点积 < 0）
-        d_component = unit_normals @ d
-        upstream_mask = d_component < 0
-        projected_areas = -d_component[upstream_mask] * areas[upstream_mask]
-        ref_area = np.sum(projected_areas)
-
-        if ref_area <= 0 or not np.isfinite(ref_area):
-            # 兜底：用绝对投影除以 2（适用于对称车身）
-            projected_areas_all = np.abs(d_component) * areas
-            ref_area = np.sum(projected_areas_all) / 2.0
-
-        if ref_area > 0 and np.isfinite(ref_area):
-            logger.info(
-                f"Auto-computed reference area (projected along freestream "
-                f"direction {np.round(d, 6).tolist()}): {ref_area:.6f} m^2")
-            return float(ref_area)
-
-        return None
-
-    except Exception as e:
-        logger.warning(f"Failed to auto-compute reference area: {e}")
-        return None
+    nodes, faces, boundaries = surface_mesh['nodes'], surface_mesh['faces'], surface_mesh['boundaries']
+    body_groups = sorted(physical_no_slip_wall_groups(boundaries.bc_types, bc_overrides) & set(boundaries.groups))
+    if not body_groups:
+        raise ValueError(f"面网格没有物理无滑移固壁组（各组类型 {dict(boundaries.bc_types)}），无法估算参考面积；"
+                         "请用 --reference-area 给出")
+    face_idx = np.concatenate([np.asarray(boundaries.groups[name], dtype=np.int64) for name in body_groups])
+    v0, v1, v2 = (nodes[faces[face_idx, k]] for k in range(3))
+    area_vectors = 0.5 * np.cross(v1 - v0, v2 - v0)
+    along = area_vectors @ d
+    ref_area = float(-along[along < 0].sum())            # 迎风面（外法向逆着来流）
+    if not (ref_area > 0.0 and np.isfinite(ref_area)):
+        raise ValueError(f"物体面 {body_groups} 沿来流方向 {np.round(d, 6).tolist()} 的迎风投影面积为 {ref_area!r}"
+                         "（面网格法向朝内或物体面不完整），无法作为参考面积；请检查面网格或用 --reference-area 给出")
+    logger.info(f"Auto-computed reference area of {body_groups} (projected along freestream direction "
+                f"{np.round(d, 6).tolist()}): {ref_area:.6f} m^2")
+    return ref_area
 
 
 def resolve_reference_area(solver, volume_data, reference_area: Optional[float]) -> Optional[float]:
@@ -132,18 +80,20 @@ def resolve_reference_area(solver, volume_data, reference_area: Optional[float])
 
     参考面积必须沿**来流方向**投影（有攻角时按 X 投影会偏大 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 分母）。
     """
-    reference_area = reference_area_for(solver.freestream, volume_data, reference_area)
+    reference_area = reference_area_for(solver.freestream, volume_data, reference_area, solver.bc_overrides)
     solver._reference_area = reference_area
     return reference_area
 
 
-def reference_area_for(freestream: dict, volume_data, reference_area: Optional[float]) -> Optional[float]:
-    """参考面积：给了就用，没给时沿来流方向由体网格的面网格自动估算（单机与分布式共用）。"""
+def reference_area_for(freestream: dict, volume_data, reference_area: Optional[float],
+                       bc_overrides: Optional[dict] = None) -> Optional[float]:
+    """参考面积：给了就用，没给时沿来流方向由体网格的面网格自动估算（单机、分布式与 API 共用）。"""
     if reference_area is not None:
         return reference_area
     from autoflowcfd.core.utils.flow_direction import direction_from_freestream
 
-    return _compute_reference_area_auto(volume_data, direction=direction_from_freestream(freestream))
+    return _compute_reference_area_auto(volume_data, direction=direction_from_freestream(freestream),
+                                        bc_overrides=bc_overrides)
 
 
 def distributed_reference_area(solver, volume_data, reference_area: Optional[float]) -> Optional[float]:
@@ -155,6 +105,7 @@ def distributed_reference_area(solver, volume_data, reference_area: Optional[flo
         return None
     if volume_data is None:
         volume_data = solver._root_context["volume_data"]
+    # 分布式求解器不接受 bc_overrides（边界条件全部来自网格类型），与其气动力积分一致
     return reference_area_for(solver.freestream, volume_data, reference_area)
 
 
@@ -185,8 +136,8 @@ def _report_aerodynamic_coefficients(solver, reference_area: Optional[float], tu
     if float(solver.mu_molecular) > 0.0:
         report_wall_y_plus(solver, turb_model_name if turb_model_name is not None else solver.turb_model_name,
                            wall_treatment if wall_treatment is not None else solver.wall_treatment)
-    if reference_area is None or reference_area <= 0:
-        print("\n(未提供 --reference-area，跳过气动系数；如需 Cd/Cl 请指定参考面积)")
+    if reference_area is None:
+        print("\n(未提供 --reference-area，且体网格不带面网格数据无法自动估算，跳过气动系数)")
         return
     from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 

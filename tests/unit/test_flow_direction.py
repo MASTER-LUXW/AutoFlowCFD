@@ -198,7 +198,7 @@ class TestAllFiveConsumersUseTheDirection:
          ["wind_axes", "d_hat", "l_hat", "s_hat"],
          "气动力风轴系分解"),
         ("autoflowcfd.cli.solve.aero_coefficients",
-         ["direction", "d_component"],
+         ["direction", "area_vectors @ d"],
          "参考面积沿来流方向投影"),
         ("autoflowcfd.core.mpi.distributed_solver",
          ["freestream_velocity", "aoa_deg"],

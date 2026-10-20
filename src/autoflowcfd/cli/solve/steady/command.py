@@ -40,47 +40,14 @@ from .single_node import _run_single_node
                    '--multi-gpu，含 --fully-distributed）同一份算法：分布式下内积与'
                    '线搜索跨 rank 归约、块 Jacobi 用全局一致着色。')
 @click.option('--cfl-start', type=float, default=config_default(SteadyConfig, 'cfl_init'),
-              help='自适应 CFL 初始值。**默认按 --time-scheme 取该格式 CFL 律的签名默认值**'
-                   '（rk3 为显式控制器的 0.03；newton-krylov 为 SER 律的 5）——两者差两个'
-                   '数量级，CLI 不再写死任何一个（adaptive_cfl/policy.py）。以下为 rk3 默认值'
-                   '的标定历史：初始值（稳态伪时间迭代，默认 0.03）。残差不下降时 '
-                   'CFL 会一直停在这个值——复杂网格上如果起步就发散可调低。下限是'
-                   '独立的 --cfl-min。**2026-09-17 从 0.1 下调**：0.1 是 AUSM+up '
-                   'P5± 饱和缺陷（提交 837cd95）修复之前定的，而那个缺陷本身让通量'
-                   '的谱半径大 5.2 倍；修复后重新定界（见 --cfl-max 帮助）。0.03 是'
-                   '唯一在真实网格上跑过 350+ 步单调下降的起步值，控制器从它往 '
-                   '--cfl-max 爬。')
+              help='自适应 CFL 初始值，缺省按 --time-scheme 取该格式 CFL 律的默认值（rk3 0.03；newton-krylov 5，adaptive_cfl/policy.py）。残差'
+                   '不下降时 CFL 停在这个值；复杂网格上起步就发散可调低。默认值的实测依据见 core/time_integration/adaptive_cfl 模块文档')
 @click.option('--cfl-max', type=float, default=config_default(SteadyConfig, 'cfl_max'),
-              help='自适应 CFL 上限，默认按 --time-scheme 取（rk3 为 0.06；newton-krylov 为 '
-                   'SER 的 1e8——隐式没有线性稳定极限；1e4 时伪时间项远未可忽略，高阶尾段退化成线性收敛，'
-                   'A/B 数据见 adaptive_cfl/ser.py）。'
-                   'rk3 默认值标定历史：上限（稳态，默认 0.06）。**2026-09-17 从 0.5 '
-                   '下调**，依据是三类实测：(1) 直接谱测量——预处理后算子 '
-                   'Gamma^-1 R 在干净通道网格上 max|dt*lambda| = 0.444 @CFL 0.03、'
-                   '裕度 3.9 倍，对应线性极限 CFL 约 0.117（同一测量还发现旧的 '
-                   'AUSM+up legacy 档在 CFL 0.03 就已越界 1.33 倍，这解释了为什么'
-                   '此前记录的稳定边界只有 0.036）；(2) 真实网格 plate_demo'
-                   '（363k 单元）0.03 稳、0.10 稳（峰后回落 8.5%）、0.30 第 13 步'
-                   '发散；(3) 平板边界层通道在 0.10 第 3187 步发散——所以 0.10 '
-                   '不是普遍安全值。0.06 低于每一个实测失效点且留 1.7 倍以上裕度。'
-                   '为什么必须留这么多：越界一次之后收缩救不回来（见 '
-                   'core/time_integration/adaptive_cfl.py 模块文档第 12 条）。'
-                   '旧文案里那句"SSP-RK3 线性稳定极限 ~1.0"是标量对流的教科书值，'
-                   '与本项目 CFL 参数的定义（面基谱半径 + 低马赫预处理波速）不是'
-                   '同一个量纲，已删除。')
+              help='自适应 CFL 上限，缺省按 --time-scheme 取：rk3 0.06（低于实测失效点并留裕度——越界一次之后收缩救不回来）；newton-krylov 1e8（隐式没有线性稳定极限）'
+                   '。依据见 core/time_integration/adaptive_cfl 模块文档')
 @click.option('--cfl-min', type=float, default=config_default(SteadyConfig, 'cfl_min'),
-              help='自适应 CFL 下限，默认按 --time-scheme 取（rk3 为 0.01；newton-krylov 为 '
-                   'SER 的 0.5，更小的伪时间步由 Newton 步自身的 dtau 缩档负责）。'
-                   'rk3 默认值标定历史：下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
-                   '改为 0.01**：0.05 高于真 P1 在 79 万单元 cube_demo 与 plate_demo 两张真实网格上'
-                   '实测稳定的 ~0.03，等于一个已验证可用的工作点通过 CLI 根本'
-                   '到不了（--cfl-start 会被这个下限钳上去，见 '
-                   'core/time_integration/adaptive_cfl.py 模块文档第 11 条）。'
-                   '配置层 `SteadyConfig.cfl_min` 早在 2026-09-15 就是 0.01，'
-                   '这里没跟上——那正是提交 5e4e18a"配置层与 CLI 默认值相差 '
-                   '20 倍"没关完的另一半。改动方向是安全的：下限只允许控制器'
-                   '收缩得更多，绝不会抬高 CFL，因此不可能把原本稳定的运行变'
-                   '成不稳定。')
+              help='自适应 CFL 下限，缺省按 --time-scheme 取：rk3 0.01；newton-krylov 0.5（更小的伪时间步由 Newton 步自身的 dtau 缩档负责）。下限只限制收'
+                   '缩，不会抬高 CFL')
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='以已有 checkpoint 的场为初场（例如低阶解收敛后直接在更高阶上继续，不重走低阶的爬坡）。'
                    'checkpoint 阶数可以低于 --order（平均流与湍流场精确延拓），不能高于；起步后直接在 '

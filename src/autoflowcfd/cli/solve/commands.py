@@ -15,7 +15,6 @@ steady/transient 命令本体在同目录的 `steady.py`/`transient.py`，本文
 命令组定义 + resume/status。
 """
 
-from pathlib import Path
 from typing import Optional
 
 import click
@@ -78,43 +77,25 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 @click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default=None,
-              help='在两个稳态格式之间切换；默认沿用 checkpoint 记录的格式——瞬态（dual-time）的 checkpoint 续算'
-                   '仍是 dual-time（物理时间步长、上一时间层、内迭代次数上限随 checkpoint 恢复，跑满 --max-iter 步，'
-                   '不传本选项）。早于 2026-09-25 的 '
-                   'checkpoint 没有记录，它们只可能是 rk3）。单机与分布式（--n-ranks/'
-                   '--multi-gpu/--fully-distributed）续算都支持 newton-krylov。')
+              help='在两个稳态格式之间切换；不给时沿用 checkpoint 记录的格式（瞬态 dual-time 的 checkpoint 续算仍是 dual-time：物理时间步长、上一时间层、内迭代次数上限'
+                   '随 checkpoint 恢复，跑满 --max-iter 步）。单机与分布式续算都支持')
 @click.option('--low-mach-precond/--no-low-mach-precond', 'low_mach_precond', default=None,
               help='低马赫数伪时间预处理开关（只作用于稳态格式 rk3/newton-krylov），默认沿用 checkpoint 记录；'
                    '不改变定常解，只改变到达它的路径')
 @click.option('--cfl-start', type=float, default=None,
-              help='自适应 CFL 初始值，默认按续算所用时间格式取其 CFL 律的签名默认值'
-                   '（rk3 为 0.03，newton-krylov 为 5；adaptive_cfl/policy.py 唯一来源）。'
-                   'rk3 默认值历史：（默认 0.03，2026-09-17 从 0.1 下调）。'
-                   'CFL 是纯数值加速参数，不影响物理解，每次 resume 可根据上一段'
-                   '收敛表现重新调。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
+              help='自适应 CFL 初始值，缺省按续算所用时间格式取（同 solve steady --cfl-start）。CFL 是纯数值加速参数，不影响物理解，每次续算可按上一段的收敛表现重新给。单机与分布'
+                   '式续算都生效')
 @click.option('--cfl-max', type=float, default=None,
-              help='自适应 CFL 上限，默认按时间格式取（rk3 为 0.06，newton-krylov 为 1e8）。'
-                   'rk3 默认值历史：（默认 0.06，2026-09-17 从 0.5 下调）。'
-                   '单机与分布式续算都生效。原文案建议的'
-                   '"稳定收敛可试 0.8"已删除——0.8 比实测线性极限高近 7 倍，从来'
-                   '不是可达值。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
+              help='自适应 CFL 上限，缺省按续算所用时间格式取（同 solve steady --cfl-max）。单机与分布式续算都生效')
 @click.option('--cfl-min', type=float, default=None,
-              help='自适应 CFL 下限，默认按时间格式取（rk3 为 0.01，newton-krylov 为 0.5）。**真实缺口修复（2026-09-17）**：'
-                   '`solve steady` 早在 2026-09-15 就有这个选项（控制器默认下限 0.05 '
-                   '高于真 P1 在 79 万单元 cube_demo 上实测稳定的 CFL 0.03，也高于 '
-                   'plate_demo 实测的稳定边界，等于一个已验证可用的工作点通过 CLI 根本'
-                   '到不了），但 `solve resume` 从未跟上——续算会静默退回控制器默认 '
-                   '0.05，把原本固定 CFL 0.03 的稳定运行抬到发散。默认值与 `solve '
-                   'steady` 对齐为 0.01。单机与分布式续算都生效。')
+              help='自适应 CFL 下限，缺省按续算所用时间格式取（同 solve steady --cfl-min）。单机与分布式续算都生效')
 @click.option('--phase-max-iter', type=int, default=None,
               help=PHASE_MAX_ITER_HELP)
 @click.option('--residual-drop-threshold', type=float, default=field_default(SteadyConfig, 'residual_drop_threshold'),
               help=RESIDUAL_DROP_THRESHOLD_HELP)
 @click.option('--n-ranks', type=int, default=1,
-              help='MPI rank 总数（>1 时重建为分布式求解器——CPU MPI"传统模式"，'
-                   '或配合 --multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
-                   '必须与本次 mpirun -np 启动的进程数一致。2026-09-02 补齐：此前分布式'
-                   '路径只能保存一次最终 checkpoint，完全没有续算机制')
+              help='MPI rank 总数（>1 时重建为分布式求解器：CPU MPI 传统模式，或配合 --multi-gpu / --fully-distributed）。必须与 mpirun -np 的进程'
+                   '数一致')
 @click.option('--multi-gpu', is_flag=True,
               help='重建为多GPU分布式求解器（需要 --n-ranks>1）')
 @click.option('--fully-distributed', is_flag=True,
@@ -123,13 +104,14 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
 @click.option('--gpu-device', type=int, default=None,
               help='GPU 设备号（单 GPU 续算默认 0；--multi-gpu 时按 rank 分配）')
 @click.option('--dt', type=float, default=None,
-              help='时间步长覆盖。不给时沿用 checkpoint 记录的值（dual-time 瞬态的物理时间步长必须与原算例一致；'
-                   '早于 2026-10-09 的 dual-time checkpoint 没有记录，需要显式给出）')
+              help='时间步长覆盖。不给时沿用 checkpoint 记录的值（dual-time 瞬态的物理时间步长必须与原算例一致；checkpoint 没有记录时须显式给出）')
 @click.option('--tol', type=float, default=field_default(SteadyConfig, 'convergence_tol'), show_default=True,
               help='相对收敛容差（与 solve steady --tol 同义）')
+@click.option('--output', '-o', 'output_dir', type=click.Path(), default=None,
+              help='续算的输出目录（checkpoint 与结果）；不给时为 checkpoint 所在算例目录')
 @click.option('--reset-turbulence', is_flag=True,
-              help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（此前失控、未恢复）时，把湍流场重置为来流值再续算'
-                   '（平均流保留）。不给时这种 checkpoint 拒绝续算并报告')
+              help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（此前失控、未恢复），或缺少湍流场 / 涡粘时，'
+                   '把湍流场重置为来流值再续算（平均流保留）。不给时这两种 checkpoint 拒绝续算并报告')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
@@ -137,7 +119,8 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
-           gpu_device: Optional[int], dt: Optional[float], tol: float, reset_turbulence: bool) -> None:
+           gpu_device: Optional[int], dt: Optional[float], tol: float, output_dir: Optional[str],
+           reset_turbulence: bool) -> None:
     """从检查点真正恢复并继续求解（不是只打印元信息）。
 
     重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
@@ -169,7 +152,8 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         dt: 时间步长覆盖（None 时沿用 checkpoint 记录的值，见 core/utils/checkpoint_time.py::resume_time_step）
         tol: 相对收敛容差
         low_mach_precond: 低马赫预处理覆盖（None 时沿用 checkpoint 记录）
-        reset_turbulence: 湍流场被上界大面积截断时重置为来流值（不给时拒绝续算，
+        output_dir: 输出目录，None 时为 checkpoint 所在算例目录
+        reset_turbulence: 湍流场被上界大面积截断或 checkpoint 缺湍流场时重置为来流值（不给时拒绝续算，
             `core/utils/order_continuation/turbulence_reset.py`）
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
@@ -184,7 +168,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, reset_turbulence=reset_turbulence,
             time_scheme=time_scheme, dt=dt, tol=tol, reference_area=reference_area,
-            low_mach_precond=low_mach_precond,
+            low_mach_precond=low_mach_precond, output_dir=output_dir,
         )
         return
 
@@ -205,7 +189,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     result = continue_single_node(
         solver, iteration, metadata, checkpoint_file, max_iter=max_iter, dt=_resume_dt(dt, metadata, solver),
         tol=tol, checkpoint_interval=checkpoint_interval, phase_max_iter=phase_max_iter,
-        residual_drop_threshold=residual_drop_threshold)
+        residual_drop_threshold=residual_drop_threshold, output_dir=output_dir)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")
     # solver._reference_area 而非 CLI 参数：重建时两者都是 None 会自动估算并存到这个属性上
@@ -238,6 +222,7 @@ def _resume_distributed(
     reference_area: Optional[float] = None,
     reset_turbulence: bool = False,
     low_mach_precond: Optional[bool] = None,
+    output_dir: Optional[str] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -280,7 +265,9 @@ def _resume_distributed(
     input_file = metadata["input_file"]
     turbulence_model = metadata["turbulence_model"]
     resolved_surface_mesh = metadata.get("surface_mesh")
-    output_dir = str(Path(checkpoint_file).parent.parent)
+    from autoflowcfd.cli.solve.checkpoint_io.resume_run import resume_output_dir
+
+    output_dir = output_dir or resume_output_dir(checkpoint_file)
 
     if is_root():
         logger.info(
@@ -341,19 +328,26 @@ def _resume_distributed(
 @solve.command()
 @click.option("--backend", "-b", is_flag=True, help="列出可用后端")
 def status(backend: bool) -> None:
-    """查看求解器状态。
+    """查看求解器状态：可用后端，或 `solve steady` / `solve transient` 支持的阶数、时间格式与湍流模型。
+
+    能力清单直接读两个命令自己的选项定义（唯一来源）。2026-10-20 以前写死在这里且已过时（"Orders: P1, P2, P3"
+    而稳态支持 P0，还列出了已删除的格式）。
 
     Args:
         backend: 列出可用后端
     """
     if backend:
         from autoflowcfd.core.backend import get_available_backends
-        backends = get_available_backends()
-        logger.info(f"Available backends: {backends}")
-    else:
-        logger.info("V2.0 FR Solver Status: Ready")
-        logger.info("Supported features:")
-        logger.info("  - Orders: P1, P2, P3")
-        logger.info("  - Time methods: Dual-Time, RK3 (time-accurate)")
-        logger.info("  - Turbulence models: SST, SA-neg, DDES, IDDES, WMLES, LES")
-        logger.info("  - Order continuation: P0 → P2/P3 smooth transition")
+        click.echo(f"Available backends: {get_available_backends()}")
+        return
+
+    def option(command, name):
+        return next(p for p in command.params if p.name == name)
+
+    for label, time_option in (("steady", "time_scheme"), ("transient", "time_method")):
+        command = solve.commands[label]
+        order = option(command, "order").type
+        click.echo(f"solve {label}:")
+        click.echo(f"  阶数        P{order.min} ~ P{order.max}（>= 1 时从 P0 逐阶爬升，Order Continuation）")
+        click.echo(f"  时间格式    {', '.join(option(command, time_option).type.choices)}")
+        click.echo(f"  湍流模型    {', '.join(option(command, 'turbulence_model').type.choices)}")
