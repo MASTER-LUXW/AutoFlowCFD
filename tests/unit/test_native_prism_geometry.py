@@ -270,7 +270,7 @@ class TestNativePrismGeometry:
             np.asarray(mesh.face_connectivity.neighbor_cube_face)])
         assert np.any((codes >= lo) & (codes < hi)), (
             "原生档下面编码里没有任何原生棱柱面 —— 说明 "
-            "with_native_face_codes 的 prism_native 分派没生效")
+            "build_face_connectivity 没有给出原生棱柱面编码")
 
         oo = overintegration_order(order)
         expect_fine = prism_n_fine(oo)

@@ -82,8 +82,8 @@ def compute_inviscid_interface_correction_kernel(
     **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
     axis,side]` 外插 + 1D Radau/VCJH 修正函数 `_distribute_point` 分布）
     已整体删除。坍缩四面体基 2026-09-03 删除、坍缩棱柱基 2026-09-23 删除
-    之后，`FRFaceConnectivity.with_native_face_codes` 把**每一个**真实面
-    都翻译成原生编码，实测混合网格（P1/P2）的面编码集合是
+    之后，`build_face_connectivity` 给每一个真实面
+    都直接给出原生编码，实测混合网格（P1/P2）的面编码集合是
     `{6,7,8,9,10,11,12,13,14}`、`code < 6` 的非边界面**为 0 个**，所以那
     条分支在生产上不可达。不可达的第二套离散方案留在最热的 kernel 里，
     正是本项目明确要删的冗余。构造期护栏见

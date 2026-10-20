@@ -26,9 +26,9 @@ from .ref_geometry_nb import _cube_to_tri_rs_nb, _tri_barycentric_nb
 # 逐行 numba 移植，供 `face_flux_points/kernel.py::build_fp_newton_
 # parallel` 内部对 native 四面体面（cube face code>=6，excluded_vertex=
 # code-6）分支消费，避免退回到假设 (axis,side) 语义的 `_newton_locate_nb`/
-# `_face_ref_grid_nb`。face code>=6 只可能出现在 native 四面体的真实面上
-# （见 grid/connectivity/face_connectivity.py::with_native_face_codes
-# 文档），棱柱四边形侧面恒为 0~5，因此本节所有分支判据只需要检查
+# `_face_ref_grid_nb`。原生四面体面编码为 [6,10)
+# （见 grid/connectivity/face_connectivity.py::build_face_connectivity
+# ；棱柱面为原生编码 [10,15)），本节四面体分支的判据
 # `code>=6`，不需要额外的 is_prism 判据。
 # ============================================================================
 

@@ -11,14 +11,14 @@ AutoFlowCFD - FR 求解器真实单元-面连接关系 (V2.0 Tier-0 基础设施
    V1.0 FVM 体网格生成流程的面提取），得到全局面拓扑（owner/邻居 单元、
    面角点全局节点号、法向量、面积、中心）。这是标准的“按排序节点号哈希去重”
    面提取算法，不因为下游是 FR 还是 FVM 而改变，没有必要重新实现一遍。
-2. 对每个面，反解出它在 owner（以及 邻居，若为内部面）单元的计算立方体
-   坐标系中对应哪一个局部面（a=-1/a=+1/b=-1/b=+1/c=-1/c=+1 之一），
-   依据 curved_mapping.py 中已数值验证的 TET_CUBE_FACES / PRISM_CUBE_FACES
-   拓扑表。这一步的正确性已用合成四面体对、棱柱对做过匹配验证（零歧义）。
-3. 由「局部立方体面」信息，FR 残差组装阶段即可复用已有的、按 1D 方向做
-   Lagrange 外插的 SPs->边界插值算子（fr/matrix_operators.py），把体内
-   SPs 的解外插到该面的 Flux 点 上，不需要为单纯形重新推导专用的
-   插值矩阵。
+2. 对每个面，反解出它是 owner（以及邻居，若为内部面）单元的哪一个真实局部面，直接给出原生面编码
+   （四面体 `tet_native_v*`、棱柱 `prism_native_f*`），依据 curved_mapping.py 的 TET_CUBE_FACES /
+   PRISM_CUBE_FACES 局部顶点表。按单元类型与局部面批量比较节点（向量化），每个面恰好匹配一个局部面，否则报错。
+3. 面编码决定该侧的面外插 / 提升算子（`fr/operators/face_ops.py` 的原生算子整表，按面算子索引取）。
+
+2026-10-19（I-124）以前：反解对每个面做 Python 循环、每个候选局部面构造集合比较（百万面级网格秒到分钟级），
+且先产出坍缩坐标编码（0~5）再由 `with_native_face_codes(prism_native=...)` 静态翻译（棱柱开关是坍缩棱柱基删除后
+的残留）。
 
 单元朝向约定：本模块假设传入的 prism_connectivity / tet_connectivity 已经
 过 curved_mapping.fix_tet_orientation / fix_prism_orientation 处理，节点
@@ -92,29 +92,22 @@ _COLLAPSED_TO_NATIVE_TET_CODE: Dict[int, int] = {
 }
 
 
-def _build_collapsed_to_native_prism_code() -> Dict[int, int]:
-    """坍缩棱柱的 5 个立方体面编码 -> 原生棱柱面编码。
+def _native_face_tables() -> Dict[str, List[Tuple[Tuple[int, ...], int]]]:
+    """每种单元的 `[(局部顶点下标, 原生面编码), ...]`。
 
-    **不手写这张表**：`(axis, side) -> face_id` 的对应关系只有一个事实来源
-    （`fr/native_prism/face.py::cube_face_to_native_prism_face`，那边有
-    形状无关的几何验证），这里只是把它换成"编码 -> 编码"的形式。手抄一份
-    会在两处不一致时静默地对某个面用错外插/提升矩阵。
+    局部顶点表沿用 TET_CUBE_FACES / PRISM_CUBE_FACES（以坍缩坐标面名为键），面名 -> 原生编码：四面体按"被排除的
+    局部顶点"（`_COLLAPSED_TO_NATIVE_TET_CODE`），棱柱按 `fr/native_prism/face.py::cube_face_to_native_prism_face`
+    （唯一事实来源，形状无关的几何验证在那边）。棱柱的坍缩面 `b=+1` 退化成一条侧棱，不在表里。
     """
-    from autoflowcfd.fr.native_prism.face import (
-        cube_face_to_native_prism_face,
-    )
+    from autoflowcfd.fr.native_prism.face import cube_face_to_native_prism_face
 
-    axis_name = {0: "a", 1: "b", 2: "c"}
-    table: Dict[int, int] = {}
-    for axis in range(3):
-        for side in (-1.0, 1.0):
-            if (axis, side) == (1, 1.0):
-                continue          # 退化面，没有对应的原生面
-            key = f"{axis_name[axis]}={'+1' if side > 0 else '-1'}"
-            fid = cube_face_to_native_prism_face(axis, side)
-            table[CUBE_FACE_CODES[key]] = CUBE_FACE_CODES[
-                f"prism_native_f{fid}"]
-    return table
+    axis_of = {"a": 0, "b": 1, "c": 2}
+    tet = [(tuple(idx), _COLLAPSED_TO_NATIVE_TET_CODE[CUBE_FACE_CODES[key]]) for key, idx in TET_CUBE_FACES.items()]
+    prism = []
+    for key, idx in PRISM_CUBE_FACES.items():
+        fid = cube_face_to_native_prism_face(axis_of[key[0]], 1.0 if key.endswith("+1") else -1.0)
+        prism.append((tuple(idx), CUBE_FACE_CODES[f"prism_native_f{fid}"]))
+    return {"tet": tet, "prism": prism}
 
 
 class FaceTopologyError(RuntimeError):
@@ -126,27 +119,27 @@ class FaceTopologyError(RuntimeError):
     """
 
 
-def _resolve_cube_face(
-    cell_node_ids: np.ndarray, face_node_ids: np.ndarray, cube_face_table: Dict[str, Tuple[int, ...]]
-) -> str:
-    """给定单元的局部节点号数组与某个面的全局节点号(3个)，反解该面对应的立方体面标识。"""
-    face_set = set(int(n) for n in face_node_ids)
-    matches = []
-    for key, local_idx in cube_face_table.items():
-        candidate = set(int(cell_node_ids[i]) for i in local_idx)
-        if len(local_idx) == 3:
-            if candidate == face_set:
-                matches.append(key)
-        else:
-            # 棱柱四边形侧面：只有 4 个角点里的某一个对角线三角形会等于 face_set
-            if face_set.issubset(candidate):
-                matches.append(key)
-    if len(matches) != 1:
-        raise FaceTopologyError(
-            f"Ambiguous or missing cube-face match: face_nodes={face_node_ids}, "
-            f"cell_nodes={cell_node_ids}, matches={matches}"
-        )
-    return matches[0]
+def _resolve_native_face_codes(cell_nodes: np.ndarray, face_nodes: np.ndarray,
+                               table: List[Tuple[Tuple[int, ...], int]]) -> Tuple[np.ndarray, np.ndarray]:
+    """一批面在各自单元上的原生面编码（向量化）。
+
+    Args:
+        cell_nodes: (n, n_vertices) 每个面对应单元的全局节点号
+        face_nodes: (n, 3) 面的三个全局节点号
+        table: `_native_face_tables()` 里该单元类型的表
+
+    Returns:
+        (codes (n,) int32，n_matches (n,) int32)：三角形局部面要求三个节点相同；棱柱四边形侧面被三角化拆分，
+        面的三个节点落在该侧面四个角点内即匹配。`n_matches != 1` 的面由调用方报错。
+    """
+    codes = np.full(face_nodes.shape[0], -1, dtype=np.int32)
+    n_matches = np.zeros(face_nodes.shape[0], dtype=np.int32)
+    for local_idx, native_code in table:
+        candidate = cell_nodes[:, list(local_idx)]                               # (n, k)
+        inside = np.all((face_nodes[:, :, None] == candidate[:, None, :]).any(axis=2), axis=1)
+        codes[inside] = native_code
+        n_matches += inside
+    return codes, n_matches
 
 
 @dataclass
@@ -199,65 +192,6 @@ class FRFaceConnectivity:
     def get_interior_face_indices(self) -> np.ndarray:
         return np.flatnonzero(~self.is_boundary)
 
-    def with_native_face_codes(self, n_prism_cells: int,
-                               prism_native: bool = False) -> "FRFaceConnectivity":
-        """返回一份翻译过面编码的浅拷贝。
-
-        * **四面体侧恒翻译**（`owner_cell`/`neighbor_cell >= n_prism_cells`）：
-          坍缩坐标编码 0/1/2/4 -> `tet_native_v*`（6~9）。native 是四面体
-          唯一实现（见 `fr/operators.py` 模块文档）。
-        * **棱柱侧按 `prism_native` 翻译**：坍缩编码 0/1/2/4/5 ->
-          `prism_native_f*`（10~14）。`b=+1`（编码 3）是退化面、不在表里，
-          原样保留。
-        * 边界面（编码 -1）两种情形都不变。
-
-        网格拓扑本身（这个面是该单元的哪个真实几何面）不依赖求解阶段选的
-        基，`build_face_connectivity` 因此保持完全不变、只产出坍缩坐标
-        编码；这个方法是一次性**静态**翻译，不重新做任何几何识别（两张
-        翻译表分别见 `_COLLAPSED_TO_NATIVE_TET_CODE` 与
-        `_build_collapsed_to_native_prism_code` 的文档）。其余字段（法向量、
-        面积、周期平移量等纯几何量）原样复用。
-
-        Args:
-            n_prism_cells: 棱柱单元数（"棱柱在前"排列下的分界）
-            prism_native: 是否同时把棱柱面翻译成原生编码（棱柱只有原生基，生产调用恒为 True）。
-        """
-        owner_cube_face = self.owner_cube_face.copy()
-        neighbor_cube_face = self.neighbor_cube_face.copy()
-
-        def _translate(codes: np.ndarray, side_mask: np.ndarray,
-                       table: Dict[int, int]) -> None:
-            for old_code, new_code in table.items():
-                codes[side_mask & (codes == old_code)] = new_code
-
-        owner_is_tet = self.owner_cell >= n_prism_cells
-        neigh_is_tet = ((self.neighbor_cell >= n_prism_cells)
-                        & (self.neighbor_cell >= 0))
-        _translate(owner_cube_face, owner_is_tet, _COLLAPSED_TO_NATIVE_TET_CODE)
-        _translate(neighbor_cube_face, neigh_is_tet,
-                   _COLLAPSED_TO_NATIVE_TET_CODE)
-
-        if prism_native:
-            prism_tbl = _build_collapsed_to_native_prism_code()
-            owner_is_prism = self.owner_cell < n_prism_cells
-            neigh_is_prism = ((self.neighbor_cell < n_prism_cells)
-                              & (self.neighbor_cell >= 0))
-            _translate(owner_cube_face, owner_is_prism, prism_tbl)
-            _translate(neighbor_cube_face, neigh_is_prism, prism_tbl)
-
-        return FRFaceConnectivity(
-            owner_cell=self.owner_cell,
-            neighbor_cell=self.neighbor_cell,
-            owner_cube_face=owner_cube_face,
-            neighbor_cube_face=neighbor_cube_face,
-            normal=self.normal,
-            area=self.area,
-            center=self.center,
-            face_node_ids=self.face_node_ids,
-            is_boundary=self.is_boundary,
-            face_translation=self.face_translation,
-        )
-
 
 def build_face_connectivity(
     prism_connectivity: Optional[np.ndarray],
@@ -301,50 +235,34 @@ def build_face_connectivity(
     face_data = FaceExtractor.extract_faces_mixed(prism_conn, tet_conn, node_arr, strict=True)
 
     n_faces = face_data.count
-    owner_cube_face = np.full(n_faces, -1, dtype=np.int32)
-    neighbor_cube_face = np.full(n_faces, -1, dtype=np.int32)
-
     owner_ids = face_data.connectivity[:, 0]
     neighbor_ids = face_data.connectivity[:, 1]
+    face_nodes = np.asarray(face_data.node_connectivity, dtype=np.int64)
+    tables = _native_face_tables()
 
-    def cell_conn(cell_id: int) -> Tuple[np.ndarray, Dict[str, Tuple[int, ...]]]:
-        if cell_id < n_prism:
-            return prism_conn[cell_id], PRISM_CUBE_FACES
-        return tet_conn[cell_id - n_prism], TET_CUBE_FACES
+    def side_codes(cells: np.ndarray, side: str) -> np.ndarray:
+        """`cells` 一侧（-1 为无邻居）的原生面编码；匹配数不为 1 的面报错。"""
+        codes = np.full(n_faces, -1, dtype=np.int32)
+        for kind, lo, hi, conn in (("prism", 0, n_prism, prism_conn), ("tet", n_prism, n_prism + n_tet, tet_conn)):
+            sel = np.flatnonzero((cells >= lo) & (cells < hi))
+            if sel.size == 0:
+                continue
+            c, n_match = _resolve_native_face_codes(conn[cells[sel] - lo], face_nodes[sel], tables[kind])
+            bad = sel[n_match != 1]
+            if bad.size:
+                examples = "; ".join(
+                    f"面 {int(f)} 节点 {face_nodes[f].tolist()} 单元 {int(cells[f])} 节点 "
+                    f"{conn[int(cells[f]) - lo].tolist()} 匹配数 {int(n_match[np.searchsorted(sel, f)])}"
+                    for f in bad[:5])
+                raise FaceTopologyError(
+                    f"{bad.size}/{n_faces} 个面在 {side} 侧找不到唯一对应的局部面（{kind}）：{examples}。单元节点顺序"
+                    f"与 curved_mapping 的朝向约定不一致（先对全部单元做 fix_tet_orientation / fix_prism_orientation），"
+                    f"或网格有非流形缺陷")
+            codes[sel] = c
+        return codes
 
-    n_ambiguous = 0
-    for i in range(n_faces):
-        owner = int(owner_ids[i])
-        face_nodes = face_data.node_connectivity[i]
-        owner_conn, owner_table = cell_conn(owner)
-        try:
-            owner_key = _resolve_cube_face(owner_conn, face_nodes, owner_table)
-            owner_cube_face[i] = CUBE_FACE_CODES[owner_key]
-        except FaceTopologyError as e:
-            n_ambiguous += 1
-            if n_ambiguous <= 5:
-                logger.error(f"Face {i} owner-side topology resolution failed: {e}")
-            continue
-
-        neighbor = int(neighbor_ids[i])
-        if neighbor >= 0:
-            neighbor_conn, neighbor_table = cell_conn(neighbor)
-            try:
-                neighbor_key = _resolve_cube_face(neighbor_conn, face_nodes, neighbor_table)
-                neighbor_cube_face[i] = CUBE_FACE_CODES[neighbor_key]
-            except FaceTopologyError as e:
-                n_ambiguous += 1
-                if n_ambiguous <= 5:
-                    logger.error(f"Face {i} neighbor-side topology resolution failed: {e}")
-
-    if n_ambiguous > 0:
-        raise FaceTopologyError(
-            f"{n_ambiguous}/{n_faces} faces failed cube-face topology resolution. "
-            f"This indicates cell node ordering does not match the orientation "
-            f"convention assumed by curved_mapping.py (run fix_tet_orientation/"
-            f"fix_prism_orientation on all cells before building face connectivity), "
-            f"or a non-manifold mesh defect."
-        )
+    owner_cube_face = side_codes(owner_ids, "owner")
+    neighbor_cube_face = side_codes(neighbor_ids, "neighbor")
 
     is_boundary = neighbor_ids < 0
 

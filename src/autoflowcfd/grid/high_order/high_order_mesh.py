@@ -214,32 +214,7 @@ class HighOrderMesh:
                 fixed_prism_conn, fixed_tet_conn, nodes
             )
 
-            # native 四面体（路径C，Part6/7/8 文档）：build_face_connectivity
-            # 只产出坍缩坐标编码（0~5，见该函数及 face_connectivity.py
-            # 模块文档"`build_face_connectivity` 因此保持完全不变、只
-            # 产出坍缩坐标编码"一节）——这里恒翻译成 native 编码（6~9），
-            # 下游 `build_face_flux_points`（`face_flux_points/merge.py`）
-            # 按 `code>=6` 自动探测启用 numba native 分支（Part7 文档
-            # "执行状态更新"节），不需要另外传参。两类单元都恒为原生基
-            # （坍缩四面体 2026-09-03 删除、坍缩棱柱 2026-09-23 删除），
-            # 所以两侧记录一律翻译成原生编码。
-            prism_native = True
-            # 原生棱柱面（编码 [10,15)）的硬护栏已移除（2026-09-19）：
-            # 它当时挡住的四项已全部完成 ——
-            #   1. 残差 kernel 的面分派：原生算子**堆叠**成一张整表，按面算子
-            #      索引（面编码 + 三角形面坍缩顶点槽位，`fr/operators/face_ops.py`）
-            #      取，两类原生面同一条路径，没有平行分支；
-            #   2. 面通量点几何：邻居插值矩阵走
-            #      `interp_matrix_from_cube_coords_nb` 共用入口；adj 行与
-            #      面积权重两条实现（numpy 与生产用的 numba）都补齐并交叉
-            #      验证到 4e-16，参考空间闭合面恒等式 1e-16；
-            #   3. 过积分：`fr/native_prism/overintegration.py` +
-            #      `fr/overintegration_order.py` 的跨档唯一入口；
-            #   4. GPU/MPI：两者都只消费 `FlatFaceGeometry` 的堆叠数组与
-            #      `mesh.n_sps_per_cell_fine` 布局宽度，随上面三项自动覆盖，
-            #      并各加了一道"算子 n_fine 与布局宽度必须相等"的运行期闸。
-            self.face_connectivity = self.face_connectivity.with_native_face_codes(
-                n_prisms, prism_native=prism_native)
+            # 面编码直接是原生编码（四面体 [6,10)、棱柱 [10,15)，`build_face_connectivity`）
 
             # 周期边界配对：必须在这里、build_face_flux_points 之前完成——
             # 配对把周期面从 is_boundary=True 翻转成内部面，需要在
