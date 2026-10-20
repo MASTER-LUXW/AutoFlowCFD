@@ -32,6 +32,8 @@ import json
 from pathlib import Path
 from loguru import logger
 
+from autoflowcfd.cli.grid.options import units_option
+
 
 @click.group()
 def grid() -> None:
@@ -57,14 +59,14 @@ def grid() -> None:
 @click.option("--output", "-o", type=click.Path(), default="grid_info.json",
               help="输出 JSON 文件路径")
 @click.option("--encoding", default="UTF-8", help="文件编码")
-@click.option("--streaming", is_flag=True, help="大文件启用流式解析")
+@units_option
 @click.option("--skip-validation", is_flag=True, help="跳过网格质量校验")
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def parse(
     input_file: str,
     output: str,
     encoding: str,
-    streaming: bool,
+    units: str,
     skip_validation: bool,
     json_output: bool
 ) -> None:
@@ -76,7 +78,7 @@ def parse(
         input_file: .nas 网格文件路径
         output: 输出 JSON 文件路径
         encoding: 文件编码
-        streaming: 大文件启用流式模式
+        units: 文件坐标单位（mm / m / auto）
         skip_validation: 跳过质量校验
         json_output: 以 JSON 格式输出结果
 
@@ -87,8 +89,8 @@ def parse(
         # 自定义输出路径
         $ autoflowcfd grid parse sedan.nas -o output/grid.json
 
-        # 大文件用流式模式
-        $ autoflowcfd grid parse large.nas --streaming
+        # 米制坐标的文件
+        $ autoflowcfd grid parse plate.nas --units m
     """
     from autoflowcfd.grid import NASParser
 
@@ -96,13 +98,7 @@ def parse(
 
     try:
         # 解析网格
-        parser = NASParser(input_file, encoding=encoding)
-
-        if streaming:
-            logger.info(
-                "NASParser already parses node/cell cards line-by-line; "
-                "--streaming has no additional effect"
-            )
+        parser = NASParser(input_file, encoding=encoding, units=units)
         grid_data = parser.parse()
 
         # 获取网格统计信息
@@ -176,18 +172,13 @@ def parse(
               "validator.py——保证未修改参数的 `grid validate` 在同一"
               "网格上与 `grid parse`/`generate-volume` 的质量门判据一致，"
               "而不是宽松 10 倍）")
-@click.option("--threshold-area", type=float, default=1e-12,
-              help="最小单元面积阈值 (m²)")
-@click.option("--fix-duplicates", is_flag=True, help="自动合并重复节点")
-@click.option("--fix-normals", is_flag=True, help="自动修正法向")
+@units_option
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def validate(
     input_file: str,
     report: str,
     threshold_aspect_ratio: float,
-    threshold_area: float,
-    fix_duplicates: bool,
-    fix_normals: bool,
+    units: str,
     json_output: bool
 ) -> None:
     """校验网格质量与兼容性。
@@ -198,9 +189,7 @@ def validate(
         input_file: .nas 网格文件路径
         report: 质量报告输出文件
         threshold_aspect_ratio: 长宽比阈值
-        threshold_area: 最小单元面积阈值
-        fix_duplicates: 自动合并重复节点
-        fix_normals: 自动修正法向
+        units: 文件坐标单位（mm / m / auto）
         json_output: 以 JSON 格式输出结果
 
     Examples:
@@ -209,9 +198,6 @@ def validate(
 
         # 自定义阈值
         $ autoflowcfd grid validate sedan.nas --threshold-aspect-ratio 500.0
-
-        # 自动修复问题
-        $ autoflowcfd grid validate sedan.nas --fix-duplicates --fix-normals
     """
     from autoflowcfd.grid import NASParser, GridValidator
 
@@ -219,23 +205,11 @@ def validate(
 
     try:
         # 解析网格
-        parser = NASParser(input_file)
+        parser = NASParser(input_file, units=units)
         grid_data = parser.parse()
 
-        # 校验（GridValidator 只检查长宽比/扭曲度/Jacobian；不支持
-        # 逐单元面积阈值或自动修复）
         validator = GridValidator(grid_data)
         validator.thresholds['aspect_ratio_max'] = threshold_aspect_ratio
-
-        if threshold_area != 1e-12:
-            logger.warning(
-                "--threshold-area is not supported by GridValidator and will be ignored"
-            )
-        if fix_duplicates or fix_normals:
-            logger.warning(
-                "--fix-duplicates/--fix-normals are not implemented; "
-                "no automatic fixes were applied"
-            )
 
         quality_report = validator.validate()
 
@@ -284,14 +258,16 @@ def validate(
 
 @grid.command()
 @click.argument("input_file", type=click.Path(exists=True))
+@units_option
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
-def info(input_file: str, json_output: bool) -> None:
+def info(input_file: str, units: str, json_output: bool) -> None:
     """显示网格统计信息。
 
     不生成任何文件，快速查看网格信息。
 
     Args:
         input_file: .nas 网格文件路径
+        units: 文件坐标单位（mm / m / auto）
         json_output: 以 JSON 格式输出结果
 
     Examples:
@@ -307,7 +283,7 @@ def info(input_file: str, json_output: bool) -> None:
 
     try:
         # 解析网格
-        parser = NASParser(input_file)
+        parser = NASParser(input_file, units=units)
         grid_data = parser.parse()
 
         # 获取统计信息
@@ -330,10 +306,11 @@ def info(input_file: str, json_output: bool) -> None:
                 cells = grid_data.boundaries.get_cell_indices(name)
                 result["boundary_groups"][name] = len(cells)
 
-        # 估算内存占用（粗略估计）
-        # 每单元约 44 字节 + 每节点约 24 字节
-        estimated_memory_mb = (cell_count * 44 + node_count * 24) / (1024 * 1024)
-        result["estimated_memory_mb"] = round(estimated_memory_mb, 2)
+        nodes = grid_data.nodes
+        result["bounding_box_m"] = {
+            "min": [float(nodes.x.min()), float(nodes.y.min()), float(nodes.z.min())],
+            "max": [float(nodes.x.max()), float(nodes.y.max()), float(nodes.z.max())],
+        }
 
         # 输出
         if json_output:
@@ -349,8 +326,8 @@ def info(input_file: str, json_output: bool) -> None:
             
             for name, count in result['boundary_groups'].items():
                 click.echo(f"  - {name:<15} {count:,} cells")
-            
-            click.echo(f"Memory Usage:   ~{estimated_memory_mb:.1f} MB (estimated)")
+            bbox = result["bounding_box_m"]
+            click.echo(f"Bounding box:   {bbox['min']} ~ {bbox['max']} m")
     
     except Exception as e:
         logger.error(f"Failed to get grid info: {e}")

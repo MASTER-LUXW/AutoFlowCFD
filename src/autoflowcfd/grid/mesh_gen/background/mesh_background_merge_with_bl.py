@@ -22,7 +22,7 @@ from ..extrusion.mesh_extrusion import extrude_layers
 from ..tetgen.mesh_prism_to_tet import convert_layers_to_prisms
 from ..utils.mesh_utils import compute_face_normals
 from ..utils.mesh_corner_split import split_sharp_corners
-from .mesh_background_merge_utils import _export_partial_mesh
+from .mesh_background_merge_utils import _stop_with_partial_mesh
 from ..tetgen.mesh_tetgen_core import (
     build_seam_taper_scale, fill_core_volume,
     compute_local_thickness_limit,
@@ -46,9 +46,7 @@ def _build_merged_mesh_with_bl(
     max_cell_size: Optional[float],
     bl_layers: Optional[int],
     export_bl_only: bool,
-    export_bl_only_path: Optional[str],
     export_core_only: bool,
-    export_core_only_path: Optional[str],
     first_layer_height: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """至少有一个曲面组适合挤出边界层时的主路径：挤出 BL 棱柱，再用
@@ -158,12 +156,10 @@ def _build_merged_mesh_with_bl(
     logger.info(f"  BL mesh: {len(bl_nodes)} nodes, {len(bl_prisms)} prism cells")
 
     if export_bl_only:
-        if not export_bl_only_path:
-            raise ValueError("export_bl_only=True requires export_bl_only_path to be set")
         # bl_prisms 只索引 BL 阶段前缀的节点（见上方 convert_layers_to_prisms 的切片），导出也只带这一段
-        _export_partial_mesh(
+        _stop_with_partial_mesh(
             bl_nodes[:bl_split_offset + nodes_per_layer], bl_prisms, np.empty((0, 4), dtype=bl_prisms.dtype),
-            export_bl_only_path, "BL-only (extruded boundary-layer prisms)",
+            "BL-only (extruded boundary-layer prisms)",
             surface_nodes, surface_faces, surface_boundaries,
         )
 
@@ -238,12 +234,9 @@ def _build_merged_mesh_with_bl(
             "safely"
         )
     if export_core_only:
-        path = export_core_only_path
-        if not path:
-            raise ValueError("export_core_only=True requires export_core_only_path to be set")
-        _export_partial_mesh(
+        _stop_with_partial_mesh(
             core_nodes, np.empty((0, 6), dtype=core_tets.dtype), core_tets,
-            path, "core-only (tetgen core fill from the real BL outer surface)",
+            "core-only (tetgen core fill from the real BL outer surface)",
             surface_nodes, surface_faces, surface_boundaries,
         )
 

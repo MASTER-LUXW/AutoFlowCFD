@@ -30,10 +30,6 @@ class NASParser:
     
     SUPPORTED_VERSIONS = {"v22", "v23", "v24"}
     
-    # units='auto' 时：原始（未缩放）包围盒最大边长低于此值视为已是米，高于此值视为毫米。单车外流计算域
-    # 通常是几米（车）到几十米（风洞/远场），同一几何以毫米表示会到几千，远在阈值另一侧。
-    AUTO_UNITS_MM_THRESHOLD = 50.0
-
     def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm',
                  bc_types: Optional[Dict[str, str]] = None):
         """初始化解析器
@@ -44,7 +40,7 @@ class NASParser:
             units: 文件中坐标的长度单位：'mm'（默认——匹配 ANSA
                 的典型导出约定，按 1e-3 缩放到米）、'm'（不缩放，
                 原样使用）或 'auto'（基于原始包围盒大小的启发式
-                检测——见 AUTO_UNITS_MM_THRESHOLD）。以前 mm->m 缩放
+                检测——见 nas_io/units.py）。以前 mm->m 缩放
                 因子是无条件硬编码的，没有办法覆盖或检测文件已经
                 是米，静默损坏几何（例如 1m 的车缩小到 1mm 的点，
                 或反之）对于任何非毫米的文件。
@@ -59,9 +55,13 @@ class NASParser:
         self.encoding = encoding
         self.version: Optional[str] = None
 
-        if units not in ('mm', 'm', 'auto'):
-            raise ValueError(f"units must be 'mm', 'm', or 'auto', got {units!r}")
+        from .units import UNITS_CHOICES
+
+        if units not in UNITS_CHOICES:
+            raise ValueError(f"units must be one of {UNITS_CHOICES}, got {units!r}")
         self.units = units
+        #: parse() 之后为实际单位 'mm' / 'm'（units='auto' 时由包围盒判定）
+        self.resolved_units: Optional[str] = None
         self.bc_types = dict(bc_types or {})
 
         if not self.file_path.exists():
@@ -128,55 +128,13 @@ class NASParser:
                 nodes.z.max() - nodes.z.min(),
             ))
 
-            if self.units == 'mm':
-                scale_factor = 1e-3
-            elif self.units == 'm':
-                scale_factor = 1.0
-            else:  # 'auto'
-                if raw_extent > self.AUTO_UNITS_MM_THRESHOLD:
-                    scale_factor = 1e-3
-                    logger.info(
-                        f"units='auto': raw bounding-box max extent={raw_extent:.4g} > "
-                        f"{self.AUTO_UNITS_MM_THRESHOLD:g} -> assuming millimeters "
-                        f"(scaling by 1e-3)"
-                    )
-                else:
-                    scale_factor = 1.0
-                    logger.info(
-                        f"units='auto': raw bounding-box max extent={raw_extent:.4g} <= "
-                        f"{self.AUTO_UNITS_MM_THRESHOLD:g} -> assuming the file is "
-                        f"already in meters (no scaling)"
-                    )
+            from .units import resolve_units
 
+            self.resolved_units, scale_factor = resolve_units(self.units, raw_extent, source=str(self.file_path))
             nodes.x = nodes.x * scale_factor
             nodes.y = nodes.y * scale_factor
             nodes.z = nodes.z * scale_factor
 
-            # 对转换后的（米制）域大小进行合理性检查，
-            # 对照汽车外气动的合理范围。这不会改变任何值
-            # ——只是把静默的单位不匹配（否则会直接进入
-            # 在物理上无意义的几何上进行网格/求解）变成
-            # 响亮的、可操作的警告。
-            scaled_extent = raw_extent * scale_factor
-            if scaled_extent < 0.1:
-                logger.warning(
-                    f"After unit conversion (units={self.units!r}, scale={scale_factor:g}), "
-                    f"the mesh's largest bounding-box dimension is only "
-                    f"{scaled_extent:.4g} m - implausibly small for automotive "
-                    f"external-aero (expect several meters for the vehicle and "
-                    f"tens of meters for the surrounding domain). This usually "
-                    f"means the file's actual units don't match units={self.units!r} "
-                    f"- try units='m' or units='auto'."
-                )
-            elif scaled_extent > 1000.0:
-                logger.warning(
-                    f"After unit conversion (units={self.units!r}, scale={scale_factor:g}), "
-                    f"the mesh's largest bounding-box dimension is "
-                    f"{scaled_extent:.4g} m - implausibly large for automotive "
-                    f"external-aero. This usually means the file's actual units "
-                    f"don't match units={self.units!r} - try units='mm'."
-                )
-            
             # Step 3: Parse cells (delegated)
             logger.info("Parsing cells...")
             surface_cells, cell_pids = parse_cells_from_nas(

@@ -2,7 +2,8 @@
 
 从 mesh_background_merge.py 拆分出来：`_refine_large_boundary_faces`
 （tetgen 之前按最大边长迭代二分边界面的过大三角形，避免生成过大的边界四面体）和
-`_export_partial_mesh`（`--bl-only`/`--core-only` 调试导出路径共用：导出后抛 `PartialMeshExported` 结束生成）。
+`_stop_with_partial_mesh`（`--bl-only`/`--core-only` 调试导出路径共用：组装局部网格，抛 `PartialMeshReady`
+结束生成，由调用方写出）。
 两者都只被 _build_merged_mesh 自己调用，没有独立复用需求，纯粹为了控制文件行数而拆开。
 """
 
@@ -86,34 +87,33 @@ def _refine_large_boundary_faces(
     return verts, cur.astype(np.int32)
 
 
-class PartialMeshExported(Exception):
-    """调试导出（`--bl-only` / `--core-only`）已写出局部网格、生成管线在此结束——不是错误。
+class PartialMeshReady(Exception):
+    """调试导出（`--bl-only` / `--core-only`）：生成管线在此结束，局部网格随信号带回——不是错误。
 
-    2026-10-20 以前导出后库函数直接 `sys.exit(0)`（导出失败 `sys.exit(1)`）：作为 API 调用时连调用方进程一起
-    结束、绕过上层清理。现在由调用方（CLI）决定如何收尾；导出本身失败时原异常照常向上抛。
+    2026-10-20 以前库函数自己写文件后直接 `sys.exit(0)`（导出失败 `sys.exit(1)`），作为 API 调用时连调用方进程
+    一起结束；写出单位也写死为毫米，与输入面网格的单位无关。现在库函数不写文件，由调用方（CLI）按输出单位写出。
 
     Attributes:
-        path: 写出的 .nas 文件
-        label: 导出的是管线的哪一段
+        mesh: 局部体网格（VolumeMeshData，坐标为米，metadata.file_format == "partial"）
+        label: 管线的哪一段
     """
 
-    def __init__(self, path: str, label: str):
-        super().__init__(f"{label} mesh exported to {path}")
-        self.path = path
+    def __init__(self, mesh, label: str):
+        super().__init__(f"{label} partial mesh ready")
+        self.mesh = mesh
         self.label = label
 
 
-def _export_partial_mesh(
+def _stop_with_partial_mesh(
     nodes: np.ndarray,
     prism_cells: np.ndarray,
     tet_cells: np.ndarray,
-    output_path: str,
     label: str,
     surface_nodes: np.ndarray,
     surface_faces: np.ndarray,
     surface_boundaries,
 ) -> None:
-    """导出局部（仅 BL / 仅核心）调试网格，然后抛 `PartialMeshExported` 结束生成。
+    """组装局部（仅 BL / 仅核心）调试网格，抛 `PartialMeshReady` 结束生成。
 
     所有 `--*-only` CLI 标志的早期停止路径共用此函数
     （参见 cli/grid/volume_commands.py 的 `--bl-only`/`--core-only`）。
@@ -128,19 +128,17 @@ def _export_partial_mesh(
         nodes: (n_nodes, 3) 节点坐标，单位：米
         prism_cells: (n_prism, 6) 棱柱连接关系，或空数组 (0, 6)
         tet_cells: (n_tet, 4) 四面体连接关系，或空数组 (0, 4)
-        output_path: .nas 文件输出路径
-        label: 当前阶段的易读名称，仅用于日志
+        label: 当前阶段的易读名称
         surface_nodes, surface_faces, surface_boundaries: 输入面网格（米制）及其边界分组
 
     Raises:
-        PartialMeshExported: 导出成功（总是抛出）
+        PartialMeshReady: 总是抛出
     """
-    from ...nas_io.nas_export import export_volume_mesh_to_nas
     from ...structures import NodeArray, PrismCells, TetrahedralCells, GridMetadata, VolumeMeshData
 
     from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
 
-    logger.success(f"Exporting {label} mesh to: {output_path}")
+    logger.success(f"Stopping after the {label} stage")
     # 与完整管线（generate_hybrid_mesh 的重合点合并）同样先合并几何重合点：BL 挤出停长的柱子上下层节点
     # 坐标相同、编号不同，不合并时它们张成的侧面三角形面积恰为零（cube_demo --bl-only 实测 5025 个）
     nodes, tet_cells, remap = _dedupe_coincident_points(nodes, tet_cells)
@@ -173,7 +171,4 @@ def _export_partial_mesh(
         metadata=metadata, prism_cells=prism_cells_obj,
         surface_mesh={'nodes': surface_nodes, 'faces': surface_faces, 'boundaries': surface_boundaries},
     )
-    # export_volume_mesh_to_nas 期望输入为米，内部会转换为毫米
-    export_volume_mesh_to_nas(vol_mesh, output_path, scale_factor=1000.0)
-    logger.success(f"{label} mesh exported successfully.")
-    raise PartialMeshExported(output_path, label)
+    raise PartialMeshReady(vol_mesh, label)

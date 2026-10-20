@@ -64,11 +64,6 @@ def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
     return node_ids_arr, node_xyz_arr, tet_rows, prism_rows
 
 
-# 与 NASParser.AUTO_UNITS_MM_THRESHOLD 完全匹配——见该类的注释
-# 了解推理（汽车外气动域以 mm 为单位读入数千，以米为单位读入几到几十）。
-_AUTO_UNITS_MM_THRESHOLD = 50.0
-
-
 def _require_valid_cells(path: str, card: str, node_xyz: np.ndarray, conn: np.ndarray,
                          node_id_rows: np.ndarray) -> None:
     """导入的体单元不得退化（棱柱还不得扭曲 / 翻折），否则报错并给出单元（在该类卡片中的序号与节点号）。
@@ -115,8 +110,10 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
     from ..mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
     from ..validation.quality_metrics import compute_prism_volumes
 
-    if units not in ('mm', 'm', 'auto'):
-        raise ValueError(f"units must be 'mm', 'm', or 'auto', got {units!r}")
+    from .units import UNITS_CHOICES, resolve_units
+
+    if units not in UNITS_CHOICES:
+        raise ValueError(f"units must be one of {UNITS_CHOICES}, got {units!r}")
 
     logger.info(f"Parsing external volume mesh: {path}")
     node_ids, node_xyz, tet_rows, prism_rows = _parse_cards(path)
@@ -125,24 +122,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
     )
 
     raw_extent = float(np.max(node_xyz.max(axis=0) - node_xyz.min(axis=0)))
-    if units == 'mm':
-        scale_factor = 1e-3
-    elif units == 'm':
-        scale_factor = 1.0
-    else:  # 'auto'
-        if raw_extent > _AUTO_UNITS_MM_THRESHOLD:
-            scale_factor = 1e-3
-            logger.info(
-                f"units='auto': raw bounding-box max extent={raw_extent:.4g} > "
-                f"{_AUTO_UNITS_MM_THRESHOLD:g} -> assuming millimeters (scaling by 1e-3)"
-            )
-        else:
-            scale_factor = 1.0
-            logger.info(
-                f"units='auto': raw bounding-box max extent={raw_extent:.4g} <= "
-                f"{_AUTO_UNITS_MM_THRESHOLD:g} -> assuming the file is already in "
-                f"meters (no scaling)"
-            )
+    _resolved, scale_factor = resolve_units(units, raw_extent, source=str(path))
     node_xyz = node_xyz * scale_factor
 
     id_to_idx = np.full(int(node_ids.max()) + 1, -1, dtype=np.int64)

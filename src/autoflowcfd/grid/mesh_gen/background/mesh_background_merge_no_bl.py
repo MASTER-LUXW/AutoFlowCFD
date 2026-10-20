@@ -15,7 +15,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from ...schema.grid_boundaries import BoundaryMap
 
-from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_partial_mesh
+from .mesh_background_merge_utils import _refine_large_boundary_faces, _stop_with_partial_mesh
 from ..tetgen.mesh_tetgen_core import (
     fill_core_volume, generate_core_background_points,
     fill_without_oversized_tetrahedra,
@@ -30,7 +30,6 @@ def _build_merged_mesh_no_bl(
     hole_points,
     max_cell_size: Optional[float],
     export_core_only: bool,
-    export_core_only_path: Optional[str],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """没有曲面组适合挤出边界层时，直接用 tetgen 填充整张封闭曲面。
 
@@ -88,11 +87,9 @@ def _build_merged_mesh_no_bl(
     prism_cells = np.zeros((0, 6), dtype=np.int64)
 
     if export_core_only:
-        if not export_core_only_path:
-            raise ValueError("export_core_only=True requires export_core_only_path to be set")
-        _export_partial_mesh(
+        _stop_with_partial_mesh(
             merged_nodes, prism_cells, tet_cells,
-            export_core_only_path, "core-only (no BL region - this is the whole mesh)",
+            "core-only (no BL region - this is the whole mesh)",
             surface_nodes, surface_faces, surface_boundaries,
         )
 

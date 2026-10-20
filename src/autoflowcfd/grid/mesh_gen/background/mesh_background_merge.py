@@ -69,9 +69,7 @@ def _build_merged_mesh(
     max_cell_size: Optional[float] = None,
     bl_layers: Optional[int] = None,
     export_bl_only: bool = False,
-    export_bl_only_path: Optional[str] = None,
     export_core_only: bool = False,
-    export_core_only_path: Optional[str] = None,
     first_layer_height: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """构建合并网格（BL 棱柱 + TetGen 核心四面体）。
@@ -93,7 +91,7 @@ def _build_merged_mesh(
     if len(extrude_faces) == 0:
         if export_bl_only:
             # 此前这里会静默走进 no_bl 分支（该分支签名根本不接受
-            # export_bl_only/export_bl_only_path），--bl-only 请求被完全
+            # export_bl_only），--bl-only 请求被完全
             # 丢弃，调用方（generate_hybrid_mesh）却仍打印"导出完成"并以
             # 0 退出——从未写出用户请求的 BL-only 文件（第四次评审发现2）。
             # 该几何没有任何边界组被判定为可挤出边界层，--bl-only 在这种
@@ -109,7 +107,7 @@ def _build_merged_mesh(
         return _build_merged_mesh_no_bl(
             surface_nodes, surface_faces, surface_boundaries,
             hole_points, max_cell_size,
-            export_core_only, export_core_only_path,
+            export_core_only,
         )
     else:
         from .mesh_background_merge_with_bl import _build_merged_mesh_with_bl
@@ -118,6 +116,6 @@ def _build_merged_mesh(
             extrude_faces, core_faces, extruded_groups,
             hole_points,
             growth_rate, min_cell_size, max_cell_size, bl_layers,
-            export_bl_only, export_bl_only_path, export_core_only, export_core_only_path,
+            export_bl_only, export_core_only,
             first_layer_height=first_layer_height,
         )

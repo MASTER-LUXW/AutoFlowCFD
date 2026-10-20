@@ -40,7 +40,6 @@ class VolumeMeshGenerator:
         max_cell_size: Optional[float] = None,
         bl_layers: Optional[int] = None,
         bl_only: bool = False,
-        bl_only_output: Optional[str] = None,
         core_only: bool = False,
         first_layer_height: Optional[float] = None,
     ):
@@ -58,21 +57,17 @@ class VolumeMeshGenerator:
                 外表面填充之前挤出多少层（见 mesh_extrusion.
                 extrude_layers 自身的 bl_layers 文档）。None（默认）
                 使用 8。
-            bl_only: 若为 True，只生成并导出 BL 棱柱层网格。
-            bl_only_output: bl_only 为 True 时使用的输出 .nas 路径。
-                与 bl_only 一起必须提供。
+            bl_only: 若为 True，挤出 BL 后即停止，局部网格随 PartialMeshReady 带回。
             first_layer_height: 边界层第一层高度（米），None 时取 min(min_cell_size, 0.2% 域尺寸)；由目标 y+
                 推出见 `extrusion/first_layer.py`
-            core_only: 若为 True，在 core 区域 tetgen 填充后立即导出
-                （仅 core 四面体，不与 BL 拼接）并停止——与
-                bl_only_output 相同的输出路径复用。
+            core_only: 若为 True，在 core 区域 tetgen 填充后即停止（仅 core 四面体，不与 BL 拼接），局部网格随
+                PartialMeshReady 带回。
         """
         self.growth_rate = growth_rate
         self.min_cell_size = min_cell_size
         self.max_cell_size = max_cell_size
         self.bl_layers = bl_layers
         self.bl_only = bl_only
-        self.bl_only_output = bl_only_output
         self.core_only = core_only
         self.first_layer_height = first_layer_height
 
@@ -136,8 +131,6 @@ class VolumeMeshGenerator:
             max_cell_size=self.max_cell_size,
             bl_layers=self.bl_layers,
             export_bl_only=self.bl_only,
-            export_bl_only_path=self.bl_only_output,
             export_core_only=self.core_only,
-            export_core_only_path=self.bl_only_output,
             first_layer_height=self.first_layer_height,
         )

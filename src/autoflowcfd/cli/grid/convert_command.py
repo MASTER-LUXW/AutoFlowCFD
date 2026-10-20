@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 import click
+
+from autoflowcfd.cli.grid.options import units_option
 from loguru import logger
 
 from autoflowcfd.cli.grid.commands import grid
@@ -15,8 +17,7 @@ from autoflowcfd.cli.grid.commands import grid
 @click.option("--format", "-f", "fmt", type=click.Choice(["vtk", "cgns", "stl"]), required=True, help="输出格式")
 @click.option("--output", "-o", type=click.Path(dir_okay=False),
               help="输出文件路径（默认：与输入同目录同名，扩展名 .vtu/.cgns/.stl）")
-@click.option("--units", type=click.Choice(["mm", "m", "auto"]), default="mm", show_default=True,
-              help="输入文件的坐标单位；输出一律为米")
+@units_option
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def convert(input_file: str, fmt: str, output: Optional[str], units: str, json_output: bool) -> None:
     """转换网格为 VTK、CGNS 或 STL。

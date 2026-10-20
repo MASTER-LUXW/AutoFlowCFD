@@ -51,12 +51,12 @@ def generate_volume_mesh_from_surface(
     #   max_cell_size（见 mesh_background_merge._build_merged_mesh；ProjectFiles Part13 P49——没有单独的
     #   结构化过渡段）
     # 只转发调用方给出的参数，未给出的取 VolumeMeshGenerator 构造参数的默认值（默认值只有那一份）
-    known = ('growth_rate', 'min_cell_size', 'max_cell_size', 'bl_layers', 'bl_only', 'output', 'core_only',
+    known = ('growth_rate', 'min_cell_size', 'max_cell_size', 'bl_layers', 'bl_only', 'core_only',
              'first_layer_height')
     unknown = sorted(set(params) - set(known))
     if unknown:
         raise TypeError(f"未知的体网格生成参数 {unknown}（可用：{list(known)}）")
-    optimized_params = {('bl_only_output' if k == 'output' else k): params[k] for k in known if k in params}
+    optimized_params = {k: params[k] for k in known if k in params}
 
     # 反映实际解析的参数，而不是固定的占位符数字
     # ——以前即使 --growth-rate/--bl-layers 被覆盖，也总是打印

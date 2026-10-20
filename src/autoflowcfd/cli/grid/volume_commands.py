@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
 from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import DEFAULT_GROWTH_RATE, DEFAULT_MIN_CELL_SIZE
+from autoflowcfd.cli.grid.options import units_option
 from typing import Optional
 from loguru import logger
 
@@ -61,6 +62,7 @@ def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, 
     "边界层拼接）——跳过后续全部步骤",
 )
 @click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
+@units_option
 @click.option("--first-layer-height", type=float, default=None,
               help="边界层第一层高度 (m)；不给时取 min(--min-cell-size, 0.2% 域尺寸)。与 --target-yplus 二选一")
 @click.option("--target-yplus", type=float, default=None,
@@ -87,6 +89,7 @@ def generate_volume(
     ref_length: Optional[float] = None,
     rho_inf: float = RHO_INF,
     mu_molecular: float = MU_MOLECULAR,
+    units: str = "mm",
 ) -> None:
     """从面网格 .nas 文件生成体网格并导出。
 
@@ -116,11 +119,14 @@ def generate_volume(
         bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
         first_layer_height / target_yplus / ref_velocity / ref_length / rho_inf / mu_molecular: 边界层第一层
             高度，直接给出或由目标 y+ 推出（`grid/mesh_gen/extrusion/first_layer.py`）
+        units: 输入面网格的坐标单位（mm / m / auto）；导出的体网格 .nas 用同一单位（auto 时为判定出的单位），
+            内部与 .pkl 一律为米。此前导出恒为毫米，米制输入的往返因此差 1000 倍
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
     )
-    from autoflowcfd.grid.mesh_gen.background.mesh_background_merge_utils import PartialMeshExported
+    from autoflowcfd.grid.mesh_gen.background.mesh_background_merge_utils import PartialMeshReady
+    from autoflowcfd.grid.nas_io.units import SCALE_TO_METERS
 
     if bl_only and core_only:
         raise click.ClickException(
@@ -132,10 +138,11 @@ def generate_volume(
 
     try:
         from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
-        parser = NASParser(input_file, bc_types=parse_bc_type_options(bc_type))
+        parser = NASParser(input_file, units=units, bc_types=parse_bc_type_options(bc_type))
 
         logger.info("Step 1/4: Parsing surface mesh...")
         surface_grid = parser.parse()
+        export_scale = 1.0 / SCALE_TO_METERS[parser.resolved_units]
 
         logger.info("Step 2/4: Validating surface mesh quality...")
         surface_report = GridValidator(surface_grid).validate()
@@ -160,7 +167,6 @@ def generate_volume(
                 'core_only': core_only,
                 'first_layer_height': _resolve_first_layer_height(
                     first_layer_height, target_yplus, ref_velocity, ref_length, rho_inf, mu_molecular),
-                'output': output,
             }
         )
 
@@ -196,10 +202,8 @@ def generate_volume(
                 )
 
         logger.info("Step 4/4: Exporting volume mesh to NAS...")
-        # scale_factor=1000.0（默认值即为此，这里显式写出便于阅读）：内部网格坐标
-        # 始终是米（NASParser 导入时按 mm->m 换算），导出为 mm 与 NASParser
-        # 默认导入单位一致，避免往返导入导出时几何体缩小 1000 倍。
-        output_path = export_volume_mesh_to_nas(volume_mesh, output, scale_factor=1000.0)
+        # 导出单位与输入面网格相同（内部坐标为米）：用同一个 --units 读回时几何不变
+        output_path = export_volume_mesh_to_nas(volume_mesh, output, scale_factor=export_scale)
 
         # 同时保存pickle格式的体网格文件，供求解器直接使用
         import pickle
@@ -234,12 +238,13 @@ def generate_volume(
             click.echo(f"\n✓ Exported to: {output_path}")
             click.echo(f"✓ Cache saved to: {pkl_output}")
 
-    except PartialMeshExported as done:
+    except PartialMeshReady as done:
+        partial_path = export_volume_mesh_to_nas(done.mesh, output, scale_factor=export_scale)
         if json_output:
             click.echo(json.dumps({"command": "grid.generate-volume", "status": "partial",
-                                   "stage": done.label, "output_file": done.path}, indent=2))
+                                   "stage": done.label, "output_file": partial_path}, indent=2))
         else:
-            click.echo(f"\n✓ {done.label} mesh exported to: {done.path}")
+            click.echo(f"\n✓ {done.label} mesh exported to: {partial_path}")
     except Exception as e:
         logger.error(f"Volume mesh generation failed: {e}")
         if json_output:
@@ -272,6 +277,7 @@ def generate_volume(
                    "用于快速预览")
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 @click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
+@units_option
 def import_volume(
     volume_mesh_file: str,
     surface_mesh: str,
@@ -281,6 +287,7 @@ def import_volume(
     skip_overlap_check: bool,
     json_output: bool,
     bc_type: tuple = (),
+    units: str = "mm",
 ) -> None:
     """导入外部生成的体网格（例如 ANSA 自己导出的体网格），做质量检查、
     尽力修复、并准备求解。
@@ -303,6 +310,7 @@ def import_volume(
         skip_overlap_check: 跳过（开销较大的）物理重叠检查
         json_output: 以 JSON 格式输出结果
         bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
+        units: 体网格与面网格的坐标单位（mm / m / auto，两者同一单位）
 
     Examples:
         # 导入、按需修复、并准备求解
@@ -322,6 +330,7 @@ def import_volume(
             repair=not skip_repair,
             max_repair_passes=max_repair_passes,
             check_overlap=not skip_overlap_check,
+            units=units,
             bc_types=parse_bc_type_options(bc_type),
         )
 

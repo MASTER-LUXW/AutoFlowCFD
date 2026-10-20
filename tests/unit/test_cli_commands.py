@@ -25,7 +25,7 @@ class TestCLIGridCommands:
         result = self.runner.invoke(cli, ["grid", "parse", "--help"])
         assert result.exit_code == 0
         assert "--output" in result.output
-        assert "--streaming" in result.output
+        assert "--units" in result.output
 
     def test_grid_validate_help(self) -> None:
         """grid validate 的帮助。"""
