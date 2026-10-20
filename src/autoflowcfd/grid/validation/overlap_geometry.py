@@ -31,10 +31,9 @@ def triangle_triangle_intersect(
 ) -> np.ndarray:
     """精确三角形-三角形交集测试，每行一个布尔值。
 
-    Moller (1997)：拒绝所有顶点严格位于另一个三角形平面同一侧
-    的面对（使用该三角形已有的平面进行快速拒绝）；否则两个三角形
-    都穿过两平面相交的直线 L，因此相交当且仅当它们在 L 上的两个
-    区间重叠。仅共享一条边或一个顶点的两个三角形不被报告为相交
+    先拒绝所有顶点严格位于另一个三角形平面同一侧的面对（快速拒绝）；
+    其余非共面对相交当且仅当某个三角形的某条边穿过另一个三角形
+    （`_edges_through_triangles`）。仅共享一条边或一个顶点的两个三角形不被报告为相交
     （它们的重叠区间在一个点接触/测度为零，调用方将其视为"相邻"
     而非"重叠"——见 mesh_overlap_check.py 的节点共享预过滤，它在
     面对到达此函数之前就排除了这样的对）。
@@ -96,47 +95,20 @@ def triangle_triangle_intersect(
 
     generic = ~separated & ~coplanar
     if np.any(generic):
-        result[generic] = _intersect_on_line(
-            a0[generic], a1[generic], a2[generic], da0[generic], da1[generic], da2[generic],
-            b0[generic], b1[generic], b2[generic], db0[generic], db1[generic], db2[generic],
-            normal_a[generic], normal_b[generic], eps,
-        )
-
-        # 薄碎片三角形修正。_intersect_on_line 通过将每个三角形的边
-        # 投影到两平面相交的直线上（line_dir = cross(normal_a, normal_b)）
-        # 并比较沿该直线的一维区间来确定重叠——该投影和它起始的
-        # da/db 带符号平面距离在三角形是薄碎片时都会丢失精度
-        # （本项目自身的斜接拐角补偿的真实、可测量的后果——
-        # 见 mesh_layer_step.py），因为薄三角形自身的法向量/平面
-        # 按构造对沿三角形长轴的真实偏移只有弱敏感性。
-        # 这不仅限于近平行平面对——最初怀疑是，但在 cube_demo 上
-        # 直接确认了在各种平面角度下（cross(normal_a,normal_b) 的
-        # 模长从 ~7e-6 到 ~0.14）两个真实、明确距离分开的薄碎片
-        # （每种情况都通过暴力点采样和 triangle_triangle_min_distance
-        # 独立验证，0.01m——约本项目 min_cell_size 的 3 倍）仍被标记
-        # 为相交。
-        #
-        # 修复：从 triangle_triangle_min_distance 获取第二意见——
-        # 它基于点到三角形/线段对线段最近点原语（Ericson 5.1.5/5.1.9），
-        # 从不除以三角形自身法向量或两平面的叉乘，因此无论三角形
-        # 多薄或两平面如何取向都保持良好条件。
-        # 对每个通用路径当前标记为相交的行都检查（不仅是疑似
-        # 薄的——相对于假阳性风险成本很低，且没有可靠的更廉价
-        # 方法提前预测哪些行需要）：仅用于将真翻转为假，且仅在
-        # 第二意见发现距离明确超出 eps 时——即这只能将假阳性
-        # 修正为经验证的真阴性，永不引入新的，也永不触碰通用
-        # 路径已标记为非相交的行或（不同条件的）共面分支处理的行。
-        # 已直接对本项目自有的 15 个手工构建边界情况和 3000 个
-        # 混合缩放压力测试案例确认——它们都没有覆盖这个薄碎片
-        # 情况，因此这个修正纯粹是附加的，针对已有代码未覆盖的情况。
-        gi = np.flatnonzero(generic)
-        suspect = result[gi]
-        if np.any(suspect):
-            si = gi[suspect]
-            dist = triangle_triangle_min_distance(
-                a0[si], a1[si], a2[si], b0[si], b1[si], b2[si],
-            )
-            result[si[dist > eps]] = False
+        # 非共面的两个三角形相交，当且仅当某个三角形的某条边穿过另一个三角形（交线段的两个端点各是一条边与
+        # 对方三角形的交点）。2026-10-20 以前这里把两三角形投影到两平面交线上比较区间，再用
+        # triangle_triangle_min_distance 当"第二意见"修正薄碎片误报——后者只看顶点-面与边-边距离，一条边从对方
+        # 面内部穿过（最常见的相交形态）时两者都不为零，真实相交被翻成"不相交"：竖直三角形穿过水平三角形中部
+        # 返回 False，BL 前沿自交冻结与网格重叠检查因此漏检。
+        g = generic
+        hit = np.zeros(int(g.sum()), dtype=bool)
+        tri_a = (a0[g], a1[g], a2[g])
+        tri_b = (b0[g], b1[g], b2[g])
+        for (p, q) in ((tri_a[0], tri_a[1]), (tri_a[1], tri_a[2]), (tri_a[2], tri_a[0])):
+            hit |= _edges_through_triangles(p, q, *tri_b, eps)
+        for (p, q) in ((tri_b[0], tri_b[1]), (tri_b[1], tri_b[2]), (tri_b[2], tri_b[0])):
+            hit |= _edges_through_triangles(p, q, *tri_a, eps)
+        result[g] = hit
 
     if np.any(coplanar):
         result[coplanar] = _coplanar_triangle_overlap(
@@ -148,93 +120,27 @@ def triangle_triangle_intersect(
     return result
 
 
-def _interval_on_line(
-    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
-    d0: np.ndarray, d1: np.ndarray, d2: np.ndarray,
-    line_pt: np.ndarray, line_dir: np.ndarray,
-    eps: float,
-) -> tuple:
-    """将三角形的交集投影到直线上，返回 [lo, hi] 区间。
-    `line_dir` 必须是单位长度（调用方负责归一化），使 `lo`/`hi`
-    是沿直线的真实距离，可直接与 `eps`（也是真实距离）比较——
-    两个三角形的区间都用相同的 line_dir 计算，因此投影值
-    彼此直接可比。
-
-    对三角形的 3 条边，当边两端点的带符号距离 (d0, d1, d2) 异号
-    或任一个在 `eps` 内接近零时（`da * db <= eps^2`，精确
-    `da * db <= 0` 测试的 eps 放宽版本——见 triangle_triangle_intersect
-    的 eps 文档了解为何精确零测试在涉及真实网格坐标时很脆弱），
-    该边穿过（或接触）平面，交点然后线性插值并投影到直线上。
-    独立检查所有 3 条边——而非先选一个"奇数个输出"顶点并假设
-    另两边是穿越——正确处理了顶点恰好落在另一个平面上的情况
-    （该顶点 d == 0）：接触它的两条边都在该顶点注册有效的"穿越"，
-    第三条（真正同号的）边不贡献任何穿越。单顶点选取方法会错误
-    处理这种配置，因为当一个距离恰好（或接近）零时，"两顶点共享
-    一个符号"没有一条能干净成立。
-
-    在极罕见情况下三条边都不注册为接触（数值上，三个都刚好在
-    同一侧，尽管该对已经通过了调用方自身的"未分离"测试——
-    浮点边界情况，不是有效的几何配置），这返回空区间
-    (lo=+inf, hi=-inf) 而非 NaN/np.nanmin 的全 NaN 警告——
-    空区间永远不会与任何东西重叠，这对接近容差边界的模糊
-    接触是正确、安全的结论。
-    """
-    n = len(v0)
-
-    def _proj(pt: np.ndarray) -> np.ndarray:
-        return np.einsum('ij,ij->i', pt - line_pt, line_dir)
-
-    p0, p1, p2 = _proj(v0), _proj(v1), _proj(v2)
-    eps2 = eps * eps
-
-    def _edge_crossing(pa, da, pb, db):
-        touches = da * db <= eps2
-        denom = da - db
-        t = np.divide(da, denom, out=np.full(n, 0.5), where=np.abs(denom) > 1e-300)
-        crossing = pa + t * (pb - pa)
-        return np.where(touches, crossing, np.nan)
-
-    c01 = _edge_crossing(p0, d0, p1, d1)
-    c12 = _edge_crossing(p1, d1, p2, d2)
-    c20 = _edge_crossing(p2, d2, p0, d0)
-
-    stacked = np.stack([c01, c12, c20], axis=0)
-    is_nan = np.isnan(stacked)
-    # 在无 NaN 数组上用普通 np.min/np.max，而非 np.nanmin/np.nanmax——
-    # 如果某行全为 NaN（无边接触，见上方文档字符串），在 min 前将
-    # NaN 替换为 +inf（或 max 前替换为 -inf）使该行自然解析为
-    # lo=+inf, hi=-inf（空区间），而不会触发 nanmin/nanmax 的全 NaN RuntimeWarning。
-    lo = np.min(np.where(is_nan, np.inf, stacked), axis=0)
-    hi = np.max(np.where(is_nan, -np.inf, stacked), axis=0)
-    return lo, hi
-
-
-def _intersect_on_line(
-    a0, a1, a2, da0, da1, da2,
-    b0, b1, b2, db0, db1, db2,
-    normal_a, normal_b,
-    eps: float = 1e-9,
+def _edges_through_triangles(
+    p: np.ndarray, q: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray, eps: float,
 ) -> np.ndarray:
-    """两个三角形都真实穿过对方的平面（非分离、非共面）——
-    当且仅当它们沿两平面公共线的投影区间以正长度重叠时相交。
-    此处用闭合 `<=` 比较也会将仅在直线上一个点接触的两个
-    三角形（例如恰好共享一个顶点）标记为"相交"——改用一个小
-    eps 余量排除，与此函数的约定一致（共享边/共享顶点相邻
-    不算重叠）。"""
-    line_dir = np.cross(normal_a, normal_b)
-    line_dir_mag = np.linalg.norm(line_dir, axis=1, keepdims=True)
-    # 归一化使 _interval_on_line 的投影 lo/hi 是真实距离（米），
-    # 可直接与 eps 比较——见该函数自身的 eps 文档。保护近平行
-    # 但不完全共面的情况（平面几乎平行，line_dir 模长接近零）：
-    # 回退为通过已空的区间将其视为非相交，而非除以约零并放大
-    # 浮点噪声到无意义的"直线"方向。
-    line_dir = np.divide(line_dir, line_dir_mag, out=np.zeros_like(line_dir), where=line_dir_mag > 1e-9)
-    line_pt = a0  # 平面 A 上自身三角形的任一点都可作投影原点
-
-    lo_a, hi_a = _interval_on_line(a0, a1, a2, da0, da1, da2, line_pt, line_dir, eps)
-    lo_b, hi_b = _interval_on_line(b0, b1, b2, db0, db1, db2, line_pt, line_dir, eps)
-
-    return (lo_a < hi_b - eps) & (lo_b < hi_a - eps)
+    """逐行：线段 pq 是否穿过三角形 abc——两端点到三角形平面的真实距离严格异号（超出 eps），且穿越点到三条边
+    的面内有向距离都不小于 -eps。只用三重积与真实距离，不计算两平面的交线方向，薄碎片三角形也良态；
+    退化（零面积）三角形不被穿过。"""
+    normal = np.cross(b - a, c - a)
+    mag = np.linalg.norm(normal, axis=1, keepdims=True)
+    unit = np.divide(normal, mag, out=np.zeros_like(normal), where=mag > 1e-300)
+    dp = _signed_dist_to_plane(p, a, unit)
+    dq = _signed_dist_to_plane(q, a, unit)
+    crosses = (mag[:, 0] > 1e-300) & (((dp > eps) & (dq < -eps)) | ((dp < -eps) & (dq > eps)))
+    t = np.divide(dp, dp - dq, out=np.zeros_like(dp), where=crosses)
+    x = p + t[:, None] * (q - p)
+    inside = crosses
+    for u, v in ((a, b), (b, c), (c, a)):
+        edge = v - u
+        length = np.linalg.norm(edge, axis=1)
+        side = np.einsum('ij,ij->i', np.cross(edge, x - u), unit)
+        inside = inside & (side >= -eps * length)
+    return inside
 
 
 def _coplanar_triangle_overlap(

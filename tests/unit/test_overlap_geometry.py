@@ -98,6 +98,32 @@ class TestTriangleTriangleIntersect:
         b = np.array([shared, [-1., 0., 0.], [0., -1., 0.]])
         assert not _intersects(a, b)
 
+    def test_edge_piercing_the_other_face_is_detected(self):
+        """一条边从对方面内部穿过（最常见的相交形态）。2026-10-20 以前"薄碎片修正"用只看顶点-面 / 边-边距离的
+        triangle_triangle_min_distance 当第二意见，这里两者都不为零，真实相交被翻成 False。"""
+        flat = np.array([[-1., -1., 0.], [1., -1., 0.], [0., 1., 0.]])
+        upright = np.array([[0., 0., -1.], [0.1, 0., 1.], [-0.1, 0., 1.]])
+        assert _intersects(flat, upright) and _intersects(upright, flat)
+        needle_a = np.array([[0., -0.005, 0.], [0., 0.005, 0.], [1., 0., 0.]])
+        needle_b = np.array([[0.95, -0.002, -1.], [0.95, 0.002, -1.], [0.95, 0., 1.]])
+        assert _intersects(needle_a, needle_b)
+
+    def test_random_pairs_agree_with_separating_axis_theorem(self):
+        """3000 对随机三角形（一般位置）与分离轴定理（凸体精确判据：两法向 + 9 个边叉积）逐一对照。"""
+        rng = np.random.default_rng(7)
+        a = rng.uniform(-1, 1, size=(3000, 3, 3))
+        b = rng.uniform(-1, 1, size=(3000, 3, 3)) + rng.uniform(-1, 1, size=(3000, 1, 3))
+        got = triangle_triangle_intersect(a[:, 0], a[:, 1], a[:, 2], b[:, 0], b[:, 1], b[:, 2])
+        ea = [a[:, (k + 1) % 3] - a[:, k] for k in range(3)]
+        eb = [b[:, (k + 1) % 3] - b[:, k] for k in range(3)]
+        axes = [np.cross(ea[0], ea[1]), np.cross(eb[0], eb[1])] + [np.cross(u, v) for u in ea for v in eb]
+        separated = np.zeros(3000, dtype=bool)
+        for axis in axes:
+            pa, pb = np.einsum('nij,nj->ni', a, axis), np.einsum('nij,nj->ni', b, axis)
+            separated |= (pa.max(axis=1) < pb.min(axis=1)) | (pb.max(axis=1) < pa.min(axis=1))
+        assert np.array_equal(got, ~separated)
+        assert 300 < got.sum() < 2700                      # 两类都有足够样本
+
     def test_vectorized_batch_matches_per_row_results(self):
         a_batch = np.stack([A0, SLIVER_A[0], np.array([0., 0., 0.])])
         a1_batch = np.stack([A1, SLIVER_A[1], np.array([1., 0., 0.])])
