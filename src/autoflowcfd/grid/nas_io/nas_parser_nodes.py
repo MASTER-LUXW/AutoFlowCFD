@@ -11,13 +11,8 @@ from ..structures import NodeArray
 from .nas_parser_exceptions import NASParseError
 from .nas_parser_utils import parse_nastran_float
 
-# 超过这个比例的 GRID 行被丢弃（解析错误 + 不可解析的行），就视为
-# 系统性的格式/编码不匹配而不是偶然噪声，大声报错而不是静默返回一个
-# 缺失大块真实几何但仍然报告"成功"的网格。仅在有意义的样本量
-# (MIN_LINES_FOR_DROP_CHECK) 时才强制执行——小文件里几行 GRID 有一行
-# 坏的不是系统性损坏的证据，而真实网格成千上万行里同样比例就是。
-MAX_DROP_FRACTION = 0.05
-MIN_LINES_FOR_DROP_CHECK = 20
+# 任何一行 GRID 卡无法解析都报错（NASParseError，给出数量与前若干行的行号与原文）；2026-10-19（I-131）以前最多
+# 容忍 5% 的行被丢弃。
 
 
 def _large_field_first_line(line: str, stripped: str):
@@ -74,6 +69,7 @@ def parse_nodes_from_nas(
 
     # 大字段 GRID* 的第一行：(节点 ID, X, Y)，等待 `*` 续行给出 Z
     pending_large = None
+    pending_line = (0, "")
 
     def _record_node(node_id: int, x: float, y: float, z: float) -> None:
         """存储解析的 GRID 卡片，重复 ID 时原地更新。
@@ -100,9 +96,16 @@ def parse_nodes_from_nas(
         if node_count % 10000 == 0:
             logger.debug(f"Parsed {node_count:,} nodes...")
 
+    problems = []                      # 前若干条被丢弃的行（行号, 原文），报错时给出
+
+    def _note(line_no: int, text: str) -> None:
+        if len(problems) < 10:
+            problems.append((line_no, text[:100]))
+    line_no, line_stripped = 0, ""
+
     try:
         with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line_stripped = line.strip()
 
                 if not line_stripped or line_stripped.startswith('$') or line_stripped.startswith('#'):
@@ -118,19 +121,24 @@ def parse_nodes_from_nas(
                                 _record_node(node_id, x, y, z)
                             else:
                                 skipped_lines += 1
+                                _note(line_no, line_stripped)
                         except (ValueError, IndexError) as e:
                             logger.debug(f"Invalid GRID* continuation: {line_stripped} - {e}")
                             parse_errors += 1
+                            _note(line_no, line_stripped)
                         continue
-                    logger.debug(f"GRID* {node_id} 缺少 '*' 续行（Z 坐标），丢弃")
+                    logger.debug(f"GRID* {node_id} 缺少 '*' 续行（Z 坐标）")
                     parse_errors += 1
+                    _note(*pending_line)                 # 报告 GRID* 卡自身所在的行
 
                 if line_stripped.upper().startswith('GRID*'):
                     try:
                         pending_large = _large_field_first_line(line, line_stripped)
+                        pending_line = (line_no, line_stripped)
                     except (ValueError, IndexError) as e:
                         logger.debug(f"Invalid GRID* card: {line_stripped} - {e}")
                         parse_errors += 1
+                        _note(line_no, line_stripped)
                     continue
 
                 if not line_stripped.upper().startswith('GRID'):
@@ -212,17 +220,20 @@ def parse_nodes_from_nas(
                     # 每行只计一次（此前分支内部与这里各计一次，丢弃率被高估、可能把正常文件误判为格式不符）
                     if not parsed:
                         skipped_lines += 1
+                        _note(line_no, line_stripped)
 
                 except Exception as e:
                     logger.debug(f"Error parsing GRID: {line_stripped} - {e}")
                     parse_errors += 1
+                    _note(line_no, line_stripped)
 
     except Exception as e:
         raise NASParseError(f"Failed to read nodes: {str(e)}") from e
 
     if pending_large is not None:
-        logger.debug(f"GRID* {pending_large[0]} 在文件末尾缺少 '*' 续行（Z 坐标），丢弃")
+        logger.debug(f"GRID* {pending_large[0]} 在文件末尾缺少 '*' 续行（Z 坐标）")
         parse_errors += 1
+        _note(*pending_line)
 
     if node_count == 0:
         logger.error("No valid GRID cards found")
@@ -230,23 +241,10 @@ def parse_nodes_from_nas(
 
     total_grid_lines = node_count + parse_errors + skipped_lines
     dropped = parse_errors + skipped_lines
-    drop_fraction = dropped / total_grid_lines if total_grid_lines else 0.0
-    if total_grid_lines >= MIN_LINES_FOR_DROP_CHECK and drop_fraction > MAX_DROP_FRACTION:
-        raise NASParseError(
-            f"{dropped}/{total_grid_lines} ({drop_fraction:.1%}) GRID lines could "
-            f"not be parsed - this exceeds the {MAX_DROP_FRACTION:.0%} threshold "
-            f"for incidental noise, and almost always means the file's actual "
-            f"GRID card format/encoding doesn't match what this parser expects "
-            f"(e.g. wrong column alignment for fixed-width cards, or a wrong "
-            f"--encoding). Proceeding would silently produce a mesh missing a "
-            f"large fraction of its true node count while still reporting "
-            f"'success' - check the file's actual GRID card layout and encoding."
-        )
-
-    if parse_errors > 0:
-        logger.warning(f"Encountered {parse_errors} parsing errors")
-    if skipped_lines > 0:
-        logger.info(f"Skipped {skipped_lines} GRID lines")
+    if dropped:
+        detail = "; ".join(f"第 {n} 行: {t}" for n, t in problems)
+        raise NASParseError(f"{file_path}: {dropped} 行 GRID 卡无法使用（解析错误 {parse_errors}、格式不符 "
+                            f"{skipped_lines}）：{detail}")
     if duplicate_node_ids > 0:
         logger.warning(
             f"{duplicate_node_ids} GRID cards reused an already-seen node ID; "

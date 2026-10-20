@@ -49,37 +49,28 @@ def test_comma_separated_large_field_and_mixed_small_field(tmp_path):
     np.testing.assert_allclose(got[id_map[3]], [1.0, 2.0, 3.0])
 
 
-def test_large_field_without_continuation_is_dropped_not_misread(tmp_path):
-    """GRID* 后面跟的不是 `*` 续行（或文件结束）：该节点丢弃，下一张卡照常解析。"""
+def test_large_field_without_continuation_is_reported_at_its_own_line(tmp_path):
+    """GRID* 后面跟的不是 `*` 续行（或文件结束）：报错并给出 GRID* 卡自身的行号（I-131：此前丢弃该节点继续解析）。"""
+    from autoflowcfd.grid.nas_io.nas_parser_exceptions import NASParseError
+
     path = tmp_path / "broken.nas"
     path.write_text(
         "GRID*                  1               0 1.000000000E+00 2.000000000E+00\n"
         "GRID           2       0     4.0     5.0     6.0\n"
         "GRID*                  3               0 7.000000000E+00 8.000000000E+00\n")
-    got, id_map = _parse(path)
-    assert sorted(id_map) == [2]
-    np.testing.assert_allclose(got[id_map[2]], [4.0, 5.0, 6.0])
+    with pytest.raises(NASParseError, match="第 1 行: GRID\\*.*第 3 行: GRID\\*"):
+        _parse(path)
 
 
-def test_each_unparsable_line_is_counted_once(tmp_path):
-    """丢弃率按行计：96 张好卡 + 4 张坏卡（4%）不应超过 5% 的阈值。此前坏行在分支内部与外层各计一次，
-    这个文件会被算成 8/104 而误判为格式不符。"""
+def test_any_unparsable_line_is_an_error_with_its_line_number(tmp_path):
+    """任何一行无法解析都报错并给出行号（I-131：此前最多容忍 5% 的行被丢弃，96 好 + 4 坏照样"成功"）。"""
+    from autoflowcfd.grid.nas_io.nas_parser_exceptions import NASParseError
+
     lines = [f"GRID    {i:>8}       0     1.0     2.0     3.0\n" for i in range(1, 97)]
     lines += ["GRID    xx  yy\n"] * 4
     path = tmp_path / "noisy.nas"
     path.write_text("".join(lines))
-    _got, id_map = _parse(path)
-    assert len(id_map) == 96
-
-
-def test_too_many_bad_lines_still_raises(tmp_path):
-    from autoflowcfd.grid.nas_io.nas_parser_exceptions import NASParseError
-
-    lines = [f"GRID    {i:>8}       0     1.0     2.0     3.0\n" for i in range(1, 21)]
-    lines += ["GRID    xx  yy\n"] * 5
-    path = tmp_path / "bad.nas"
-    path.write_text("".join(lines))
-    with pytest.raises(NASParseError):
+    with pytest.raises(NASParseError, match="4 行 GRID 卡无法使用.*第 97 行"):
         _parse(path)
 
 

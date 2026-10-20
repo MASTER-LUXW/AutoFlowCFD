@@ -16,15 +16,9 @@ from loguru import logger
 from ..structures import CellArray
 from .nas_parser_exceptions import NASParseError
 
-# 超过这个比例的元素 (CTRIA3/CQUAD4) 行被丢弃（解析错误、不可解析的行
-# 或悬空节点引用），就视为系统性的格式/编码不匹配——或 GRID/元素段不同步
-# ——而不是偶然噪声，大声报错而不是静默返回一个缺失大块真实几何但仍然
-# 报告成功的表面网格。仅在有意义的样本量 (MIN_LINES_FOR_DROP_CHECK) 时
-# 才强制执行——原因见 nas_parser_nodes.py 中的匹配常量。以行数为单位
-# 而不是单元数：丢弃一行 CQUAD4 损失一张卡片，而不是它会产生的两个三角形，
-# 所以基于单元数的统计会低估其权重。
-MAX_DROP_FRACTION = 0.05
-MIN_LINES_FOR_DROP_CHECK = 20
+# 任何一行元素卡（CTRIA3/CQUAD4）无法解析或引用了不存在的节点都报错（NASParseError，给出数量与前若干行的行号
+# 与原文）。2026-10-19（I-131）以前最多容忍 5% 的行被丢弃、只记 info / warning：面网格因此带洞，体网格生成或
+# 边界映射在缺面的几何上继续。
 
 
 def parse_cells_from_nas(
@@ -125,9 +119,15 @@ def parse_cells_from_nas(
         re.IGNORECASE
     )
 
+    problems = []                      # 前若干条被丢弃的行（行号, 原文），报错时给出
+
+    def _note(line_no: int, text: str) -> None:
+        if len(problems) < 10:
+            problems.append((line_no, text[:100]))
+
     try:
         with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-            for line in f:
+            for line_no, line in enumerate(f, start=1):
                 line_stripped = line.strip()
 
                 if not line_stripped or line_stripped.startswith('$') or line_stripped.startswith('#'):
@@ -150,6 +150,7 @@ def parse_cells_from_nas(
                                 quad_lines_parsed += 1
                             else:
                                 skipped_cells += 1
+                                _note(line_no, line_stripped)
                             continue
 
                         # Flexible parsing (whitespace-tokenized fallback)
@@ -161,10 +162,13 @@ def parse_cells_from_nas(
                                     quad_lines_parsed += 1
                                 else:
                                     skipped_cells += 1
+                                    _note(line_no, line_stripped)
                             except (ValueError, IndexError):
                                 parse_errors += 1
+                                _note(line_no, line_stripped)
                         else:
                             skipped_lines += 1
+                            _note(line_no, line_stripped)
                         continue
 
                     # 尝试 comma-separated 格式
@@ -185,6 +189,7 @@ def parse_cells_from_nas(
                             continue
                         else:
                             skipped_cells += 1
+                            _note(line_no, line_stripped)
                             continue
 
                     # 尝试 fixed-格式
@@ -205,6 +210,7 @@ def parse_cells_from_nas(
                             continue
                         else:
                             skipped_cells += 1
+                            _note(line_no, line_stripped)
                             continue
 
                     # Flexible parsing
@@ -226,20 +232,25 @@ def parse_cells_from_nas(
                                 continue
                             else:
                                 skipped_cells += 1
+                                _note(line_no, line_stripped)
                                 continue
                         except (ValueError, IndexError):
                             parse_errors += 1
+                            _note(line_no, line_stripped)
                             continue
                     else:
                         skipped_lines += 1
+                        _note(line_no, line_stripped)
                         continue
 
                 except ValueError as e:
                     logger.debug(f"Invalid node ID: {line_stripped} - {e}")
                     parse_errors += 1
+                    _note(line_no, line_stripped)
                 except Exception as e:
                     logger.debug(f"Error parsing element card: {line_stripped} - {e}")
                     parse_errors += 1
+                    _note(line_no, line_stripped)
 
     except Exception as e:
         raise NASParseError(f"Failed to read cells: {str(e)}") from e
@@ -252,27 +263,12 @@ def parse_cells_from_nas(
         ), np.array([], dtype=np.int32)
 
     dropped = parse_errors + skipped_lines + skipped_cells
-    drop_fraction = dropped / total_lines_seen if total_lines_seen else 0.0
-    if total_lines_seen >= MIN_LINES_FOR_DROP_CHECK and drop_fraction > MAX_DROP_FRACTION:
+    if dropped:
+        detail = "; ".join(f"第 {n} 行: {t}" for n, t in problems)
         raise NASParseError(
-            f"{dropped}/{total_lines_seen} ({drop_fraction:.1%}) CTRIA3/CQUAD4 "
-            f"lines could not be parsed or reference missing nodes - this "
-            f"exceeds the {MAX_DROP_FRACTION:.0%} threshold for incidental "
-            f"noise. A large dangling-node-reference count ({skipped_cells} "
-            f"cells skipped) usually means the GRID and element sections are "
-            f"out of sync (e.g. nodes parsed with a different ID range/format "
-            f"than the elements reference). Proceeding would silently produce "
-            f"a surface mesh missing a large fraction of its true geometry "
-            f"while still reporting 'success' - check the file's GRID/element "
-            f"card layout and encoding."
-        )
-
-    if parse_errors > 0:
-        logger.warning(f"Encountered {parse_errors} parsing errors")
-    if skipped_lines > 0:
-        logger.info(f"Skipped {skipped_lines} element lines")
-    if skipped_cells > 0:
-        logger.info(f"Skipped {skipped_cells} elements due to missing nodes")
+            f"{file_path}: {dropped}/{total_lines_seen} 行元素卡无法使用（解析错误 {parse_errors}、格式不符 "
+            f"{skipped_lines}、引用不存在的节点 {skipped_cells}）：{detail}。大量悬空节点引用通常说明 GRID 段与元素段"
+            f"不同步（节点按不同的编号范围 / 格式解析）")
     if quad_lines_parsed > 0:
         logger.info(f"Split {quad_lines_parsed} CQUAD4 quads into {quad_lines_parsed * 2} triangles")
     if duplicate_eids > 0:

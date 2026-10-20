@@ -224,11 +224,11 @@ CTRIA3,1,1,1,2,3
         nas_file = tmp_path / "malformed.nas"
         nas_file.write_text(nas_content)
         
-        parser = NASParser(str(nas_file))
-        grid = parser.parse()
-        
-        # 应解析合法的行并跳过非法的行
-        assert grid.node_count >= 2  # At least the valid nodes
+        # 无法解析的 GRID 卡报错并给出行号（I-131：此前跳过非法行继续）
+        from autoflowcfd.grid.nas_io.nas_parser_exceptions import NASParseError
+
+        with pytest.raises(NASParseError, match="第 2 行"):
+            NASParser(str(nas_file)).parse()
     
     def test_node_indexing_zero_based(self, tmp_path) -> None:
         """Nastran 从 1 开始的索引被转换成从 0 开始。"""

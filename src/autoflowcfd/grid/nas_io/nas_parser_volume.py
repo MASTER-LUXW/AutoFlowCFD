@@ -69,6 +69,29 @@ def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
 _AUTO_UNITS_MM_THRESHOLD = 50.0
 
 
+#: 退化判据（相对单元自身尺度）：|V| <= DEGENERATE_RELATIVE_VOLUME * L^3，L 为单元最长边
+DEGENERATE_RELATIVE_VOLUME = 1e-12
+
+
+def _require_valid_cells(path: str, card: str, node_xyz: np.ndarray, conn: np.ndarray, volumes: np.ndarray,
+                         node_id_rows: np.ndarray) -> None:
+    """导入的体单元必须体积为正且不退化，否则报错并给出单元（在该类卡片中的序号与节点号）。
+
+    2026-10-19（I-133）以前退化（体积 < 1e-20 m^3，绝对阈值）或重定向后仍为负的 CTETRA / CPENTA 被静默删除
+    （warning）：体网格出现空洞、面拓扑不封闭，后续在缺单元的网格上求解。判据改为相对单元最长边（量纲无关）。
+    """
+    xyz = node_xyz[conn]                                                     # (n, nv, 3)
+    nv = conn.shape[1]
+    edges = np.stack([np.linalg.norm(xyz[:, a] - xyz[:, b], axis=1)
+                      for a in range(nv) for b in range(a + 1, nv)], axis=1)
+    scale = edges.max(axis=1) ** 3
+    bad = np.flatnonzero(~(volumes > DEGENERATE_RELATIVE_VOLUME * scale))
+    if bad.size:
+        examples = "; ".join(f"第 {int(c) + 1} 张 {card}（节点 {node_id_rows[c].tolist()}）体积 {volumes[c]:.3e}"
+                             for c in bad[:5])
+        raise ValueError(f"{path}: {bad.size} 个 {card} 单元退化或重定向后体积仍为负：{examples}")
+
+
 def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
     """解析外部生成的体网格 NAS 文件 (GRID + CTETRA + CPENTA) 为
     VolumeMeshData。
@@ -146,19 +169,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
             raise ValueError(f"{path}: CTETRA references a node id not defined by any GRID card")
         tet_conn = orient_tetrahedra(node_xyz, tet_conn.copy())
         tet_vol = TetrahedralCells.compute_volumes(nodes_obj, tet_conn)
-        degenerate = np.abs(tet_vol) < 1e-20
-        if np.any(degenerate):
-            logger.warning(f"Dropping {int(degenerate.sum())} exactly-degenerate CTETRA cell(s)")
-            tet_conn = tet_conn[~degenerate]
-            tet_vol = tet_vol[~degenerate]
-        neg = tet_vol < 0
-        if np.any(neg):
-            logger.warning(
-                f"Dropping {int(neg.sum())} CTETRA cell(s) still negative-volume after "
-                f"re-orientation (likely genuinely degenerate, not just misoriented)"
-            )
-            tet_conn = tet_conn[~neg]
-            tet_vol = tet_vol[~neg]
+        _require_valid_cells(path, "CTETRA", node_xyz, tet_conn, tet_vol, np.array(tet_rows, dtype=np.int64))
     else:
         tet_vol = np.zeros(0, dtype=np.float64)
 
@@ -169,11 +180,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
         if prism_conn.min() < 0:
             raise ValueError(f"{path}: CPENTA references a node id not defined by any GRID card")
         prism_vol = compute_prism_volumes(node_xyz, prism_conn)
-        degenerate_p = prism_vol < 1e-20
-        if np.any(degenerate_p):
-            logger.warning(f"Dropping {int(degenerate_p.sum())} exactly-degenerate CPENTA cell(s)")
-            prism_conn = prism_conn[~degenerate_p]
-            prism_vol = prism_vol[~degenerate_p]
+        _require_valid_cells(path, "CPENTA", node_xyz, prism_conn, prism_vol, np.array(prism_rows, dtype=np.int64))
 
     cells_obj = TetrahedralCells(
         connectivity=tet_conn.astype(np.int32), volumes=tet_vol.astype(np.float64)

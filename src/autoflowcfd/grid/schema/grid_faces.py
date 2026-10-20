@@ -99,20 +99,13 @@ class FaceData:
         if self.center.dtype != np.float64:
             raise ValueError(f"Center must be float64, got {self.center.dtype}")
         
-        # 验证面积为正值
-        if np.any(self.area <= 0):
-            n_negative = np.sum(self.area <= 0)
-            logger.warning(
-                f"Found {n_negative} non-positive face areas. Filtering them out..."
-            )
-            # 过滤输出无效面
-            valid_mask = self.area > 0
-            self.connectivity = self.connectivity[valid_mask]
-            self.area = self.area[valid_mask]
-            self.normal = self.normal[valid_mask]
-            self.center = self.center[valid_mask]
-            if self.node_connectivity is not None:
-                self.node_connectivity = self.node_connectivity[valid_mask]
+        # 面积必须为正：退化 / 零面积面说明网格有缺陷。2026-10-19（I-129）以前这里静默删除这些面（只打 warning），
+        # 单元因此缺面、拓扑不封闭，下游面连接与边界识别在错误拓扑上继续
+        bad = np.flatnonzero(~(self.area > 0))
+        if bad.size:
+            examples = "; ".join(f"面 {int(f)} 面积 {self.area[f]:.3e} 单元 {self.connectivity[f].tolist()}"
+                                 for f in bad[:5])
+            raise ValueError(f"{bad.size} 个面的面积不为正（退化面，网格有缺陷）：{examples}")
         
         # 确保连续内存布局
         if not self.connectivity.flags['C_CONTIGUOUS']:
