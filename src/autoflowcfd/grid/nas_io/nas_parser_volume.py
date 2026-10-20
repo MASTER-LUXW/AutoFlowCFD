@@ -69,27 +69,20 @@ def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
 _AUTO_UNITS_MM_THRESHOLD = 50.0
 
 
-#: 退化判据（相对单元自身尺度）：|V| <= DEGENERATE_RELATIVE_VOLUME * L^3，L 为单元最长边
-DEGENERATE_RELATIVE_VOLUME = 1e-12
-
-
-def _require_valid_cells(path: str, card: str, node_xyz: np.ndarray, conn: np.ndarray, volumes: np.ndarray,
+def _require_valid_cells(path: str, card: str, node_xyz: np.ndarray, conn: np.ndarray,
                          node_id_rows: np.ndarray) -> None:
-    """导入的体单元必须体积为正且不退化，否则报错并给出单元（在该类卡片中的序号与节点号）。
+    """导入的体单元不得退化（棱柱还不得扭曲 / 翻折），否则报错并给出单元（在该类卡片中的序号与节点号）。
 
     2026-10-19（I-133）以前退化（体积 < 1e-20 m^3，绝对阈值）或重定向后仍为负的 CTETRA / CPENTA 被静默删除
-    （warning）：体网格出现空洞、面拓扑不封闭，后续在缺单元的网格上求解。判据改为相对单元最长边（量纲无关）。
+    （warning）：体网格出现空洞、面拓扑不封闭，后续在缺单元的网格上求解。判据见
+    `validation/cell_validity.py`（相对单元自身尺度，与生成体网格末尾的硬检查同一份）。
     """
-    xyz = node_xyz[conn]                                                     # (n, nv, 3)
-    nv = conn.shape[1]
-    edges = np.stack([np.linalg.norm(xyz[:, a] - xyz[:, b], axis=1)
-                      for a in range(nv) for b in range(a + 1, nv)], axis=1)
-    scale = edges.max(axis=1) ** 3
-    bad = np.flatnonzero(~(volumes > DEGENERATE_RELATIVE_VOLUME * scale))
+    from ..validation.cell_validity import degenerate_cells
+
+    bad = degenerate_cells(node_xyz, conn)
     if bad.size:
-        examples = "; ".join(f"第 {int(c) + 1} 张 {card}（节点 {node_id_rows[c].tolist()}）体积 {volumes[c]:.3e}"
-                             for c in bad[:5])
-        raise ValueError(f"{path}: {bad.size} 个 {card} 单元退化或重定向后体积仍为负：{examples}")
+        examples = "; ".join(f"第 {int(c) + 1} 张 {card}（节点 {node_id_rows[c].tolist()}）" for c in bad[:5])
+        raise ValueError(f"{path}: {bad.size} 个 {card} 单元退化或扭曲：{examples}")
 
 
 def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
@@ -113,12 +106,11 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
         VolumeMeshData，BoundaryMap 为空 (groups={}, bc_types={})
         ——见本模块的文档字符串了解为什么边界归因是单独一步。
         四面体被重定向到正体积，与本项目自己的生成管线相同的
-        方式；任何精确退化（近零体积）的单元被丢弃，匹配本项目
-        对自己的生成网格应用的相同清理。
+        方式。
 
     Raises:
         ValueError: 无 GRID 卡片、无 CTETRA/CPENTA 卡片（例如误传了
-            纯表面文件），或无效的 `units` 值。
+            纯表面文件）、无效的 `units` 值，或有退化 / 扭曲的单元。
     """
     from ..mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
     from ..validation.quality_metrics import compute_prism_volumes
@@ -169,7 +161,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
             raise ValueError(f"{path}: CTETRA references a node id not defined by any GRID card")
         tet_conn = orient_tetrahedra(node_xyz, tet_conn.copy())
         tet_vol = TetrahedralCells.compute_volumes(nodes_obj, tet_conn)
-        _require_valid_cells(path, "CTETRA", node_xyz, tet_conn, tet_vol, np.array(tet_rows, dtype=np.int64))
+        _require_valid_cells(path, "CTETRA", node_xyz, tet_conn, np.array(tet_rows, dtype=np.int64))
     else:
         tet_vol = np.zeros(0, dtype=np.float64)
 
@@ -180,7 +172,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
         if prism_conn.min() < 0:
             raise ValueError(f"{path}: CPENTA references a node id not defined by any GRID card")
         prism_vol = compute_prism_volumes(node_xyz, prism_conn)
-        _require_valid_cells(path, "CPENTA", node_xyz, prism_conn, prism_vol, np.array(prism_rows, dtype=np.int64))
+        _require_valid_cells(path, "CPENTA", node_xyz, prism_conn, np.array(prism_rows, dtype=np.int64))
 
     cells_obj = TetrahedralCells(
         connectivity=tet_conn.astype(np.int32), volumes=tet_vol.astype(np.float64)

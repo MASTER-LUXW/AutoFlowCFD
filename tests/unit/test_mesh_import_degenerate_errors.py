@@ -42,7 +42,7 @@ def test_degenerate_tetrahedron_is_an_error_with_its_card(tmp_path):
 
     # 第二个四面体四点共面（节点 5 在 1-2-3 平面上）
     path = _volume_file(tmp_path, "CTETRA         2       1       1       2       3       5\n")
-    with pytest.raises(ValueError, match="CTETRA.*第 2 张"):
+    with pytest.raises(ValueError, match="1 个 CTETRA 单元退化.*第 2 张 CTETRA"):
         parse_volume_mesh_nas(str(path), units="m")
 
 
@@ -52,5 +52,4 @@ def test_relative_criterion_accepts_a_tiny_but_well_shaped_cell(tmp_path):
 
     h = 1e-7
     xyz = np.array([[0, 0, 0], [h, 0, 0], [0, h, 0], [0, 0, h]], dtype=float)
-    _require_valid_cells("x", "CTETRA", xyz, np.array([[0, 1, 2, 3]]), np.array([h ** 3 / 6]),
-                         np.array([[1, 2, 3, 4]]))
+    _require_valid_cells("x", "CTETRA", xyz, np.array([[0, 1, 2, 3]]), np.array([[1, 2, 3, 4]]))

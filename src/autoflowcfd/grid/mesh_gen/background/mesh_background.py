@@ -57,7 +57,16 @@ def generate_hybrid_mesh(
     export_core_only_path: Optional[str] = None,
     first_layer_height: Optional[float] = None,
 ) -> 'VolumeMeshData':
-    """生成精确贴合封闭输入表面的体网格（`first_layer_height` 见 `extrusion/mesh_extrusion.py::extrude_layers`）。"""
+    """生成精确贴合封闭输入表面的体网格（`first_layer_height` 见 `extrusion/mesh_extrusion.py::extrude_layers`）。
+
+    输出前做硬检查，任一项不满足即报错、不输出网格：单元不退化（`validation/cell_validity.py`）、每个面最多两个
+    单元共享（流形）、面不退化、外表面恰好覆盖输入面网格（不带洞，`map_generated_boundaries`）。中间各步的修补
+    （删除退化单元、非流形面保留最大的单元、空腔重铺失败时回退删除）由这道检查兜住结果。
+
+    Raises:
+        ValueError: 输出前的硬检查未通过
+        RuntimeError: 有面被超过两个单元共享
+    """
     try:
         if surface_boundaries is None or not surface_boundaries.groups:
             raise ValueError(
@@ -219,6 +228,9 @@ def generate_hybrid_mesh(
         # 超大网格上可能在构造期间暂时产生超出 int32 范围的索引）
         # 在构建最终对象前必须转回。
         merged_cells = merged_cells.astype(np.int32)
+        # 输出前硬检查（流形、面退化、带洞由下方 map_generated_boundaries 判定）
+        from ...validation.cell_validity import require_nondegenerate_cells
+        require_nondegenerate_cells(merged_nodes, prism_cells, merged_cells)
         volumes = TetrahedralCells.compute_volumes(nodes_obj, merged_cells)
         cells_obj = TetrahedralCells(connectivity=merged_cells, volumes=volumes)
 
@@ -229,7 +241,7 @@ def generate_hybrid_mesh(
             prism_volumes = PrismCells.compute_volumes(nodes_obj, prism_cells)
             prism_cells_obj = PrismCells(connectivity=prism_cells, volumes=prism_volumes)
 
-        # 边界分组：外部面按节点坐标与输入面网格逐面对应（同时校验体网格外表面与输入表面逐面相同）
+        # 边界分组：外部面按节点坐标与输入面网格逐面对应（同时校验流形、面不退化、体网格外表面与输入表面逐面相同）
         from ..utils.mesh_boundary import map_generated_boundaries
         boundaries_obj = map_generated_boundaries(
             merged_nodes, prism_cells, merged_cells, surface_nodes, surface_faces, surface_boundaries,

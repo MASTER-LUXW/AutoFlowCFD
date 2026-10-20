@@ -200,29 +200,12 @@ def finalize_face_data(
 
 
 def validate_face_data(face_data: FaceData, n_cells: int) -> bool:
-    """校验提取的面数据的一致性。
+    """校验提取的面数据的一致性：所有单元被至少一个面引用——不满足说明存在拓扑缺陷（如非流形拼接留下的
+    "孤儿"单元），直接 raise；法向偏离单位长度只记一条 WARNING。
 
-    真实行为（V2.0 专家组盲审发现原文档字符串与实现不符：此前笼统写
-    "Raises: ValueError: 校验失败时"，读起来像是三项检查失败都会中止，
-    实际只有检查 1 是硬性门禁，checks 2/3 只记警告，见各自内联说明）。
-    checks 2/3 只记警告不是"假通过"疏漏，是有意为之——真实 cube_demo
-    网格上确实存在少量已知的退化单元/近零面积面（棱柱坍缩侧面等），
-    若这里无条件 raise 会让整条网格生成流水线在这些本可正常求解的
-    真实网格上失败。
-
-    **本段理由已更正（2026-09-19）**：原文写的是这些退化单元"被下游
-    mechanism 3 [suppress_residual_outliers] 容忍"。机制3 已整体删除
-    （真实网格消融对照证明它触发了但只把残差轨迹改变 ~1e-10 相对量、
-    不改变结局，见 `core/fr_residual/inviscid.py`），所以下游**没有**
-    任何运行期兜底了。warn-only 的理由因此收窄为纯粹的流水线可用性：
-    这些面确实能被正常求解（真实 cube_demo 网格上已验证），零面积面
-    的法向由退化处理路径给出，而硬性 raise 会让网格生成阶段就无法
-    产出可用网格。退化单元的真正对策是网格质量门（项目记忆
-    `industry_practice_degenerate_cell_gcl`）。检查项：
-    - 检查 1（硬性）：所有单元被至少一个面引用——不满足说明存在
-      拓扑缺陷（如非流形拼接留下的"孤儿"单元），直接 raise
-    - 检查 2（仅警告）：面积应为正值，零/近零面积面只记录一条 WARNING
-    - 检查 3（仅警告）：法向向量应为单位长度，偏差只记录一条 WARNING
+    面积不为正的面在构造 FaceData 时已报错；面相对退化（A <= c L^2）由生成输出前的硬检查
+    （`mesh_boundary.map_generated_boundaries`）判定。这里会被生成 / 修复的中间步骤反复调用，不重复做面积判定
+    （2026-10-20 以前这里按绝对阈值 1e-12 m^2 统计近零面积面、只记 warning 后照样导出）。
 
     Args:
         face_data: 提取的面数据
@@ -235,25 +218,16 @@ def validate_face_data(face_data: FaceData, n_cells: int) -> bool:
         ValueError: 检查 1（单元引用完整性）失败时
     """
     # 检查 1: 所有单元都应被引用
-    referenced_cells = set()
-    for i in range(face_data.count):
-        referenced_cells.add(int(face_data.connectivity[i, 0]))
-        if face_data.connectivity[i, 1] >= 0:
-            referenced_cells.add(int(face_data.connectivity[i, 1]))
+    conn = face_data.connectivity
+    n_referenced = np.unique(conn[conn >= 0]).size
 
-    if len(referenced_cells) != n_cells:
+    if n_referenced != n_cells:
         raise ValueError(
-            f"Face connectivity references {len(referenced_cells)} cells, "
+            f"Face connectivity references {n_referenced} cells, "
             f"expected {n_cells}"
         )
 
-    # 检查 2: 面积应为正值（仅警告，见上方函数文档：真实网格上存在
-    # 已知、被下游容忍的退化面，这里不应中止整条生成流水线）
-    n_zero_areas = np.sum(face_data.area < 1e-12)
-    if n_zero_areas > 0:
-        logger.warning(f"Found {n_zero_areas} faces with zero/near-zero area. Allowing export for debugging.")
-
-    # 检查 3: 法向向量应为单位长度（仅警告，同上）
+    # 检查 2: 法向向量应为单位长度（仅警告）
     normal_magnitudes = np.linalg.norm(face_data.normal, axis=1)
     n_invalid_normals = np.sum(np.abs(normal_magnitudes - 1.0) > 1e-6)
     if n_invalid_normals > 0:

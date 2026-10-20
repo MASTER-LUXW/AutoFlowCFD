@@ -85,7 +85,7 @@ def load_convertible_mesh(path: str, units: str = "mm") -> ConvertibleMesh:
     """读 .nas 网格。
 
     - 含 CTETRA/CPENTA：体网格（`load_volume_mesh_nas`）。带 CTRIA3 边界面时外部面按这些三角形逐面定组
-      （几何包含判据），定不了组的外部面归 'UNCLASSIFIED'；没有 CTRIA3 时全部外部面归 'exterior'。
+      （`exterior_faces_by_group`，定不了组即报错）；没有 CTRIA3 时全部外部面归 'exterior'。
     - 否则：面网格（`NASParser`），三角形按 PSHELL 分组，不属于任何组的归 'ungrouped'。
 
     Args:
