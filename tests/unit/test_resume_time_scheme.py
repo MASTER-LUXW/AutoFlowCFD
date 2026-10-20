@@ -22,8 +22,13 @@ def test_recorded_scheme_is_used():
     assert resolve_resume_time_scheme(None, {"time_scheme": "ssp_rk3"}) is S.SSP_RK3
 
 
-def test_old_checkpoint_without_record_is_rk3():
-    assert resolve_resume_time_scheme(None, {}) is S.SSP_RK3
+def test_checkpoint_without_record_is_an_error():
+    """缺时间格式记录不再猜 ssp_rk3（I-173：重建所需的元数据缺失一律报错）。"""
+    import click
+    import pytest
+
+    with pytest.raises(click.ClickException, match="time_scheme"):
+        resolve_resume_time_scheme(None, {})
 
 
 def test_override_wins():

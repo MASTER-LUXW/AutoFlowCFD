@@ -7,6 +7,8 @@
 
 
 import click
+from typing import Tuple
+
 import numpy as np
 
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
@@ -22,7 +24,7 @@ def restore_state_from_checkpoint(
     checkpoint_path: str,
     solver,
     metadata: dict,
-) -> int:
+) -> Tuple[int, int]:
     """从 checkpoint 恢复求解器状态，用于 `solve transient --init-from` 以稳态结果
     为初场启动瞬态仿真（典型工作流：先跑稳态 SST 收敛到平衡态，再用 DDES/LES
     从该流场启动瞬态计算——避免从均匀流场直接启动 DES 需要极长的瞬态发展时间）。
@@ -93,8 +95,9 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
     """由 checkpoint 字段恢复湍流模型的输运场与涡粘（`solve resume` 与 `--init-from` 共用）。
 
     字段名取模型声明的 `TRANSPORTED_FIELDS`（`write_checkpoint` 按同一组名字写）。checkpoint 是
-    另一个湍流模型写的（例如稳态 SST -> 瞬态 SA）或旧版本没有这些字段时，保留构造时的来流初值
-    并提示。
+    另一个湍流模型写的（例如稳态 SST -> 瞬态 SA）或旧版本没有这些字段（或缺 nu_t）时，保留构造时的来流初值
+    并提示，同时把缺少的字段记在 `solver._missing_turbulence_fields`：`--init-from` 起步时这是合法的；续算时
+    `check_resumed_turbulence` 据此拒绝，除非显式 `--reset-turbulence`（此前只打印警告就从来流初值继续算）。
 
     Returns:
         是否恢复了输运场
@@ -108,10 +111,13 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
     names = getattr(turb_model, "TRANSPORTED_FIELDS", ())
     if turb_model is None or not names:
         return False
-    if not all(name in fields for name in names):
-        # 涡粘也不恢复：它是另一个模型（或层流）的量，与留在来流初值的输运场不一致
-        print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(names)}（旧版本 checkpoint、层流或另一个湍流模型）："
-              "湍流场从来流初值重新开始，与已恢复的平均流场不连续，收敛可能需要重新爬升。")
+    needed = tuple(names) + (("nu_t",) if hasattr(turb_model, "nu_t") else ())
+    missing = tuple(name for name in needed if name not in fields)
+    solver._missing_turbulence_fields = missing
+    if any(name in missing for name in names):
+        # 输运场不全：涡粘也不恢复（它是另一个模型或层流的量，与留在来流初值的输运场不一致）
+        print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(missing)}（层流、另一个湍流模型或旧版本）："
+              "湍流场保持来流初值，与已恢复的平均流场不连续。")
         return False
     for name, current in zip(names, turb_model.transported_fields()):
         if fields[name].shape != current.shape:
@@ -123,10 +129,8 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
     # 产生项渐变按 checkpoint 记录的进度续接（与分布式恢复端共用）
     restore_production_ramp(solver, turb_model, metadata)
 
-    # nu_t 恢复（配套 write_checkpoint 的 nu_t 持久化）：
-    # checkpoint 里有就精确恢复，没有时保留 FRSolver 构造时的零值。
-    # nu_t 直接影响粘性残差（mu_eff = mu + nu_t），缺失会导致
-    # resume 后第一步粘性应力突变、残差跳升。
+    # nu_t（直接影响粘性残差 mu_eff = mu + nu_t）：有就精确恢复；没有时（旧版本）保持构造时的值，模型在随后的
+    # 残差求值里由输运场重新算出——续算时这同样记作缺失（见上方），需要 --reset-turbulence
     if hasattr(turb_model, "nu_t"):
         if "nu_t" in fields:
             nu_t_restored = fields["nu_t"]
@@ -136,9 +140,8 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
                     f"nu_t 形状 {turb_model.nu_t.shape} 不匹配，拒绝恢复。"
                 )
             turb_model.nu_t = nu_t_restored
-        elif turb_model.nu_t is not None:
-            print("   ⚠️  Checkpoint 缺少 nu_t（旧版本 checkpoint）："
-                  "涡粘度从零重新开始，粘性残差可能短暂跳升。")
+        else:
+            print("   ⚠️  Checkpoint 缺少 nu_t（旧版本）：涡粘保持初值，第一步粘性应力可能突变。")
     return True
 
 

@@ -90,11 +90,11 @@ def rebuild_distributed_solver_from_checkpoint(
             f"distributed_save_checkpoint 写出的 checkpoint，无法精确重建。"
         )
 
-    input_file = metadata.get("input_file")
-    if not input_file:
-        raise click.ClickException("Checkpoint metadata 缺少 'input_file'，无法重新加载网格。")
+    from autoflowcfd.cli.solve.checkpoint_io.rebuild import REBUILD_KEYS, required_metadata
 
-    order = int(metadata.get("order", 2))
+    required_metadata(metadata, REBUILD_KEYS)
+    input_file = metadata["input_file"]
+    order = int(metadata["order"])
     # target_order（Order Continuation 的最终目标阶数，solver.order）与
     # order（checkpoint 保存那一刻的 solver.current_order，决定重建
     # mesh/求解器初始状态要用哪个 n_sps 才能跟保存的 U_sps 形状对上）
@@ -105,7 +105,7 @@ def rebuild_distributed_solver_from_checkpoint(
     # 字段，那种情况下当时 order 记的就是静态目标阶数，二者天然相等，
     # 回退安全）。
     target_order = int(metadata.get("target_order", order))
-    turbulence_model = metadata.get("turbulence_model", "sst")
+    turbulence_model = metadata["turbulence_model"]
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
     # 决定物理解的参数：与单机重建共用同一个读取函数（来流缺失即报错，不猜）。
     # 攻角/侧滑角此前在这里四条构造路径上**全部**没有恢复，续算静默变成零攻角。

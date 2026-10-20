@@ -12,42 +12,46 @@ import click
 from .restore import restore_solver_state_from_fields
 
 
-def physics_from_metadata(metadata: dict) -> dict:
-    """checkpoint 元数据里决定物理解的参数（单机与分布式 resume 共用的读取端；
-    写入端是 `core/utils/checkpoint_physics.py::physics_metadata`）。
+def required_metadata(metadata: dict, keys) -> None:
+    """续算重建需要的 checkpoint 元数据必须齐全，缺任何一个就报错，不猜（单机与分布式重建共用）。
 
-    * 来流三要素 `rho_inf/vel_inf/p_inf`：**缺任何一个就报错，不猜**
-      （2026-09-24）。此前两条重建路径都写 `metadata.get("vel_inf", 33.33)`
-      —— 那是与 CLI 默认值并存的第二份事实来源，按它重建出来的是**另一个
-      物理算例**，续算会在错误的来流上静默跑到底。
-    * 攻角/侧滑角、分子粘度、Tu/VR、人工粘性开关：早于各自持久化日期
-      （2026-09-17 / 08-27 / 08-25 / 10-01）的单机 checkpoint 没有这些键，它们产生时的真实值就是
-      那时的内置值，所以缺省按那时的值恢复。分布式 checkpoint 在
-      2026-09-25 之前连来流三要素都没写，因此一律在上一条就报错。
+    决定物理算例的量（来流、攻角 / 侧滑角、分子粘度即雷诺数、Tu / VR、人工粘性、近壁处理）与重建所需的量
+    （阶数、湍流模型、时间格式、低马赫预处理）全部由写出端无条件写入（`core/utils/checkpoint_physics.py`、
+    `checkpoint_io/write.py`、`core/mpi/distributed_checkpoint/save.py`）。2026-10-20 以前来流三要素之外的这些量
+    缺失时静默取 1.8e-5 / 0.01 / 5.0 / 关闭 / 1.0 / resolved / sst / 2 / ssp_rk3 / 开启——按自定义粘度跑的验证算例
+    （Blasius / Couette 按目标雷诺数设 mu）续算时雷诺数会被静默换掉。缺字段的 checkpoint 只能来自更早的格式，
+    请从头求解。
     """
-    missing = [k for k in ("rho_inf", "vel_inf", "p_inf") if k not in metadata]
+    missing = [k for k in keys if k not in metadata]
     if missing:
         raise click.ClickException(
-            "checkpoint 元数据缺少来流参数 " + ", ".join(missing)
-            + " —— 无法忠实重建求解器（按默认值猜会得到另一个物理算例，"
-            "续算将在错误的来流上静默进行）。单机 checkpoint 缺它们说明来自"
-            "早于 V2.0 的格式；分布式 checkpoint 在 2026-09-25 之前从未写入"
-            "这组参数。请从头求解。")
+            "checkpoint 元数据缺少 " + ", ".join(missing) + " —— 无法忠实重建求解器（按默认值猜会得到另一个算例，"
+            "续算将静默进行）。缺这些字段的 checkpoint 来自更早的格式，请从头求解。")
+
+
+#: 决定物理算例的元数据（`physics_from_metadata` 读取）
+PHYSICS_KEYS = ("rho_inf", "vel_inf", "p_inf", "aoa_deg", "aos_deg", "mu_molecular", "turbulence_intensity",
+                "viscosity_ratio", "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment")
+#: 重建求解器所需的其余元数据（单机与分布式重建都要）
+REBUILD_KEYS = ("input_file", "order", "turbulence_model")
+
+
+def physics_from_metadata(metadata: dict) -> dict:
+    """checkpoint 元数据里决定物理解的参数（单机与分布式 resume 共用的读取端；写入端是
+    `core/utils/checkpoint_physics.py::physics_metadata`）。缺任何一个即报错（`required_metadata`）。"""
+    required_metadata(metadata, PHYSICS_KEYS)
     return {
         "rho_inf": float(metadata["rho_inf"]),
         "vel_inf": float(metadata["vel_inf"]),
         "p_inf": float(metadata["p_inf"]),
-        "aoa_deg": float(metadata.get("aoa_deg", 0.0)),
-        "aos_deg": float(metadata.get("aos_deg", 0.0)),
-        "mu_molecular": float(metadata.get("mu_molecular", 1.8e-5)),
-        "turbulence_intensity": float(metadata.get("turbulence_intensity", 0.01)),
-        "viscosity_ratio": float(metadata.get("viscosity_ratio", 5.0)),
-        # 早于 2026-10-01 的 checkpoint 没有这两个键：那时人工粘性只能在单机
-        # CPU 以 CLI 开关启用、且不持久化，缺省按关闭恢复（与绝大多数运行一致）。
-        "artificial_viscosity_enabled": bool(metadata.get("artificial_viscosity_enabled", False)),
-        "artificial_viscosity_alpha": float(metadata.get("artificial_viscosity_alpha", 1.0)),
-        # 旧 checkpoint 没有这一项：它们都是 resolved（auto 是 2026-10-18 新增的）
-        "wall_treatment": str(metadata.get("wall_treatment", "resolved")),
+        "aoa_deg": float(metadata["aoa_deg"]),
+        "aos_deg": float(metadata["aos_deg"]),
+        "mu_molecular": float(metadata["mu_molecular"]),
+        "turbulence_intensity": float(metadata["turbulence_intensity"]),
+        "viscosity_ratio": float(metadata["viscosity_ratio"]),
+        "artificial_viscosity_enabled": bool(metadata["artificial_viscosity_enabled"]),
+        "artificial_viscosity_alpha": float(metadata["artificial_viscosity_alpha"]),
+        "wall_treatment": str(metadata["wall_treatment"]),
     }
 
 
@@ -60,14 +64,13 @@ def _resume_override_schemes():
 
 
 def resolve_resume_time_scheme(requested, metadata):
-    """续算用的时间格式：显式覆盖 > checkpoint 记录 > `ssp_rk3`。
+    """续算用的时间格式：显式覆盖 > checkpoint 记录（缺失即报错，`required_metadata`）。
 
     checkpoint 记录什么格式就续算什么格式——瞬态（dual_time）运行的 checkpoint 续算仍是 dual_time：
     物理时间步长、上一时间层、内迭代次数上限都随 checkpoint 恢复（`core/utils/checkpoint_time.py`）。
     2026-10-11 以前记录的是非稳态格式时退回 `ssp_rk3` 并打一条 WARNING："续算"一个瞬态算例实际跑的
     是显式稳态推进（cube_demo DDES/SA 的续算日志里 `Time Scheme: ssp_rk3`、CFL 0.03、没有内迭代），
-    瞬态计算一旦中断就无法接着算。早于 2026-09-25 的 checkpoint 没有这个键，它们产生时只有
-    `ssp_rk3` 一种稳态格式，取它是精确的而不是猜测。
+    瞬态计算一旦中断就无法接着算。
     """
     from autoflowcfd.core.time_integration.base import scheme_from_name
 
@@ -79,18 +82,17 @@ def resolve_resume_time_scheme(requested, metadata):
                 f"瞬态续算不传它，沿用 checkpoint 记录的格式",
                 param_hint="--time-scheme")
         return scheme
-    return scheme_from_name(metadata.get("time_scheme", "ssp_rk3"))
+    required_metadata(metadata, ("time_scheme",))
+    return scheme_from_name(metadata["time_scheme"])
 
 
 def resolve_resume_low_mach_precond(requested, metadata) -> bool:
-    """续算的低马赫预处理请求值：显式覆盖（`--low-mach-precond/--no-low-mach-precond`）> checkpoint 记录 > 开启。
-
-    早于 2026-10-18 的 checkpoint 没有这个键：那时构造参数默认开启、只能经环境变量关闭，取开启与它们
-    绝大多数的真实设置一致。
-    """
+    """续算的低马赫预处理请求值：显式覆盖（`--low-mach-precond/--no-low-mach-precond`）> checkpoint 记录（缺失即
+    报错——时间精确运行必须关闭它，按"多数情况开启"去猜会改变瞬态解）。"""
     if requested is not None:
         return bool(requested)
-    return bool(metadata.get("low_mach_precond", True))
+    required_metadata(metadata, ("low_mach_precond",))
+    return bool(metadata["low_mach_precond"])
 
 
 def rebuild_from_checkpoint(
@@ -181,11 +183,9 @@ def rebuild_from_checkpoint(
             f"求解器状态）——不是本版本 write_checkpoint 写出的 checkpoint，无法精确重建。"
         )
 
-    input_file = metadata.get("input_file")
-    if not input_file:
-        raise click.ClickException("Checkpoint metadata 缺少 'input_file'，无法重新加载网格。")
-
-    order = int(metadata.get("order", 2))
+    required_metadata(metadata, REBUILD_KEYS)
+    input_file = metadata["input_file"]
+    order = int(metadata["order"])
     # target_order（Order Continuation 的最终目标阶数，solver.order）与
     # order（checkpoint 保存那一刻的 solver.current_order，决定重建
     # mesh/FRSolver 初始状态要用哪个 n_sps 才能跟保存的 U_sps 形状对上）
@@ -195,7 +195,7 @@ def rebuild_from_checkpoint(
     # （没有 target_order 字段，那种情况下当时 order 记的就是静态目标
     # 阶数，二者天然相等，回退安全）。
     target_order = int(metadata.get("target_order", order))
-    turbulence_model = metadata.get("turbulence_model", "sst")
+    turbulence_model = metadata["turbulence_model"]
     target_backend = backend or metadata.get("backend", "cpu")
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
 

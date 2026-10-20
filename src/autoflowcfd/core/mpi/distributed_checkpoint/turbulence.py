@@ -74,12 +74,12 @@ def gather_turbulence_fields(solver, n_global: int, W_local):
 
 
 def checkpoint_turbulence_names(solver, available) -> tuple:
-    """要从 checkpoint 恢复的湍流字段名：模型的输运场（全部都在 `available` 里才恢复）加上有就恢复的 `nu_t`；
-    不是输运模型，或 checkpoint 缺输运场（层流、另一个湍流模型或旧版本）时为空。"""
+    """要从 checkpoint 分发的湍流字段名：模型的输运场与 `nu_t` 中 checkpoint 里有的（缺哪些由
+    `restore_turbulence_fields` 判定并记录）；不是输运模型时为空。"""
     model, _ = transported_model(solver)
-    if model is None or not all(name in available for name in model.TRANSPORTED_FIELDS):
+    if model is None:
         return ()
-    return tuple(model.TRANSPORTED_FIELDS) + (("nu_t",) if "nu_t" in available else ())
+    return tuple(name for name in (*model.TRANSPORTED_FIELDS, "nu_t") if name in available)
 
 
 def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, source: str) -> bool:
@@ -93,10 +93,14 @@ def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, sou
     if model is None:
         return False
     names = model.TRANSPORTED_FIELDS
-    if not all(name in local_fields for name in names):
+    # 与单机恢复端同一约定（`checkpoint_io/restore.py::restore_turbulence_from_fields`）：缺少的字段记在
+    # `solver._missing_turbulence_fields`，续算时由 `check_resumed_turbulence` 拒绝（除非 --reset-turbulence）
+    missing = tuple(name for name in (*names, "nu_t") if name not in local_fields)
+    solver._missing_turbulence_fields = missing
+    if any(name in missing for name in names):
         if is_root():
-            print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(names)}（层流、另一个湍流模型或旧版本）："
-                  "湍流场从来流初值开始。")
+            print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(missing)}（层流、另一个湍流模型或旧版本）："
+                  "湍流场保持来流初值，与已恢复的平均流场不连续。")
         return False
     expect = (int(solver.partition.n_local_cells), int(solver.state.n_sps))
     local = []
@@ -113,5 +117,7 @@ def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, sou
     model.restore_transported(local[:len(names)], source=source)
     if len(local) > len(names):
         model.nu_t = local[len(names)]
+    elif is_root():
+        print("   ⚠️  Checkpoint 缺少 nu_t（旧版本）：涡粘保持初值，第一步粘性应力可能突变。")
     restore_production_ramp(solver, model, metadata)
     return True
