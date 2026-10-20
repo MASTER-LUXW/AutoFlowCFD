@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 from ..tetgen.mesh_prism_to_tet import orient_tetrahedra
 from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
 from .mesh_background_merge import _build_merged_mesh
+from .mesh_background_merge_utils import PartialMeshExported
 from .mesh_background_repair import repair_nonmanifold_tets_with_escalation
 
 # 导入重构后的修复阶段
@@ -46,8 +47,8 @@ def generate_hybrid_mesh(
     surface_nodes: np.ndarray,
     surface_faces: np.ndarray,
     bounding_box: Dict[str, np.ndarray],
-    growth_rate: float = 1.2,
-    min_cell_size: float = 0.001,
+    growth_rate: float,
+    min_cell_size: float,
     surface_boundaries: Optional['BoundaryMap'] = None,
     max_cell_size: Optional[float] = None,
     bl_layers: Optional[int] = None,
@@ -63,9 +64,12 @@ def generate_hybrid_mesh(
     单元共享（流形）、面不退化、外表面恰好覆盖输入面网格（不带洞，`map_generated_boundaries`）。中间各步的修补
     （删除退化单元、非流形面保留最大的单元、空腔重铺失败时回退删除）由这道检查兜住结果。
 
+    参数默认值只在 `VolumeMeshGenerator` 一处（本函数与下游都要求显式给出）。
+
     Raises:
         ValueError: 输出前的硬检查未通过
         RuntimeError: 有面被超过两个单元共享
+        PartialMeshExported: `export_bl_only` / `export_core_only` 时调试导出完成（不是错误）
     """
     try:
         if surface_boundaries is None or not surface_boundaries.groups:
@@ -86,16 +90,8 @@ def generate_hybrid_mesh(
             export_core_only_path=export_core_only_path,
             first_layer_height=first_layer_height,
         )
-
-        # 已核实（第四次评审）：export_bl_only/export_core_only=True 时，
-        # _build_merged_mesh 内部路径（_export_partial_mesh_and_exit）本身总会以 sys.exit(0)/exit(1)
-        # 终止进程，正常情况下永远不会执行到这一行——这里是防御性兜底
-        # （防止未来有人给 _build_merged_mesh_no_bl 加了新分支、忘记
-        # 同步调用导出函数），不是当前实际会走到的路径。
         if export_bl_only or export_core_only:
-            logger.success("Partial-pipeline export completed. Exiting.")
-            import sys
-            sys.exit(0)
+            raise RuntimeError("调试导出路径没有导出局部网格就返回了（_build_merged_mesh 的分支漏调 _export_partial_mesh）")
 
         from ...structures import NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData
 
@@ -265,6 +261,8 @@ def generate_hybrid_mesh(
             prism_cells=prism_cells_obj,
             surface_mesh={'nodes': surface_nodes, 'faces': surface_faces, 'boundaries': surface_boundaries},
         )
+    except PartialMeshExported:
+        raise
     except Exception as e:
         logger.error(f"Error in generate_hybrid_mesh: {e}")
         traceback.print_exc()

@@ -15,7 +15,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from ...schema.grid_boundaries import BoundaryMap
 
-from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_partial_mesh_and_exit
+from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_partial_mesh
 from ..tetgen.mesh_tetgen_core import (
     fill_core_volume, generate_core_background_points,
     fill_without_oversized_tetrahedra,
@@ -91,7 +91,7 @@ def _build_merged_mesh_no_bl(
     if export_core_only:
         if not export_core_only_path:
             raise ValueError("export_core_only=True requires export_core_only_path to be set")
-        _export_partial_mesh_and_exit(
+        _export_partial_mesh(
             merged_nodes, prism_cells, tet_cells,
             export_core_only_path, "core-only (no BL region - this is the whole mesh)",
             surface_nodes, surface_faces, surface_boundaries,

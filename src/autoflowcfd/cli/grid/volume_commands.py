@@ -18,6 +18,7 @@ import click
 import json
 from pathlib import Path
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
+from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import DEFAULT_GROWTH_RATE, DEFAULT_MIN_CELL_SIZE
 from typing import Optional
 from loguru import logger
 
@@ -47,8 +48,8 @@ def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, 
 @click.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--output", "-o", required=True, help="输出体网格 .nas 文件路径")
-@click.option("--growth-rate", default=1.2, show_default=True, help="边界层增长率")
-@click.option("--min-cell-size", default=0.001, show_default=True, help="最小单元尺寸 (m)")
+@click.option("--growth-rate", default=DEFAULT_GROWTH_RATE, show_default=True, help="边界层增长率")
+@click.option("--min-cell-size", default=DEFAULT_MIN_CELL_SIZE, show_default=True, help="最小单元尺寸 (m)")
 @click.option("--max-cell-size", default=None, type=float, help="最大单元尺寸 (m)")
 @click.option("--bl-layers", default=None, type=int, help="边界层层数")
 @click.option("--skip-quality-report", is_flag=True, help="跳过质量报告计算")
@@ -119,6 +120,7 @@ def generate_volume(
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
     )
+    from autoflowcfd.grid.mesh_gen.background.mesh_background_merge_utils import PartialMeshExported
 
     if bl_only and core_only:
         raise click.ClickException(
@@ -232,6 +234,12 @@ def generate_volume(
             click.echo(f"\n✓ Exported to: {output_path}")
             click.echo(f"✓ Cache saved to: {pkl_output}")
 
+    except PartialMeshExported as done:
+        if json_output:
+            click.echo(json.dumps({"command": "grid.generate-volume", "status": "partial",
+                                   "stage": done.label, "output_file": done.path}, indent=2))
+        else:
+            click.echo(f"\n✓ {done.label} mesh exported to: {done.path}")
     except Exception as e:
         logger.error(f"Volume mesh generation failed: {e}")
         if json_output:

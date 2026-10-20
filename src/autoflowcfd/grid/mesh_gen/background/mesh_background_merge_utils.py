@@ -2,12 +2,10 @@
 
 从 mesh_background_merge.py 拆分出来：`_refine_large_boundary_faces`
 （tetgen 之前按最大边长迭代二分边界面的过大三角形，避免生成过大的边界四面体）和
-`_export_partial_mesh_and_exit`（`--bl-only`/`--core-only` 等调试导出
-路径共用的导出后直接退出进程的辅助函数）。两者都只被 _build_merged_mesh
-自己调用，没有独立复用需求，纯粹为了控制文件行数而拆开。
+`_export_partial_mesh`（`--bl-only`/`--core-only` 调试导出路径共用：导出后抛 `PartialMeshExported` 结束生成）。
+两者都只被 _build_merged_mesh 自己调用，没有独立复用需求，纯粹为了控制文件行数而拆开。
 """
 
-import sys
 from typing import Tuple
 
 import numpy as np
@@ -88,7 +86,24 @@ def _refine_large_boundary_faces(
     return verts, cur.astype(np.int32)
 
 
-def _export_partial_mesh_and_exit(
+class PartialMeshExported(Exception):
+    """调试导出（`--bl-only` / `--core-only`）已写出局部网格、生成管线在此结束——不是错误。
+
+    2026-10-20 以前导出后库函数直接 `sys.exit(0)`（导出失败 `sys.exit(1)`）：作为 API 调用时连调用方进程一起
+    结束、绕过上层清理。现在由调用方（CLI）决定如何收尾；导出本身失败时原异常照常向上抛。
+
+    Attributes:
+        path: 写出的 .nas 文件
+        label: 导出的是管线的哪一段
+    """
+
+    def __init__(self, path: str, label: str):
+        super().__init__(f"{label} mesh exported to {path}")
+        self.path = path
+        self.label = label
+
+
+def _export_partial_mesh(
     nodes: np.ndarray,
     prism_cells: np.ndarray,
     tet_cells: np.ndarray,
@@ -98,10 +113,10 @@ def _export_partial_mesh_and_exit(
     surface_faces: np.ndarray,
     surface_boundaries,
 ) -> None:
-    """导出局部（仅 BL / 仅过渡层 / 仅核心）调试网格并退出进程。
+    """导出局部（仅 BL / 仅核心）调试网格，然后抛 `PartialMeshExported` 结束生成。
 
     所有 `--*-only` CLI 标志的早期停止路径共用此函数
-    （参见 cli/grid/commands.py 的 `--bl-only`/`--trans-only`/`--core-only`）。
+    （参见 cli/grid/volume_commands.py 的 `--bl-only`/`--core-only`）。
     这些标志用于在网格查看器（ANSA 等）中直接检查管线各阶段的生成结果——
     在调查 BL/过渡层到核心填充界面问题时反复需要此功能，但此前没有可复用的方式，
     每次都要写临时脚本。
@@ -116,49 +131,49 @@ def _export_partial_mesh_and_exit(
         output_path: .nas 文件输出路径
         label: 当前阶段的易读名称，仅用于日志
         surface_nodes, surface_faces, surface_boundaries: 输入面网格（米制）及其边界分组
+
+    Raises:
+        PartialMeshExported: 导出成功（总是抛出）
     """
     from ...nas_io.nas_export import export_volume_mesh_to_nas
     from ...structures import NodeArray, PrismCells, TetrahedralCells, GridMetadata, VolumeMeshData
 
+    from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
+
     logger.success(f"Exporting {label} mesh to: {output_path}")
-    try:
-        nodes_obj = NodeArray.from_array(nodes)
+    # 与完整管线（generate_hybrid_mesh 的重合点合并）同样先合并几何重合点：BL 挤出停长的柱子上下层节点
+    # 坐标相同、编号不同，不合并时它们张成的侧面三角形面积恰为零（cube_demo --bl-only 实测 5025 个）
+    nodes, tet_cells, remap = _dedupe_coincident_points(nodes, tet_cells)
+    prism_cells = remap[prism_cells]
+    nodes_obj = NodeArray.from_array(nodes)
 
-        n_prism = len(prism_cells)
-        prism_cells_obj = None
-        if n_prism:
-            prism_volumes = PrismCells.compute_volumes(nodes_obj, prism_cells.astype(np.int32))
-            prism_cells_obj = PrismCells(connectivity=prism_cells.astype(np.int32), volumes=prism_volumes)
+    n_prism = len(prism_cells)
+    prism_cells_obj = None
+    if n_prism:
+        prism_volumes = PrismCells.compute_volumes(nodes_obj, prism_cells.astype(np.int32))
+        prism_cells_obj = PrismCells(connectivity=prism_cells.astype(np.int32), volumes=prism_volumes)
 
-        tet_cells32 = tet_cells.astype(np.int32)
-        tet_volumes = (
-            TetrahedralCells.compute_volumes(nodes_obj, tet_cells32)
-            if len(tet_cells32) else np.empty(0, dtype=np.float64)
-        )
-        cells_obj = TetrahedralCells(connectivity=tet_cells32, volumes=tet_volumes)
+    tet_cells32 = tet_cells.astype(np.int32)
+    tet_volumes = (
+        TetrahedralCells.compute_volumes(nodes_obj, tet_cells32)
+        if len(tet_cells32) else np.empty(0, dtype=np.float64)
+    )
+    cells_obj = TetrahedralCells(connectivity=tet_cells32, volumes=tet_volumes)
 
-        from ..utils.mesh_boundary import label_partial_mesh_boundaries
-        boundaries_obj = label_partial_mesh_boundaries(
-            nodes, prism_cells, tet_cells, surface_nodes, surface_faces, surface_boundaries)
-        groups = boundaries_obj.groups
-        metadata = GridMetadata(
-            node_count=len(nodes), cell_count=n_prism + len(tet_cells32),
-            boundary_groups=list(groups.keys()), file_format="partial",
-        )
-        vol_mesh = VolumeMeshData(
-            nodes=nodes_obj, cells=cells_obj, boundaries=boundaries_obj,
-            metadata=metadata, prism_cells=prism_cells_obj,
-            surface_mesh={'nodes': surface_nodes, 'faces': surface_faces, 'boundaries': surface_boundaries},
-        )
-        # export_volume_mesh_to_nas 期望输入为米，内部会转换为毫米
-        export_volume_mesh_to_nas(vol_mesh, output_path, scale_factor=1000.0)
-        logger.success(f"{label} mesh exported successfully.")
-    except Exception as e:
-        logger.error(f"Failed to export {label} mesh: {e}")
-        import traceback
-        traceback.print_exc()
-        # 导出失败必须以非零退出码报告——此前这里无条件 sys.exit(0)，
-        # 靠退出码判断成败的调用方会把失败误判为成功（第四次评审发现1）。
-        sys.exit(1)
-
-    sys.exit(0)
+    from ..utils.mesh_boundary import label_partial_mesh_boundaries
+    boundaries_obj = label_partial_mesh_boundaries(
+        nodes, prism_cells, tet_cells, surface_nodes, surface_faces, surface_boundaries)
+    groups = boundaries_obj.groups
+    metadata = GridMetadata(
+        node_count=len(nodes), cell_count=n_prism + len(tet_cells32),
+        boundary_groups=list(groups.keys()), file_format="partial",
+    )
+    vol_mesh = VolumeMeshData(
+        nodes=nodes_obj, cells=cells_obj, boundaries=boundaries_obj,
+        metadata=metadata, prism_cells=prism_cells_obj,
+        surface_mesh={'nodes': surface_nodes, 'faces': surface_faces, 'boundaries': surface_boundaries},
+    )
+    # export_volume_mesh_to_nas 期望输入为米，内部会转换为毫米
+    export_volume_mesh_to_nas(vol_mesh, output_path, scale_factor=1000.0)
+    logger.success(f"{label} mesh exported successfully.")
+    raise PartialMeshExported(output_path, label)

@@ -17,6 +17,10 @@ if TYPE_CHECKING:
     from ...schema.grid_data import VolumeMeshData
 from ..utils.mesh_utils import validate_surface_mesh, validate_bounding_box
 
+#: 生成参数的默认值（唯一来源：CLI `grid generate-volume` 的默认值取这里，下游函数要求显式给出）
+DEFAULT_GROWTH_RATE = 1.2
+DEFAULT_MIN_CELL_SIZE = 0.001
+
 
 class VolumeMeshGenerator:
     """从表面几何生成 3D 体积网格。
@@ -31,8 +35,8 @@ class VolumeMeshGenerator:
 
     def __init__(
         self,
-        growth_rate: float = 1.2,
-        min_cell_size: float = 0.001,
+        growth_rate: float = DEFAULT_GROWTH_RATE,
+        min_cell_size: float = DEFAULT_MIN_CELL_SIZE,
         max_cell_size: Optional[float] = None,
         bl_layers: Optional[int] = None,
         bl_only: bool = False,
@@ -44,7 +48,7 @@ class VolumeMeshGenerator:
 
         Args:
             growth_rate: 层厚度的几何增长率（1.2 为典型值）
-            min_cell_size: 最小允许单元尺寸（米），默认 1cm
+            min_cell_size: 最小允许单元尺寸（米），默认 1 mm
             max_cell_size: 可选的 core 区域单元尺寸硬上限（米），
                 从 BL 的近壁大小向外分级（mesh_background.
                 generate_hybrid_mesh）。None 使 core 填充的单元
