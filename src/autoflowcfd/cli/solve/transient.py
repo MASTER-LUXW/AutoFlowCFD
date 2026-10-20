@@ -54,6 +54,9 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 @click.option('--dual-time-inner-iter', type=int, default=DEFAULT_DUAL_TIME_STEPS,
               help=f'--time-method dual-time 时每个物理步的内迭代（带 BDF 物理时间项的 Newton 步）次数上限，'
                    f'残差降到该物理步起点的 1e-3 即提前结束，通常 2~7 次（默认上限 {DEFAULT_DUAL_TIME_STEPS}）')
+@click.option("--probe", "probes", nargs=3, type=float, multiple=True,
+              help="探针位置 X Y Z（米，可重复给出）：每个物理步在该点求 FR 解多项式的值，压力与速度写进输出目录的 "
+                   "probes.csv（布局在 probes.json），供 post transient-psd 使用；续算接着写")
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）。'
@@ -68,7 +71,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         physical_time: float,
               output_dir: str, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
-              dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
+              dual_time_inner_iter: int, threads: int, probes: tuple, init_checkpoint: Optional[str],
               turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: Optional[int],
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
@@ -97,6 +100,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         units: .nas 体网格与面网格的坐标单位（入口处转存成输出目录下的米制 volume_mesh.pkl）
         skip_quality_check: 跳过求解前的网格质量门检查
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
+        probes: 探针位置（米），每个物理步采样（`core/probes`）
     """
     print("=== Starting Transient FR Simulation (DES/LES) ===")
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
@@ -154,7 +158,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
+            aoa_deg=aoa_deg, aos_deg=aos_deg, probes=probes,
         )
         return
 
@@ -194,6 +198,9 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
 
     # 参考面积（未给时沿来流方向自动估算，与 solve steady 同一个函数）
     reference_area = resolve_reference_area(solver, volume_data, reference_area)
+    from autoflowcfd.core.probes import attach_probes
+
+    attach_probes(solver, probes, output_dir)
 
     # 5. 执行瞬态求解（瞬态不用收敛判据 tol，跑满指定步数；--checkpoint-interval 定期落盘）
     try:

@@ -268,6 +268,9 @@ def _resume_distributed(
     from autoflowcfd.cli.solve.checkpoint_io.resume_run import resume_output_dir
 
     output_dir = output_dir or resume_output_dir(checkpoint_file)
+    from autoflowcfd.core.probes import attach_probes_from_checkpoint
+
+    attach_probes_from_checkpoint(solver, metadata, output_dir)       # 集体操作
 
     if is_root():
         logger.info(

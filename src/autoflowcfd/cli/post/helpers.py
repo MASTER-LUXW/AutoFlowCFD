@@ -195,24 +195,6 @@ def _replay_history(history: dict):
     return analyzer
 
 
-def _cell_centroids(grid_data) -> np.ndarray:
-    """计算逐单元中心点坐标，形状 (n_cells, 3)。
-
-    与 core/solver_steady_setup.py、core/transient_solver_loop.py 里
-    的中心点计算完全一致：三棱柱单元（若存在）占据全局单元索引空间的
-    前段，四面体在后。
-    """
-    nodes_array = np.column_stack([grid_data.nodes.x, grid_data.nodes.y, grid_data.nodes.z])
-    tet_connectivity = grid_data.cells.connectivity.astype(np.int64)
-    tet_centroids = nodes_array[tet_connectivity].mean(axis=1)
-    prism_cells_obj = getattr(grid_data, 'prism_cells', None)
-    if prism_cells_obj is not None:
-        prism_connectivity = prism_cells_obj.connectivity.astype(np.int64)
-        prism_centroids = nodes_array[prism_connectivity].mean(axis=1)
-        return np.vstack([prism_centroids, tet_centroids])
-    return tet_centroids
-
-
 def _export_point_fields_vtk(
     output_path: Path,
     grid_data,

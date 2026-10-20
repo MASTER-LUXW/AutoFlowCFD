@@ -24,6 +24,7 @@ from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area, report_distributed_aerodynamic_coefficients
 from autoflowcfd.cli.solve.checkpoint_io import start_distributed_from_checkpoint
+from autoflowcfd.core.probes import attach_probes
 
 
 def _solve_transient_distributed(
@@ -44,8 +45,9 @@ def _solve_transient_distributed(
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
     wall_treatment: str = DEFAULT_WALL_TREATMENT,
+    probes=(),
 ):
-    """`solve transient` 的分布式分支实现。
+    """`solve transient` 的分布式分支实现。`probes`：探针位置（米），三条路径都在求解前挂上（`core/probes`）。
 
     `init_checkpoint`（`--init-from`，2026-09-02 续接）：从稳态
     checkpoint 恢复状态作为瞬态初场，三条分布式路径都已接入，见
@@ -73,7 +75,7 @@ def _solve_transient_distributed(
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
-            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
+            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area, probes=probes,
         )
         return
 
@@ -90,7 +92,7 @@ def _solve_transient_distributed(
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
-            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
+            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area, probes=probes,
         )
         return
 
@@ -105,7 +107,7 @@ def _solve_transient_distributed(
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
         wall_treatment=wall_treatment,
-        aoa_deg=aoa_deg, aos_deg=aos_deg,
+        aoa_deg=aoa_deg, aos_deg=aos_deg, probes=probes,
     )
 
 
@@ -126,6 +128,7 @@ def _solve_transient_cpu_traditional(
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
     wall_treatment: str = DEFAULT_WALL_TREATMENT,
+    probes=(),
 ):
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
@@ -177,6 +180,7 @@ def _solve_transient_cpu_traditional(
     if init_checkpoint:
         start_distributed_from_checkpoint(solver, init_checkpoint)
 
+    attach_probes(solver, probes, output_dir)          # 集体操作
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
 
@@ -213,6 +217,7 @@ def _solve_transient_fully_distributed(
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0, wall_treatment=DEFAULT_WALL_TREATMENT,
     reference_area=None,
+    probes=(),
 ):
     """"完全分布式加载"：只有 root rank 加载完整网格（与 `solve steady`
     的 `if fully_distributed:` 分支同一套构造方式）。DUAL_TIME
@@ -263,6 +268,7 @@ def _solve_transient_fully_distributed(
     if init_checkpoint:
         start_distributed_from_checkpoint(solver, init_checkpoint)
 
+    attach_probes(solver, probes, output_dir)          # 集体操作
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
 
@@ -299,6 +305,7 @@ def _solve_transient_multi_gpu(
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0, wall_treatment=DEFAULT_WALL_TREATMENT,
     reference_area=None,
+    probes=(),
 ):
     """多 GPU + MPI 分布式（与 `solve steady` 的 `--multi-gpu` 分支同一套
     构造方式）。`fully_distributed`（#1，2026-09-02 补齐）：走
@@ -378,6 +385,7 @@ def _solve_transient_multi_gpu(
     if init_checkpoint:
         start_distributed_from_checkpoint(solver, init_checkpoint, sync_device=True)
 
+    attach_probes(solver, probes, output_dir)          # 集体操作
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
 

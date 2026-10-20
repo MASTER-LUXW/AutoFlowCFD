@@ -123,12 +123,13 @@ class _APISolveMixin:
 
     def run_transient(self, volume_mesh: VolumeMeshData, config: Optional[TransientConfig] = None, *,
                       aoa_deg: float = 0.0, aos_deg: float = 0.0, reference_area: Optional[float] = None,
-                      skip_quality_check: bool = False, **fields) -> Any:
+                      skip_quality_check: bool = False, probes=None, **fields) -> Any:
         """瞬态求解（双时间步或显式时间精确推进），参数同 `run_steady`；配置类为 `TransientConfig`。
 
         步数为 `config.n_steps`（给了 total_time 时按 total_time/dt 换算，否则 max_iter）；给了
         `init_from_checkpoint` 时以该 checkpoint 的场为初场（阶数可低于 order，精确延拓）。瞬态不以残差为停止
-        条件，跑满全部物理步。
+        条件，跑满全部物理步。`probes`：探针位置 `(k, 3)`（米，同 CLI `--probe`），每个物理步采样写进
+        `output_dir/probes.csv`（`core/probes`）。
         """
         from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
@@ -144,6 +145,9 @@ class _APISolveMixin:
             from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
 
             start_single_node_from_checkpoint(solver, config.init_from_checkpoint)
+        from autoflowcfd.core.probes import attach_probes
+
+        attach_probes(solver, probes, config.output_dir)
         result = self._solve_and_write(solver, volume_mesh, config,
                                        max_iter=config.n_steps, dt=config.dt, tol=0.0)
         logger.info(f"Transient simulation complete: {result.iterations} steps")

@@ -28,9 +28,11 @@ def continue_single_node(solver, iteration: int, metadata: dict, checkpoint_file
         tol: 相对收敛容差；时间精确的续算按 `run_tolerance` 跑满全部步
         output_dir: 输出目录；None 时为 checkpoint 所在算例目录（`resume_output_dir`）
     """
+    from autoflowcfd.core.probes import attach_probes_from_checkpoint
     from autoflowcfd.core.utils.checkpoint_time import run_tolerance
 
     output_dir = output_dir or resume_output_dir(checkpoint_file)
+    attach_probes_from_checkpoint(solver, metadata, output_dir)
     names = (metadata["input_file"], metadata["turbulence_model"], metadata["backend"])
     surface_mesh = metadata.get("surface_mesh")
     result = solver.solve(

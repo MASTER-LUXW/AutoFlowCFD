@@ -14,14 +14,13 @@ checkpoint"的命令（coefficients/export-vtk/report/convergence）自成
 
 import csv
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import click
 import numpy as np
 from loguru import logger
 
 from autoflowcfd.cli.post.helpers import (
-    _cell_centroids,
     _export_point_fields_vtk,
     _list_checkpoints,
     _load_grid_data,
@@ -269,93 +268,53 @@ def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: floa
 
 @click.command(name="transient-psd")
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="案例目录")
-@click.option("--grid", "-g", type=click.Path(exists=True),
-              help="网格文件路径（如果不在案例目录中）")
+              help="算例目录：求解时用 `solve transient --probe X Y Z` 写出的 probes.csv / probes.json 所在目录")
 @click.option("--output", "-o", type=click.Path(), default="psd.csv",
-              help="输出文件")
-@click.option("--probe-location", nargs=3, type=float, multiple=True,
-              help="探针位置 (x y z)")
-def transient_psd(case: str, grid: Optional[str], output: str, probe_location: tuple) -> None:
-    """执行频谱分析 (PSD)。
+              help="输出文件（频率与各探针压力的单边功率谱密度 Pa^2/Hz）")
+@click.option("--warmup-time", type=float, default=0.0,
+              help="排除物理时间早于此值的样本（起动瞬态混进频谱会抬高低频）。默认 0.0（不排除）")
+@click.option("--nperseg", type=int, default=None,
+              help="Welch 法每段样本数；不给时样本少于 64 个取单段，否则取约 8 段（50% 重叠）的段长")
+def transient_psd(case: str, output: str, warmup_time: float, nperseg: Optional[int]) -> None:
+    """探针压力的功率谱密度（Welch 法，`postprocess/pressure_psd.py`）。
 
-    计算在给定探针位置处压力脉动的功率谱密度，数据采样自案例
-    目录中的每个检查点（位于离每个探针最近的单元中心的压力 - 参见 PressurePSD）。
-
-    Args:
-        case: 案例目录
-        grid: 网格文件路径（如果省略则从案例目录自动检测）
-        output: 输出文件
-        probe_location: 探针位置坐标
+    样本是求解器每个物理步在探针位置求的 FR 解多项式值（`core/probes`），采样间隔即物理时间步长。
 
     Examples:
-        $ autoflowcfd post transient-psd --case transient_results/ \
-          --probe-location 1.5 0.0 0.5
+        $ autoflowcfd solve transient mesh.pkl --dt 1e-4 --probe 1.5 0.0 0.5 -o transient_results/
+        $ autoflowcfd post transient-psd --case transient_results/ --warmup-time 0.05
     """
     logger.info(f"Performing PSD analysis for case: {case}")
 
-    if not probe_location:
-        raise click.ClickException(
-            "At least one --probe-location x y z is required for PSD analysis."
-        )
-
     try:
+        from autoflowcfd.core.probes import read_probe_series
         from autoflowcfd.postprocess import PressurePSD
 
-        case_path = Path(case)
-        grid_file = _locate_grid_file(case_path, grid)
-        grid_data = _load_grid_data(grid_file)
+        points, times, values = read_probe_series(case)
+        keep = times >= warmup_time
+        if not np.any(keep):
+            raise click.ClickException(f"全部 {len(times)} 个样本都早于 --warmup-time={warmup_time}s")
+        psd_analyzer = PressurePSD(monitor_points=[tuple(p) for p in points])
+        for t, pressures in zip(times[keep], values["p"][keep]):
+            psd_analyzer.add_sample(time=float(t), pressures=pressures.tolist())
 
-        ckpt_files = _list_checkpoints(case_path)
-        if len(ckpt_files) < 8:
-            raise click.ClickException(
-                f"PSD analysis needs >= 8 samples, found {len(ckpt_files)} "
-                f"checkpoints under {case_path / 'checkpoints'}."
-            )
-
-        centroids = _cell_centroids(grid_data)
-        probes = np.asarray(probe_location, dtype=np.float64)
-        probe_cell_idx = [int(np.argmin(np.linalg.norm(centroids - p, axis=1))) for p in probes]
-
-        from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager()
-
-        times: List[float] = []
-        pressures_per_ckpt: List[List[float]] = []
-        for ckpt_file in ckpt_files:
-            solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
-            solution = _to_solution_vector(solution_data)
-            p_field = solution.get_pressure()
-            times.append(_physical_time(metadata, ckpt_file))
-            pressures_per_ckpt.append([float(p_field[idx]) for idx in probe_cell_idx])
-
-        # 采样间隔由 checkpoint 的物理时刻给出；不等间隔时 PressurePSD 报错（频率轴会错）
-        psd_analyzer = PressurePSD(monitor_points=list(probe_location))
-        for t, pressures in zip(times, pressures_per_ckpt):
-            psd_analyzer.add_sample(time=t, pressures=pressures)
-
+        columns = [psd_analyzer.compute_psd(i, nperseg=nperseg) for i in range(len(points))]
+        freqs = columns[0][0]
         output_path = Path(output)
         if not output_path.suffix:
             output_path = output_path.with_suffix('.csv')
-
         with open(output_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            header = ['frequency_hz']
-            header.extend(f'psd_probe{i}' for i in range(len(probes)))
-            writer.writerow(header)
-
-            freqs = None
-            psd_columns = []
-            for i in range(len(probes)):
-                freqs, psd_values = psd_analyzer.compute_psd(i)
-                psd_columns.append(psd_values)
+            writer.writerow(['frequency_hz'] + [f'psd_probe{i}' for i in range(len(points))])
             for row_idx, freq in enumerate(freqs):
-                writer.writerow([freq] + [col[row_idx] for col in psd_columns])
+                writer.writerow([freq] + [col[1][row_idx] for col in columns])
 
-        click.echo(f"✓ PSD written: {output_path} ({len(probes)} probe(s), {len(ckpt_files)} samples)")
-        for i in range(len(probes)):
-            dom_freq, dom_psd = psd_analyzer.find_dominant_frequency(i)
-            click.echo(f"  Probe {i} {tuple(probe_location[i])}: dominant f={dom_freq:.2f} Hz")
+        click.echo(f"✓ PSD written: {output_path} ({len(points)} probe(s), {int(keep.sum())} samples, "
+                   f"excluded {int((~keep).sum())} before t={warmup_time}s)")
+        for i, p in enumerate(points):
+            dom_freq, _ = psd_analyzer.find_dominant_frequency(i, min_freq=freqs[1], max_freq=freqs[-1],
+                                                               nperseg=nperseg)
+            click.echo(f"  Probe {i} {tuple(p)}: dominant f={dom_freq:.2f} Hz")
 
     except click.ClickException:
         raise

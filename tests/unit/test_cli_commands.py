@@ -185,7 +185,7 @@ class TestCLIPostCommands:
         """post transient-psd 的帮助。"""
         result = self.runner.invoke(cli, ["post", "transient-psd", "--help"])
         assert result.exit_code == 0
-        assert "--probe-location" in result.output
+        assert "--warmup-time" in result.output and "--probe-location" not in result.output   # 探针在求解时给出
 
 
 class TestCLIConfigCommands:
