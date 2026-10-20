@@ -270,6 +270,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.mu_molecular = solver_kwargs['mu_molecular']
         self._turbulence_intensity = _kwarg(solver_kwargs, 'turbulence_intensity')
         self._viscosity_ratio = _kwarg(solver_kwargs, 'viscosity_ratio')
+        self._sem_num_eddies = _kwarg(solver_kwargs, 'sem_num_eddies')
         # 问题单元人工粘性（与单机 FRSolver 同名参数、同一实现；见
         # core/mpi/distributed_artificial_viscosity.py）
         self.artificial_viscosity_enabled = bool(_kwarg(solver_kwargs, 'artificial_viscosity_enabled'))

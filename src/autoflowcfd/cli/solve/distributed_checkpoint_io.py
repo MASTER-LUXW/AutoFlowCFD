@@ -17,7 +17,6 @@ from typing import Optional
 
 import click
 
-from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
 
@@ -111,7 +110,8 @@ def rebuild_distributed_solver_from_checkpoint(
     from autoflowcfd.cli.solve.checkpoint_io import physics_from_metadata
     physics = physics_from_metadata(metadata)
     from autoflowcfd.cli.solve.checkpoint_io.rebuild import (
-        resolve_resume_low_mach_precond, resolve_resume_time_accurate, resolve_resume_time_scheme,
+        resolve_resume_low_mach_precond, resolve_resume_sem_num_eddies, resolve_resume_time_accurate,
+        resolve_resume_time_scheme,
     )
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
 
@@ -125,7 +125,7 @@ def rebuild_distributed_solver_from_checkpoint(
         physics=physics, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
         time_accurate=resolve_resume_time_accurate(time_scheme, metadata),
-        dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS, sem_num_eddies=_SEM_DEFAULT_NUM_EDDIES)
+        dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS, sem_num_eddies=resolve_resume_sem_num_eddies(metadata, turbulence_model))
     loaded_metadata, iteration = solver.load_checkpoint_distributed(checkpoint_path)
     metadata = loaded_metadata or metadata
 

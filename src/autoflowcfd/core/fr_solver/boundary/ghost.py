@@ -160,7 +160,9 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     #
     # 解析湍流脉动的模型（LES、WMLES、DDES、IDDES）在速度入口注入合成湍流。壁面模型只给出近壁应力，不提供
     # 入口的湍流内容：2026-10-19（I-75）以前 WMLES 以"壁面模型已承担近壁湍流校正"为由被排除，发展流的入口是层流。
-    use_sem = solver.turb_model_name in ("LES", "WMLES", "DDES", "IDDES")
+    from autoflowcfd.core.turbulence.registry import uses_synthetic_inlet
+
+    use_sem = uses_synthetic_inlet(solver.turb_model_name)
 
     # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
     # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的

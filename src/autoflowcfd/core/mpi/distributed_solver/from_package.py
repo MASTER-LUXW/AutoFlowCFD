@@ -8,14 +8,13 @@
 这里通过 `self` 访问。
 """
 
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
 from autoflowcfd.core.mpi import get_rank
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.time_integration.base import (
-    TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
+    TimeIntegrator, require_distributed_scheme,
 )
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
@@ -78,7 +77,7 @@ class _DistributedFromPackageMixin:
         self._root_context = root_context
         self.order = int(package['order'])
         self.current_order = self.order
-        self.order_continuation_enabled = package.get('order_continuation_enabled', True)
+        self.order_continuation_enabled = True
         self.n_ranks = n_ranks
 
         precompacted_mesh = package['precompacted_mesh']
@@ -92,8 +91,8 @@ class _DistributedFromPackageMixin:
 
         self.partition = package['partition']
         # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
-        self._block_jacobi_colors_local = package.get('cell_colors')
-        self._coupling_colors_local = package.get('cell_colors_d2')
+        self._block_jacobi_colors_local = package['cell_colors']
+        self._coupling_colors_local = package['cell_colors_d2']
         self.dist_flat_face = package['dist_fc']
 
         n_sps = precompacted_mesh.n_sps_per_cell
@@ -153,17 +152,18 @@ class _DistributedFromPackageMixin:
         # 分支里设，none/les/wmles 运行的 checkpoint 因此写的是替身缺省值）。
         self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
         self.mu_molecular = package['mu_molecular']
-        self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
-        self.artificial_viscosity_enabled = bool(package.get('artificial_viscosity_enabled', False))
-        self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
+        self._turbulence_intensity = package['turbulence_intensity']
+        self.artificial_viscosity_enabled = bool(package['artificial_viscosity_enabled'])
+        self.artificial_viscosity_alpha = float(package['artificial_viscosity_alpha'])
         from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
         self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
-        self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
+        self._viscosity_ratio = package['viscosity_ratio']
+        self._sem_num_eddies = package['sem_num_eddies']
         self.turb_model = None
-        self.wall_distance_compact = package.get('wall_distance_compact')
+        self.wall_distance_compact = package['wall_distance_compact']
         self.ddes_model = None
-        self.iddes_h_max_compact = package.get('iddes_h_max_compact')
-        self.iddes_h_wn_compact = package.get('iddes_h_wn_compact')
+        self.iddes_h_max_compact = package['iddes_h_max_compact']
+        self.iddes_h_wn_compact = package['iddes_h_wn_compact']
         # `step()` 的 `residual_func` 无条件读取 `self.wall_model`/
         # `self.sgs_model`（与主 `__init__` 同一个属性名约定），必须
         # 存在这两个属性，否则任何 turb_model_name 都会在 step() 里
@@ -234,8 +234,8 @@ class _DistributedFromPackageMixin:
         # 模块文档"DUAL_TIME 支持"一节），`.get(...)` 默认值只是兼容
         # 没有这两个字段的旧 checkpoint/package。
         time_scheme = require_distributed_scheme(
-            package.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
-        dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
+            package['time_scheme'])
+        dual_time_steps = package['dual_time_inner_iter']
         self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
@@ -267,9 +267,9 @@ class _DistributedFromPackageMixin:
         from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
 
         configure_time_stepping(
-            self, time_scheme, time_accurate=bool(package.get('time_accurate', False)),
-            adaptive_cfl=bool(package.get('adaptive_cfl', True)),
-            cfl_start=package.get('cfl_start'), cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'),
+            self, time_scheme, time_accurate=bool(package['time_accurate']),
+            adaptive_cfl=bool(package['adaptive_cfl']),
+            cfl_start=package['cfl_start'], cfl_max=package['cfl_max'], cfl_min=package['cfl_min'],
             low_mach_precond=package['low_mach_precond'])
         # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
         # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段

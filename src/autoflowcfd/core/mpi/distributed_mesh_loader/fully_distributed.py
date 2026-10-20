@@ -123,8 +123,10 @@ def distributed_mesh_load_v2(
         # `build_boundary_ghost_provider` 只检查 is None）。
         # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与来流湍流（湍流强度、涡粘比、分子粘度——
         # 定涡核尺度与雷诺应力）必须取用户设置（此前桩上缺这些属性，边界构造的兜底让它们静默变成默认值）
+        # `ops`：合成湍流入口按面通量点几何定位（`boundary/ghost.py::_build_sem_inlet`），2026-10-20 以前桩上缺它，
+        # LES/WMLES/DDES/IDDES 带速度入口时这里抛 AttributeError
         root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
+            mesh=mesh, ops=ops, freestream=freestream, turb_model_name=turb_model_name,
             wall_model=(object() if needs_wall_model(turb_model_name, wall_treatment) else None),
             _turbulence_intensity=turbulence_intensity, _viscosity_ratio=viscosity_ratio,
             mu_molecular=mu_molecular, _sem_num_eddies=sem_num_eddies,
@@ -177,6 +179,7 @@ def distributed_mesh_load_v2(
                 artificial_viscosity_alpha=artificial_viscosity_alpha,
                 wall_treatment=wall_treatment,
                 low_mach_precond=low_mach_precond,
+                sem_num_eddies=sem_num_eddies,
             )
             for r in range(n_ranks)
         ]
@@ -423,14 +426,14 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
 
         turb_model_name = root_context['turb_model_name']
         root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
+            mesh=mesh, ops=ops, freestream=root_context['freestream'], turb_model_name=turb_model_name,
             wall_model=(object() if needs_wall_model(turb_model_name, root_context['wall_treatment']) else None),
             _turbulence_intensity=root_context['turbulence_intensity'],
             _viscosity_ratio=root_context['viscosity_ratio'], mu_molecular=root_context['mu_molecular'],
             _sem_num_eddies=root_context['sem_num_eddies'],
         )
         provider = build_boundary_ghost_provider(
-            root_solver_stub, bc_overrides=root_context.get('bc_overrides', {}))
+            root_solver_stub, bc_overrides=root_context['bc_overrides'])
         root_context['boundary_ghost_provider_global'] = provider
 
         packages = [
@@ -444,20 +447,21 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 h_max_global=root_context['h_max_global'], h_wn_global=root_context['h_wn_global'],
                 turbulence_intensity=root_context['turbulence_intensity'],
                 viscosity_ratio=root_context['viscosity_ratio'],
-                time_scheme=root_context.get('time_scheme'),
-                dual_time_inner_iter=root_context.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS),
-                cfl_start=root_context.get('cfl_start'),
-                cfl_max=root_context.get('cfl_max'),
-                cfl_min=root_context.get('cfl_min'),
-                time_accurate=root_context.get('time_accurate', False),
-                adaptive_cfl=root_context.get('adaptive_cfl', True),
+                time_scheme=root_context['time_scheme'],
+                dual_time_inner_iter=root_context['dual_time_inner_iter'],
+                cfl_start=root_context['cfl_start'],
+                cfl_max=root_context['cfl_max'],
+                cfl_min=root_context['cfl_min'],
+                time_accurate=root_context['time_accurate'],
+                adaptive_cfl=root_context['adaptive_cfl'],
                 # 着色只依赖拓扑，换阶沿用同一份
-                global_cell_colors=root_context.get('global_cell_colors'),
-                global_cell_colors_d2=root_context.get('global_cell_colors_d2'),
+                global_cell_colors=root_context['global_cell_colors'],
+                global_cell_colors_d2=root_context['global_cell_colors_d2'],
                 artificial_viscosity_enabled=root_context['artificial_viscosity_enabled'],
                 artificial_viscosity_alpha=root_context['artificial_viscosity_alpha'],
                 wall_treatment=root_context['wall_treatment'],
                 low_mach_precond=root_context['low_mach_precond'],
+                sem_num_eddies=root_context['sem_num_eddies'],
             )
             for r in range(n_ranks)
         ]

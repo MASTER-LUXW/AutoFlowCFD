@@ -12,9 +12,17 @@
 resume 都会因此失败；改之前则是静默按默认来流（33.33 m/s、零攻角、默认粘度与
 Tu/VR）重建 —— 另一个物理算例。两个写入端现在共用本函数。
 
+合成湍流入口的涡核数（`sem_num_eddies`，2026-10-20 起写出）同样决定入口湍流的实现方式：LES/WMLES/DDES/IDDES
+续算必须沿用（`cli/solve/checkpoint_io/rebuild.py::resolve_resume_sem_num_eddies`）。按密度判据自动取时记
+`SEM_AUTO`（HDF5 属性不能存 None）。
+
 `solve_path_metadata` 是另一类：时间格式与低马赫预处理开关**不改变**定常解，但续算默认应沿用（隐式稳态续算
 不应被静默换回显式格式、关掉预处理跑的算例不应续算时被打开），`solve resume` 可用同名选项覆盖。
 """
+
+
+#: `sem_num_eddies` 为"按密度判据自动取"（构造参数 None）时写进 checkpoint 的值
+SEM_AUTO = -1
 
 
 def physics_metadata(solver) -> dict:
@@ -41,6 +49,7 @@ def physics_metadata(solver) -> dict:
         "artificial_viscosity_enabled": bool(solver.artificial_viscosity_enabled),
         "artificial_viscosity_alpha": float(solver.artificial_viscosity_alpha),
         "wall_treatment": str(solver.wall_treatment),
+        "sem_num_eddies": SEM_AUTO if solver._sem_num_eddies is None else int(solver._sem_num_eddies),
     }
 
 

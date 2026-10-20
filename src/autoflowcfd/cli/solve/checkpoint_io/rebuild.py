@@ -117,6 +117,21 @@ def resolve_resume_time_accurate(requested_scheme, metadata) -> bool:
         "请显式给 --time-scheme；瞬态 rk3 算例请从头求解")
 
 
+def resolve_resume_sem_num_eddies(metadata, turbulence_model):
+    """续算的合成湍流入口涡核数：用合成湍流入口的模型（`registry.uses_synthetic_inlet`）沿用 checkpoint 记录，
+    缺失即报错（早于 2026-10-20 的 checkpoint 不记录，续算会按密度判据重新取，自定义 --sem-num-eddies 的算例
+    被静默换参数）；其余模型不用它，取构造缺省。"""
+    from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+    from autoflowcfd.core.turbulence.registry import uses_synthetic_inlet
+    from autoflowcfd.core.utils.checkpoint_physics import SEM_AUTO
+
+    if not uses_synthetic_inlet(turbulence_model):
+        return _SEM_DEFAULT_NUM_EDDIES
+    required_metadata(metadata, ("sem_num_eddies",))
+    n = int(metadata["sem_num_eddies"])
+    return None if n == SEM_AUTO else n
+
+
 def resolve_resume_low_mach_precond(requested, metadata) -> bool:
     """续算的低马赫预处理请求值：显式覆盖（`--low-mach-precond/--no-low-mach-precond`）> checkpoint 记录（缺失即
     报错——时间精确运行必须关闭它，按"多数情况开启"去猜会改变瞬态解）。"""
@@ -246,6 +261,7 @@ def rebuild_from_checkpoint(
         turb_model_name=turbulence_model,
         time_scheme=resolved_scheme,
         time_accurate=resolve_resume_time_accurate(time_scheme, metadata),
+        sem_num_eddies=resolve_resume_sem_num_eddies(metadata, turbulence_model),
         low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
         # 决定物理解的参数一律从 checkpoint 恢复（来流缺失即报错，见
         # physics_from_metadata）；CFL 等纯数值参数由调用方指定。

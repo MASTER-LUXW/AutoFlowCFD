@@ -134,6 +134,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         solver.wall_treatment = "resolved"
         solver.mu_molecular, solver._turbulence_intensity, solver._viscosity_ratio = 1.8e-5, 0.01, 5.0
         solver.artificial_viscosity_enabled, solver.artificial_viscosity_alpha = False, 1.0
+        solver._sem_num_eddies = None
         solver.low_mach_precond = True
         # 时间格式同样写进元数据（resume 默认沿用它）；多 GPU 的积分器属性名
         solver.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)

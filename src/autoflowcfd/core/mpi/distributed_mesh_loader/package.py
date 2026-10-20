@@ -127,6 +127,7 @@ def build_fully_distributed_rank_package(
     artificial_viscosity_alpha: float = 1.0,
     wall_treatment: str = DEFAULT_WALL_TREATMENT,
     low_mach_precond: bool = True,
+    sem_num_eddies: Optional[int] = None,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -306,6 +307,8 @@ def build_fully_distributed_rank_package(
         'iddes_h_wn_compact': iddes_h_wn_compact,
         'turbulence_intensity': turbulence_intensity,
         'viscosity_ratio': viscosity_ratio,
+        # 合成湍流入口涡核数（入口幽灵态已由 root 按它构造；各 rank 写 checkpoint 时记录它）
+        'sem_num_eddies': sem_num_eddies,
         'time_scheme': time_scheme,
         'dual_time_inner_iter': dual_time_inner_iter,
         # 见本函数 Args 里 cfl_* 一节：这三个量此前从未进入 package，

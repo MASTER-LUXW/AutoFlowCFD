@@ -12,7 +12,7 @@ from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
 
 _FULL = dict(freestream={"rho_inf": 1.2, "vel_inf": 30.0, "p_inf": 1.0e5}, wall_treatment="auto",
              mu_molecular=2.0e-5, _turbulence_intensity=0.02, _viscosity_ratio=3.0,
-             artificial_viscosity_enabled=True, artificial_viscosity_alpha=0.5)
+             artificial_viscosity_enabled=True, artificial_viscosity_alpha=0.5, _sem_num_eddies=40)
 
 
 def test_values_are_read_from_the_solver():

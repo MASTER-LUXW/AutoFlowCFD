@@ -360,6 +360,8 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'sem_num_eddies': _SEM_DEFAULT_NUM_EDDIES,
             'bc_overrides': {}, 'n_ranks': 1,
             'time_scheme': None, 'dual_time_inner_iter': 20,
+            'cfl_start': None, 'cfl_max': None, 'cfl_min': None, 'time_accurate': False, 'adaptive_cfl': True,
+            'global_cell_colors': None, 'global_cell_colors_d2': None,
             'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,
         'wall_treatment': 'resolved',
         'low_mach_precond': True,

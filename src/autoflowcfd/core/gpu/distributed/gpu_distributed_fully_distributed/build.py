@@ -3,7 +3,6 @@
 从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_fully_distributed.py`(原 557 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import types
 
 
@@ -55,7 +54,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
     from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.time_integration.base import (
-        TimeIntegrationScheme, require_distributed_scheme,
+        require_distributed_scheme,
     )
 
     cp = get_cupy()
@@ -77,7 +76,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     self.order = int(package['order'])
     self.current_order = self.order
-    self.order_continuation_enabled = package.get('order_continuation_enabled', True)
+    self.order_continuation_enabled = True
 
     precompacted_mesh = package['precompacted_mesh']
     self.mesh = precompacted_mesh
@@ -88,8 +87,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     self.partition = package['partition']
     # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
-    self._block_jacobi_colors_local = package.get('cell_colors')
-    self._coupling_colors_local = package.get('cell_colors_d2')
+    self._block_jacobi_colors_local = package['cell_colors']
+    self._coupling_colors_local = package['cell_colors_d2']
     self.dist_flat_face = package['dist_fc']
 
     # GPU 设备选择：与主 __init__ 同一个默认策略（rank % n_gpus）。
@@ -145,14 +144,15 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     # AttributeError。
     self.freestream = {**freestream_pkg, "mach_ref": package['mach_ref']}
     self.mu_molecular = package['mu_molecular']
-    self.artificial_viscosity_enabled = bool(package.get('artificial_viscosity_enabled', False))
-    self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
+    self.artificial_viscosity_enabled = bool(package['artificial_viscosity_enabled'])
+    self.artificial_viscosity_alpha = float(package['artificial_viscosity_alpha'])
     self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
     self._package_freestream = freestream_pkg
-    self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
-    self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
+    self._turbulence_intensity = package['turbulence_intensity']
+    self._viscosity_ratio = package['viscosity_ratio']
+    self._sem_num_eddies = package['sem_num_eddies']
 
-    time_scheme_enum = package.get('time_scheme', TimeIntegrationScheme.SSP_RK3)
+    time_scheme_enum = package['time_scheme']
     time_scheme_str = getattr(time_scheme_enum, 'value', time_scheme_enum)
     self.time_integrator = GPUTimeIntegrator(
         scheme=require_distributed_scheme(time_scheme_str))
@@ -163,14 +163,14 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
 
     configure_time_stepping(
-        self, time_scheme_str, time_accurate=bool(package.get('time_accurate', False)),
-        adaptive_cfl=bool(package.get('adaptive_cfl', True)),
-        cfl_start=package.get('cfl_start'), cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'),
+        self, time_scheme_str, time_accurate=bool(package['time_accurate']),
+        adaptive_cfl=bool(package['adaptive_cfl']),
+        cfl_start=package['cfl_start'], cfl_max=package['cfl_max'], cfl_min=package['cfl_min'],
         low_mach_precond=package['low_mach_precond'])
     # 低马赫预处理开关（2026-09-25 补齐）：此前这条路径**从未设置**它，而
     # `step()` 直接读取 —— 每个 RK 步都会 AttributeError。与其余后端同一判据。
     # 双时间步内迭代次数取 package 携带的值（时间积分器在上面按格式构造）
-    self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
+    self.time_integrator.dual_time_steps = package['dual_time_inner_iter']
     reset_dual_time_history(self)
     # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
