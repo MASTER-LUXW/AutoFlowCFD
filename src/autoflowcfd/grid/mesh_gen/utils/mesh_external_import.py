@@ -91,7 +91,8 @@ def import_external_volume_mesh(
     check_overlap: bool = True,
     units: str = 'mm',
     bc_types: Optional[Dict[str, str]] = None,
-) -> Tuple['VolumeMeshData', 'MeshQualityReport']:
+    validate: bool = True,
+) -> Tuple['VolumeMeshData', Optional['MeshQualityReport']]:
     """完整的"自带体网格"管线：解析、从伴生面网格归属边界组、
     质量检查，以及（若请求且需要时）尽力修复。
 
@@ -113,6 +114,8 @@ def import_external_volume_mesh(
             边界匹配整体错位）。
         bc_types: 用户显式给出的边界条件类型 {组名: 类型}（`--bc-type`，见 `nas_io/boundary_types.py`）；
             导入后每个组都必须有确定的类型
+        validate: False 时只解析与归属边界、不做质量检查（返回的报告为 None；须同时 repair=False）——求解命令把
+            .nas 输入转存成 .pkl 时用，质量门在随后加载 .pkl 时做一次
 
     Returns:
         (volume_mesh, quality_report)——最终网格（若修复运行且
@@ -126,6 +129,8 @@ def import_external_volume_mesh(
     from .mesh_boundary import map_boundaries_by_geometry
     from ...validation.quality_validator import MeshQualityValidator
 
+    if repair and not validate:
+        raise ValueError("repair=True 需要 validate=True（修复由质量检查结果触发）")
     volume_mesh = parse_volume_mesh_nas(volume_mesh_path, units=units)
 
     logger.info(f"Parsing companion surface mesh for boundary attribution: {surface_mesh_path}")
@@ -145,6 +150,9 @@ def import_external_volume_mesh(
         'faces': surface_grid.cells.connectivity,
         'boundaries': surface_grid.boundaries
     }
+
+    if not validate:
+        return volume_mesh, None
 
     validator = MeshQualityValidator()
     logger.info("Checking external volume mesh quality (pre-repair)...")

@@ -12,6 +12,8 @@ Python API 与命令行三条入口的默认值是同一份。2026-10-19 以前 
 
 import click
 
+from autoflowcfd.grid.nas_io.units import UNITS_CHOICES
+
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.turbulence.wall_model.treatment import WALL_TREATMENTS
@@ -61,6 +63,9 @@ def shared_solve_options(config_cls):
                      help='中间 checkpoint 保存间隔（步，单机与分布式都生效），结束时另写一次'),
         click.option('--surface-mesh', '-s', type=click.Path(exists=True), default=None,
                      help='原始面网格路径：输入是 .nas 体网格时必填，用于反推边界分组；.pkl 不需要'),
+        click.option('--units', type=click.Choice(list(UNITS_CHOICES)), default='mm', show_default=True,
+                     help='输入是 .nas 体网格时它与 --surface-mesh 的坐标单位（入口处转存成输出目录下的米制 '
+                          'volume_mesh.pkl，续算与后处理都用它）；.pkl 不需要'),
         click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）'),
         click.option('--reference-area', type=float, default=None,
                      help='气动系数参考面积 (m^2)；不给时沿来流方向的迎风投影自动估算'),

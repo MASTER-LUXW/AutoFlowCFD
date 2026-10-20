@@ -28,7 +28,7 @@ _WRITERS = ("autoflowcfd.cli.solve.checkpoint_io.periodic_checkpoint_callback",
 def writers():
     """结果落盘函数的替身（替身求解器不能真的写 checkpoint）；返回 {名字: mock}。"""
     with patch(_WRITERS[0]) as cb, patch(_WRITERS[1]) as final, patch(_WRITERS[2]) as rcb, patch(_WRITERS[3]) as rfinal, \
-         patch("autoflowcfd.api.solve._save_volume_mesh", return_value="out/volume_mesh.pkl") as save:
+         patch("autoflowcfd.cli.solve.mesh_loader.save_volume_mesh_cache", return_value="out/volume_mesh.pkl") as save:
         yield {"callback": cb, "final": final, "resume_callback": rcb, "resume_final": rfinal, "save": save}
 
 
@@ -193,7 +193,7 @@ class TestWritesResults:
     def test_saved_mesh_is_the_volume_mesh_pickle(self, tmp_path):
         import pickle
 
-        from autoflowcfd.api.solve import _save_volume_mesh
+        from autoflowcfd.cli.solve.mesh_loader import save_volume_mesh_cache as _save_volume_mesh
 
         path = _save_volume_mesh({"cells": [1, 2, 3]}, str(tmp_path / "out"))
         with open(path, "rb") as f:

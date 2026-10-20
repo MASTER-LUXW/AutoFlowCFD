@@ -20,21 +20,6 @@ from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, fiel
 from autoflowcfd.grid.structures import VolumeMeshData
 
 
-def _save_volume_mesh(volume_mesh, output_dir: str) -> str:
-    """体网格写成 `output_dir/volume_mesh.pkl`（与 `grid generate-volume -o *.pkl` 同一格式），返回路径。
-
-    checkpoint 记录它作为 `input_file`：`solve resume` / `resume_simulation` 据此重建求解器。
-    """
-    import os
-    import pickle
-
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "volume_mesh.pkl")
-    with open(path, "wb") as f:
-        pickle.dump(volume_mesh, f)
-    return path
-
-
 def _resolved_config(config_cls, config, fields: dict):
     """`config`（缺省为配置类默认值）上覆盖 `fields`；重新构造，经配置类同一处校验。"""
     if config is not None and not isinstance(config, config_cls):
@@ -57,7 +42,9 @@ class _APISolveMixin:
         from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
         from autoflowcfd.config.turbulence_names import turbulence_solver_name
 
-        input_file = _save_volume_mesh(volume_mesh, config.output_dir)
+        from autoflowcfd.cli.solve.mesh_loader import save_volume_mesh_cache
+
+        input_file = save_volume_mesh_cache(volume_mesh, config.output_dir)
         names = (turbulence_solver_name(config.turbulence), config.backend.value)
         result = solver.solve(
             checkpoint_callback=periodic_checkpoint_callback(config.checkpoint_interval, config.output_dir, input_file,

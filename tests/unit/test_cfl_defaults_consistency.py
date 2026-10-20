@@ -127,7 +127,7 @@ def _factory_kwargs(fn_name, config):
     with patch("autoflowcfd.grid.validation.solve_gate.high_order_mesh_for_solver"), \
          patch("autoflowcfd.cli.solve.solver_factory.build_single_node_solver", return_value=solver) as factory, \
          patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"), \
-         patch("autoflowcfd.api.solve._save_volume_mesh", return_value="vm.pkl"), \
+         patch("autoflowcfd.cli.solve.mesh_loader.save_volume_mesh_cache", return_value="vm.pkl"), \
          patch("autoflowcfd.cli.solve.checkpoint_io.periodic_checkpoint_callback"), \
          patch("autoflowcfd.cli.solve.checkpoint_io.write_single_node_outputs"):
         getattr(AutoFlowCFDAPI(), fn_name)(MagicMock(), config)

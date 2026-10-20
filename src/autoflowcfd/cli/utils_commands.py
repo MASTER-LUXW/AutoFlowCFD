@@ -14,6 +14,8 @@
 """
 
 import click
+
+from autoflowcfd.grid.nas_io.units import UNITS_CHOICES
 import json
 import sys
 from loguru import logger
@@ -232,6 +234,8 @@ def doctor(json_output: bool) -> None:
 @click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
               help="grid_file 是 .nas 体网格时必填：原始面网格（反推边界分组），与 solve steady 相同")
 @click.option("--skip-quality-check", is_flag=True, help="跳过网格质量门（与 solve steady 相同）")
+@click.option("--units", type=click.Choice(list(UNITS_CHOICES)), default="mm", show_default=True,
+              help="grid_file 是 .nas 体网格时它与 --surface-mesh 的坐标单位")
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]),
               default="cpu", help="要基准测试的后端")
 @click.option("--iterations", "-n", type=int, default=100,
@@ -243,6 +247,7 @@ def benchmark(
     grid_file: str,
     surface_mesh: str,
     skip_quality_check: bool,
+    units: str,
     backend: str,
     iterations: int,
     order: int,
@@ -261,6 +266,7 @@ def benchmark(
         grid_file: 体网格（.pkl，或 GRID+CTETRA/CPENTA 的 .nas 并给出 --surface-mesh）
         surface_mesh: .nas 体网格对应的原始面网格
         skip_quality_check: 跳过网格质量门
+        units: .nas 体网格与面网格的坐标单位
         backend: 要基准测试的后端 (cpu/gpu)
         iterations: 迭代次数
         order: FR 阶数
@@ -278,7 +284,7 @@ def benchmark(
     logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
     t_start = _time.perf_counter()
     mesh, volume_data = load_mesh_for_solver(grid_file, order, surface_mesh=surface_mesh,
-                                             skip_quality_check=skip_quality_check)
+                                             skip_quality_check=skip_quality_check, units=units)
     t_load = _time.perf_counter() - t_start
     # GPU 不可用时 build_single_node_solver 显式报错（不退化成 CPU 却仍打着 GPU 的标签）
     # 来流与时间格式取配置层默认值（与 solve steady 不给参数时同一组，`config/solver_config.py`）

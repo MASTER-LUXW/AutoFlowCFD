@@ -7,8 +7,70 @@ from typing import Optional, Tuple
 import click
 
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+from autoflowcfd.core.mpi.comm import run_on_root
 from autoflowcfd.grid.validation.solve_gate import MeshQualityGateError, high_order_mesh_for_solver
 from autoflowcfd.grid.schema.grid_data import VolumeMeshData
+
+
+#: 求解命令把 .nas 体网格输入转存成的米制体网格缓存（输出目录下；后处理优先读它）
+VOLUME_MESH_CACHE_NAME = "volume_mesh.pkl"
+
+
+def save_volume_mesh_cache(volume_mesh: VolumeMeshData, output_dir: str) -> str:
+    """体网格写成 `output_dir/volume_mesh.pkl`（与 `grid generate-volume` 的 .pkl 同一格式，坐标为米），返回路径。
+    checkpoint 记录它作为 `input_file`，续算与后处理据此重建（CLI 求解命令与 Python API 共用）。"""
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, VOLUME_MESH_CACHE_NAME)
+    with open(path, "wb") as f:
+        pickle.dump(volume_mesh, f)
+    return path
+
+
+def _import_volume_nas(input_file: str, surface_mesh: Optional[str], units: str, validate: bool):
+    """.nas 体网格 + 面网格 -> (VolumeMeshData, 质量报告或 None)，不修复（修复只在 `grid import-volume` 里显式做）。"""
+    if not surface_mesh:
+        raise click.ClickException(
+            f"'{input_file}' 是 .nas 体网格，缺少 --surface-mesh/-s：需要原始面网格来反推 WALL/INLET/OUTLET 等边界分组，"
+            f"否则湍流模型和边界条件都无法正确设置。用法：--surface-mesh <原始面网格.nas>")
+    from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
+    from autoflowcfd.grid.nas_io.boundary_types import BoundaryTypeError
+
+    try:
+        # repair=False：求解用的必须是用户给的网格（Stage A 光顺会移动节点）；质量不过由求解前质量门拦截。
+        # 2026-10-20 以前用默认 repair=True，质量门不过就静默移动用户网格的节点再求解
+        return import_external_volume_mesh(input_file, surface_mesh, repair=False, units=units, validate=validate)
+    except BoundaryTypeError as e:
+        raise click.ClickException(
+            f"{e}\n边界条件类型在建立体网格时确定：请用 'autoflowcfd grid import-volume {input_file} "
+            f"-s {surface_mesh} -o <输出.pkl> --bc-type 组名=类型 ...' 生成 .pkl 后再提交计算。") from e
+    except ValueError as e:
+        raise click.ClickException(
+            f"无法把 '{input_file}' 当作体网格解析：{e}\n"
+            f"如果这其实是一份面网格，请先用 'autoflowcfd grid generate-volume {input_file} -o <输出.nas>' 生成体网格。"
+        ) from e
+
+
+def prepare_solver_input(input_file: str, surface_mesh: Optional[str], units: str,
+                         output_dir: str) -> Tuple[str, Optional[str]]:
+    """求解命令入口：.nas 体网格按 `units` 导入（不修复、不在此做质量检查），存成 `output_dir/volume_mesh.pkl`，之后
+    全程（各后端、checkpoint、续算、后处理）用这份米制 .pkl；.pkl 输入原样返回。集体操作（root 转换，全部 rank 调用）。
+
+    2026-10-20 以前求解命令没有 --units，.nas 体网格一律按毫米读入；且续算 / 后处理按 checkpoint 记录的 .nas
+    重新加载时同样只能按毫米。
+
+    Returns:
+        (input_file, surface_mesh)：之后应使用的体网格文件与面网格（.pkl 已含边界与面网格，返回 None）
+    """
+    if os.path.splitext(input_file)[1].lower() != ".nas":
+        return input_file, surface_mesh
+
+    def convert():
+        print(f"Importing volume-mesh NAS (units={units}) -> {os.path.join(output_dir, VOLUME_MESH_CACHE_NAME)}")
+        volume_data, _ = _import_volume_nas(input_file, surface_mesh, units, validate=False)
+        return save_volume_mesh_cache(volume_data, output_dir)
+
+    run_on_root(convert)
+    return os.path.join(output_dir, VOLUME_MESH_CACHE_NAME), None
 
 
 def load_mesh_for_solver(
@@ -16,6 +78,7 @@ def load_mesh_for_solver(
     order: int,
     surface_mesh: Optional[str] = None,
     skip_quality_check: bool = False,
+    units: str = "mm",
 ) -> Tuple['HighOrderMesh', VolumeMeshData]:
     """
     工业级网格加载器：接受已经生成好的体网格，.pkl（VolumeMeshData 序列化）
@@ -63,6 +126,9 @@ def load_mesh_for_solver(
             反推边界分组；input_file 是 .pkl 时忽略（边界信息已经在 pkl 里）
         skip_quality_check: 跳过质量门检查，网格质量不合格也强行求解 - 仅用于
             明确知道风险、需要临时诊断的场景，默认关闭
+        units: input_file 为 .nas 体网格时它与面网格的坐标单位。求解命令在入口就把 .nas 转存成 .pkl
+            （`prepare_solver_input`），走到这里的 .nas 是续算 2026-10-20 以前的 checkpoint（当时一律按毫米读入）
+            或 `utils benchmark`
 
     Returns:
         (mesh, volume_data): mesh 是给 FRSolver 用的 HighOrderMesh；
@@ -91,30 +157,8 @@ def load_mesh_for_solver(
             )
 
     elif ext == '.nas':
-        if not surface_mesh:
-            raise click.ClickException(
-                f"'{input_file}' 是 .nas 体网格，缺少 --surface-mesh/-s：需要"
-                f"原始面网格来反推 WALL/INLET/OUTLET 等边界分组，否则湍流模型"
-                f"和边界条件都无法正确设置。用法：--surface-mesh <原始面网格.nas>"
-            )
-        from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
         print("Detected volume-mesh NAS format. Parsing and attributing boundaries...")
-        from autoflowcfd.grid.nas_io.boundary_types import BoundaryTypeError
-        try:
-            # repair=False：求解用的必须是用户给的网格。修复（Stage A 光顺会移动节点）只在 `grid import-volume` 里
-            # 显式进行；质量不过时由下方的质量门拦截。2026-10-20 以前这里用默认 repair=True，质量门不过就静默移动
-            # 用户网格的节点再求解
-            volume_data, report = import_external_volume_mesh(input_file, surface_mesh, repair=False)
-        except BoundaryTypeError as e:
-            raise click.ClickException(
-                f"{e}\n边界条件类型在建立体网格时确定：请用 'autoflowcfd grid import-volume {input_file} "
-                f"-s {surface_mesh} -o <输出.pkl> --bc-type 组名=类型 ...' 生成 .pkl 后再提交计算。") from e
-        except ValueError as e:
-            raise click.ClickException(
-                f"无法把 '{input_file}' 当作体网格解析：{e}\n"
-                f"如果这其实是一份面网格，请先用 'autoflowcfd grid "
-                f"generate-volume {input_file} -o <输出.nas>' 生成体网格。"
-            ) from e
+        volume_data, report = _import_volume_nas(input_file, surface_mesh, units, validate=True)
 
     else:
         raise click.ClickException(
