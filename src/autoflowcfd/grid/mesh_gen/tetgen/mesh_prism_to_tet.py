@@ -32,16 +32,9 @@ def convert_layers_to_tetrahedra(
     应用的固定模板不具备这个性质，会产生悬挂面，有限体积求解器
     会将它们误认为边界面。
 
-    规则：按全局节点索引排序三个底面顶点，v0 < v1 < v2，令 w_i
-    为下一层上对应的顶点。输出：
-
-        T1 = (v0, v1, v2, w2)
-        T2 = (v0, v1, w1, w2)
-        T3 = (v0, w0, w1, w2)
-
-    这在三个四边形面上诱导的对角线分别是 v0-w1、v1-w2 和 v0-w2，
-    即始终是"低索引底顶点到高索引顶顶点"。该规则仅取决于共享边
-    的两个顶点，所以共享一条边的两个棱柱必然选择相同的对角线。
+    规则见 `mesh_gen/utils/prism_split.py`（侧面四边形沿过其最小全局编号顶点的对角线拆分，只依赖
+    四边形自己的四个编号，共享侧面的两个棱柱必然选同一条对角线）。每层输出按块排列：先是该层每个
+    棱柱的第一个子四面体，依此类推。
 
     四面体还被定向为正 signed 体积，然后任何 signed 体积解析为零
     （不仅是小——见下方"丢弃的四面体"）的四面体从输出中完全移除。
@@ -105,37 +98,14 @@ def convert_layers_to_tetrahedra(
 
     logger.info(f"Converting {n_layers-1} layer pairs to conformal tetrahedra...")
 
-    # 每个底面三角形的顶点按全局编号排序一次：各层的相对顺序相同（编号 = 底层编号 + 层号*nodes_per_layer），
-    # 一次排序对整列有效。
-    sorted_base = np.sort(base_faces, axis=1)          # (n_faces, 3) -> v0<v1<v2
+    from ..utils.prism_split import split_prisms_to_tets
 
-    n_tets = n_base_faces * (n_layers - 1) * 3
-    tetrahedra = np.empty((n_tets, 4), dtype=np.int64)
-    face_of_tet = np.empty(n_tets, dtype=np.int64)
-    face_range = np.arange(n_base_faces)
-
-    tet_idx = 0
-    for layer_idx in range(n_layers - 1):
-        off_lo = layer_idx * nodes_per_layer
-        off_hi = (layer_idx + 1) * nodes_per_layer
-
-        v0 = off_lo + sorted_base[:, 0]
-        v1 = off_lo + sorted_base[:, 1]
-        v2 = off_lo + sorted_base[:, 2]
-        w0 = off_hi + sorted_base[:, 0]
-        w1 = off_hi + sorted_base[:, 1]
-        w2 = off_hi + sorted_base[:, 2]
-
-        for quad in ((v0, v1, v2, w2),
-                     (v0, v1, w1, w2),
-                     (v0, w0, w1, w2)):
-            sl = slice(tet_idx, tet_idx + n_base_faces)
-            tetrahedra[sl, 0] = quad[0]
-            tetrahedra[sl, 1] = quad[1]
-            tetrahedra[sl, 2] = quad[2]
-            tetrahedra[sl, 3] = quad[3]
-            face_of_tet[sl] = face_range
-            tet_idx += n_base_faces
+    base = np.asarray(base_faces, dtype=np.int64)
+    tetrahedra = np.concatenate([
+        split_prisms_to_tets(np.hstack([base + layer_idx * nodes_per_layer, base + (layer_idx + 1) * nodes_per_layer]))
+        for layer_idx in range(n_layers - 1)
+    ], axis=0)
+    face_of_tet = np.tile(np.arange(n_base_faces, dtype=np.int64), 3 * (n_layers - 1))
 
     # 统一为正有向体积（倒置的交换两个顶点），下游可以依赖朝向，不必取 |det|。
     tetrahedra = orient_tetrahedra(all_nodes, tetrahedra)

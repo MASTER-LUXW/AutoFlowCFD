@@ -14,42 +14,9 @@ import numpy as np
 from loguru import logger
 
 
-# 棱柱 (v0,v1,v2,w0,w1,w2) 正好拆分为这 3 个四面体——与
-# convert_layers_to_tetrahedra 使用的相同对角线一致性规则，
-# 因此此处棱柱的边界面与为该板层产生的完全位相同，
-# 因此与仍邻接此补丁的任何未拆分邻居（棱柱或四面体）自动
-# 共形——前提是 v0<v1<v2 按全局节点索引（底面三角形自身的
-# 顶点排序，相同的行排列带到顶面使 w_i 仍在 v_i "上方"——
-# convert_layers_to_prisms 首次构建棱柱时的自身约定）。
-#
-# 该前提在下游节点重映射后不成立：mesh_background.
-# generate_hybrid_mesh 在构建棱柱后多次调用
-# _dedupe_coincident_points（seam 合并，最终防御遍），
-# 每次都可能将节点的全局索引重新分配给其重合点组的
-# 任意代表——该重映射中没有任何东西保持"v0 的新索引 <
-# v1 的新索引 < v2 的新索引"，仅因为它对旧索引成立。
-# 已直接确认，非理论：在未重新排序的真实重映射后棱柱上
-# 调用此函数在临时诊断脚本中产生了约 23,000 个幻影"非流形"
-# 面组——face_extractor.repair_nonmanifold_mixed 自身的
-# _build_prism_face_occurrences（每次调用都重新排序，参见
-# 其自身文档字符串）在完全相同的网格上找到零个，证明
-# 约 23,000 完全是此函数缺失排序的产物，而非真实缺陷。
-# 此处无条件排序（便宜，无论调用方输入是否已排序都正确）
-# 既是修复也是未来的安全默认值。
-def _split_prisms_to_tets(prisms: np.ndarray) -> np.ndarray:
-    bottom = prisms[:, 0:3]
-    top = prisms[:, 3:6]
-    order = np.argsort(bottom, axis=1)
-    row_idx = np.arange(len(prisms))[:, None]
-    sb = bottom[row_idx, order]
-    st = top[row_idx, order]
-    v0, v1, v2 = sb[:, 0], sb[:, 1], sb[:, 2]
-    w0, w1, w2 = st[:, 0], st[:, 1], st[:, 2]
-    return np.concatenate([
-        np.stack([v0, v1, v2, w2], axis=1),
-        np.stack([v0, v1, w1, w2], axis=1),
-        np.stack([v0, w0, w1, w2], axis=1),
-    ], axis=0)
+# 棱柱 -> 3 个四面体的拆分（块排列）：唯一实现在 mesh_gen/utils/prism_split.py（对角线只依赖侧面四边形自己
+# 的全局编号，节点重映射后照样协调）。
+from ..utils.prism_split import split_prisms_to_tets as _split_prisms_to_tets  # noqa: E402
 
 
 def _split_collapsed_corner_to_2_tets(prisms: np.ndarray, corner: int) -> np.ndarray:

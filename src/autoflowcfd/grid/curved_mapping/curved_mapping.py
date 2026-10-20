@@ -168,7 +168,7 @@ def tri_barycentric(r: np.ndarray, s: np.ndarray) -> Tuple[np.ndarray, np.ndarra
 # 单元朝向修正
 # ---------------------------------------------------------------------------
 #
-# signed_tet_volume / fix_tet_orientation / decompose_prism_to_tets /
+# signed_tet_volume / fix_tet_orientation /
 # fix_prism_orientation 已拆分到 curved_mapping_orientation.py（原文件
 # 超过 400 行的项目约定上限），在本文件顶部原样重新导出（见 import 语句）。
 

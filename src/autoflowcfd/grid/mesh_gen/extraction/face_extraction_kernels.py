@@ -1,4 +1,4 @@
-"""面提取底层 kernel：Numba/numpy 面构建原语。
+"""面提取底层 kernel：Numba / numpy 面构建原语（numba 是硬依赖，不设无 numba 回退）。
 
 从 face_extractor.py 拆分出来，只保留和具体 FaceExtractor API 无关的、
 纯粹的面枚举/编码/排序去重/单元质心计算这些底层构建块，供
@@ -7,22 +7,11 @@ face_extractor.py 的 FaceExtractor 类和 repair_nonmanifold_mixed 复用。
 
 import numpy as np
 from typing import Tuple
-from loguru import logger
 
-try:
-    from numba import njit, prange
-    NUMBA_AVAILABLE = True
-except ImportError:
-    NUMBA_AVAILABLE = False
-    logger.warning("Numba not available, face extraction will be slower")
-    # 提供 numba 不可用时的回退
-    def njit(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-    prange = range
+from numba import njit
 
 from ...schema.grid_nodes import NodeArray
+from ..utils.prism_split import prism_face_triangles
 
 
 @njit(parallel=False)
@@ -243,68 +232,28 @@ def _encode_face_keys(face_nodes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 def _build_prism_face_occurrences(
     prism_connectivity: np.ndarray, cell_index_offset: int
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """直接枚举每个棱柱的 8 个边界三角形（2 个帽 + 3 个侧面四边形，
-    每个分割为 2 个三角形）——见 extract_faces_mixed 的文档字符串了解
-    为什么这等价于但比实例化 3 个子四面体然后事后合并更便宜更简单。
-
-    每个侧面四边形的对角线规则（推导自并且要求精确匹配
-    mesh_prism_to_tet.convert_layers_to_tetrahedra 自己的“v0-w1、v1-w2、
-    v0-w2”规则，使棱柱的面与旧的拆分为四面体路径产生的完全位相同）：
-    将底部三角形顶点排序到 v0<v1<v2（并将相同的行置换携带到顶部三角形，
-    使 w_i 保持在 v_i “上方”）后，8 个面为：
-        底部帽：(v0, v1, v2)
-        顶部帽：(w0, w1, w2)
-        quad(v0,v1/w0,w1): (v0, v1, w1), (v0, w0, w1)
-        quad(v1,v2/w1,w2): (v1, v2, w2), (v1, w1, w2)
-        quad(v0,v2/w0,w2): (v0, v2, w2), (v0, w0, w2)
+    """每个棱柱的 8 个边界三角形（2 个帽 + 3 个侧面四边形各拆成 2 个，对角线规则见
+    `mesh_gen/utils/prism_split.py`：过四边形最小全局编号顶点，与底 / 顶指定无关）的面键与所属单元。
 
     Args:
-        prism_connectivity: (n_prism, 6) int32/int64，(v0,v1,v2,w0,w1,w2)——
-            不要求已底部排序；这里排序。
-        cell_index_offset: 加到每个拥有者索引（如果棱柱占据全局单元索引
-            空间的开始则为 0，按本模块约定它们总是如此——保留为参数而不
-            是硬编码 0，原因与代码库中每个其他每区域偏移都是显式的一样，
-            不是假设）
+        prism_connectivity: (n_prism, 6)，(v0,v1,v2,w0,w1,w2)
+        cell_index_offset: 加到每个所属单元下标上（棱柱占全局单元编号的开头时为 0）
 
     Returns:
-        (key1, max, owner)：每个形状=(n_prism*8,)——与 _build_face_dict_numba
-        产生相同的编码，准备好与 tet 出现列表拼接并直接送入现有的 lexsort +
-        去重扫描。
+        (key1, max, owner)：与 _build_face_dict_numba 相同的编码，可与四面体的面出现直接拼接后排序去重。
     """
     n_prism = len(prism_connectivity)
     if n_prism == 0:
         return (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int64))
 
-    bottom = prism_connectivity[:, 0:3].astype(np.int64)
-    top = prism_connectivity[:, 3:6].astype(np.int64)
-    order = np.argsort(bottom, axis=1)
-    row_idx = np.arange(n_prism)[:, None]
-    sb = bottom[row_idx, order]
-    st = top[row_idx, order]
-    v0, v1, v2 = sb[:, 0], sb[:, 1], sb[:, 2]
-    w0, w1, w2 = st[:, 0], st[:, 1], st[:, 2]
-
-    faces = np.stack([
-        np.stack([v0, v1, v2], axis=1),
-        np.stack([w0, w1, w2], axis=1),
-        np.stack([v0, v1, w1], axis=1),
-        np.stack([v0, w0, w1], axis=1),
-        np.stack([v1, v2, w2], axis=1),
-        np.stack([v1, w1, w2], axis=1),
-        np.stack([v0, v2, w2], axis=1),
-        np.stack([v0, w0, w2], axis=1),
-    ], axis=1)  # (n_prism, 8, 3)
-
-    faces_flat = faces.reshape(-1, 3)
+    faces_flat = prism_face_triangles(prism_connectivity).reshape(-1, 3)
     owner = np.repeat(np.arange(n_prism, dtype=np.int64) + cell_index_offset, 8)
 
     # BL 挤出在恰好一个底部顶点停止增长的棱柱（v_i == w_i——有效的
     # “坍缩为楔形”单元，总体积仍然非零因为其他 2 个角有真实高度）恰好
-    # 产生这 8 个面中的 2 个零面积重复顶点三角形（配对 v_i 与 w_i 的
-    # 两个侧面四边形对角面）。旧的拆分为 3 个子四面体路径从不遇到这个，
-    # 因为它默默丢弃相应的近零体积子四面体；这个直接枚举必须显式过滤
-    # 它们，否则它们会到达 FaceData.__post_init__ 的正面积检查作为硬
-    # 零面积面（已在真实案例上确认：78426 个这样的面）。
+    # 产生这 8 个面中的 2 个编号重复的零面积三角形（配对 v_i 与 w_i 的
+    # 两个侧面四边形拆分面），必须显式过滤，否则会作为零面积面到达
+    # FaceData 的正面积检查（真实案例上确认过 78426 个这样的面）。
     degenerate = (
         (faces_flat[:, 0] == faces_flat[:, 1])
         | (faces_flat[:, 0] == faces_flat[:, 2])
@@ -316,68 +265,3 @@ def _build_prism_face_occurrences(
 
     key1, fmax = _encode_face_keys(faces_flat)
     return key1, fmax, owner
-
-
-def _build_tet_face_occurrences_numpy(
-    tet_connectivity: np.ndarray, cell_index_offset: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """构建 tet 面出现的向量化 numpy 回退，当 numba 不可用时
-    （镜像 _build_face_dict_numba 的每 tet 4 面枚举，仅被
-    extract_faces_mixed 的无 numba 路径使用）。
-    """
-    n_tet = len(tet_connectivity)
-    if n_tet == 0:
-        return (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int64))
-    c = tet_connectivity.astype(np.int64)
-    faces = np.stack([
-        c[:, [0, 1, 2]], c[:, [0, 1, 3]], c[:, [0, 2, 3]], c[:, [1, 2, 3]],
-    ], axis=1).reshape(-1, 3)
-    key1, fmax = _encode_face_keys(faces)
-    owner = np.repeat(np.arange(n_tet, dtype=np.int64) + cell_index_offset, 4)
-    return key1, fmax, owner
-
-
-def _scan_sorted_faces_python(
-    sorted_key1: np.ndarray, sorted_max: np.ndarray, sorted_cells: np.ndarray, n_faces_raw: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
-    """_scan_sorted_faces_numba 的纯 Python 直译（相同算法），用于
-    extract_faces_mixed 的无 numba 回退。
-    """
-    alloc_size = n_faces_raw
-    unique_key1 = np.zeros(alloc_size, dtype=np.int64)
-    unique_max = np.zeros(alloc_size, dtype=np.int32)
-    face_conn = np.full((alloc_size, 2), -1, dtype=np.int32)
-    occurrence_count = np.zeros(alloc_size, dtype=np.int32)
-
-    uniq_idx = 0
-    unique_key1[0] = sorted_key1[0]
-    unique_max[0] = sorted_max[0]
-    face_conn[0, 0] = sorted_cells[0]
-    occurrence_count[0] = 1
-
-    for i in range(1, n_faces_raw):
-        if sorted_key1[i] != sorted_key1[i - 1] or sorted_max[i] != sorted_max[i - 1]:
-            uniq_idx += 1
-            unique_key1[uniq_idx] = sorted_key1[i]
-            unique_max[uniq_idx] = sorted_max[i]
-            face_conn[uniq_idx, 0] = sorted_cells[i]
-            occurrence_count[uniq_idx] = 1
-        else:
-            if occurrence_count[uniq_idx] < 2:
-                face_conn[uniq_idx, occurrence_count[uniq_idx]] = sorted_cells[i]
-            occurrence_count[uniq_idx] += 1
-
-    n_unique_faces = uniq_idx + 1
-    unique_key1 = unique_key1[:n_unique_faces]
-    unique_max = unique_max[:n_unique_faces]
-    face_conn = face_conn[:n_unique_faces]
-    occurrence_count = occurrence_count[:n_unique_faces]
-
-    n_interior = int(np.sum(occurrence_count == 2))
-
-    face_nodes_decoded = np.zeros((n_unique_faces, 3), dtype=np.int32)
-    face_nodes_decoded[:, 0] = (unique_key1 >> 32).astype(np.int32)
-    face_nodes_decoded[:, 1] = (unique_key1 & 0xFFFFFFFF).astype(np.int32)
-    face_nodes_decoded[:, 2] = unique_max
-
-    return face_nodes_decoded, face_conn, occurrence_count, n_unique_faces, n_interior

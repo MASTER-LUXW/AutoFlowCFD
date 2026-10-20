@@ -29,7 +29,7 @@ Example:
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from loguru import logger
 
 from ...schema.grid_nodes import NodeArray
@@ -39,14 +39,11 @@ from ...validation.quality_metrics import (
     compute_tetrahedron_volumes,
 )
 from .face_extraction_kernels import (
-    NUMBA_AVAILABLE,
     _build_face_dict_numba,
     _scan_sorted_faces_numba,
-    _scan_sorted_faces_python,
     _compute_tet_cell_centers,
     _compute_prism_cell_centers,
     _build_prism_face_occurrences,
-    _build_tet_face_occurrences_numpy,
 )
 from ..background.face_geometry_finalize import finalize_face_data, validate_face_data
 
@@ -85,13 +82,8 @@ def repair_nonmanifold_mixed(
         return prism_keep, tet_keep
 
     prism_key1, prism_max, prism_owner = _build_prism_face_occurrences(prism_connectivity, cell_index_offset=0)
-    if NUMBA_AVAILABLE:
-        tet_key1, tet_max, tet_owner_local, _ = _build_face_dict_numba(
-            tet_connectivity.astype(np.int32), n_tet
-        )
-        tet_owner = tet_owner_local.astype(np.int64) + n_prism
-    else:
-        tet_key1, tet_max, tet_owner = _build_tet_face_occurrences_numpy(tet_connectivity, cell_index_offset=n_prism)
+    tet_key1, tet_max, tet_owner_local, _ = _build_face_dict_numba(tet_connectivity.astype(np.int32), n_tet)
+    tet_owner = tet_owner_local.astype(np.int64) + n_prism
 
     key1 = np.concatenate([prism_key1, tet_key1])
     fmax = np.concatenate([prism_max, tet_max])
@@ -226,64 +218,19 @@ class FaceExtractor:
         n_cells = cell_connectivity.shape[0]
         logger.info(f"Extracting faces from {n_cells} tetrahedral cells...")
 
-        # 步骤 1：使用优化的 Numba 函数构建面数组
-        if NUMBA_AVAILABLE:
-            logger.debug("Using optimized radix-sort face extraction")
-            face_key1_raw, face_max_raw, face_cell_map_raw, n_faces_raw = _build_face_dict_numba(
-                cell_connectivity, n_cells
-            )
+        # 步骤 1：Numba 构建面出现
+        face_key1_raw, face_max_raw, face_cell_map_raw, n_faces_raw = _build_face_dict_numba(
+            cell_connectivity, n_cells
+        )
 
-            # 步骤 2：按 (face_key1, face_max) 排序——face_key1 为主，
-            # face_max 作为字典序 tie-break。在普通 NumPy 中完成，因为
-            # Numba 不支持 np.lexsort；这仍然是向量化的 O(n log n) 操作，
-            # 不是 Python 循环。
-            logger.debug("Sorting faces via lexsort...")
-            sort_indices = np.lexsort((face_max_raw, face_key1_raw))
-            sorted_key1 = face_key1_raw[sort_indices]
-            sorted_max = face_max_raw[sort_indices]
-            sorted_cells = face_cell_map_raw[sort_indices]
+        # 步骤 2：按 (face_key1, face_max) 字典序排序（Numba 不支持 np.lexsort，在 NumPy 中做，O(n log n)）
+        sort_indices = np.lexsort((face_max_raw, face_key1_raw))
 
-            # 步骤 3：通过单次扫描去重并构建连接
-            logger.debug("Deduplicating faces via single-pass scan...")
-            (face_nodes_sorted, face_connectivity,
-             occurrence_count, n_unique_faces, n_interior) = \
-                _scan_sorted_faces_numba(
-                    sorted_key1, sorted_max, sorted_cells, n_faces_raw
-                )
-        else:
-            logger.warning("Numba not available, falling back to slower Python implementation")
-            # 回退到原始 Python 实现（为兼容性保留）
-            face_dict: Dict[Tuple[int, int, int], List[int]] = {}
-
-            for cell_idx in range(n_cells):
-                nodes_idx = cell_connectivity[cell_idx]
-
-                # 四面体有 4 个三角面
-                faces = [
-                    tuple(sorted([nodes_idx[0], nodes_idx[1], nodes_idx[2]])),
-                    tuple(sorted([nodes_idx[0], nodes_idx[1], nodes_idx[3]])),
-                    tuple(sorted([nodes_idx[0], nodes_idx[2], nodes_idx[3]])),
-                    tuple(sorted([nodes_idx[1], nodes_idx[2], nodes_idx[3]]))
-                ]
-
-                for face_nodes in faces:
-                    if face_nodes not in face_dict:
-                        face_dict[face_nodes] = []
-                    face_dict[face_nodes].append(cell_idx)
-
-            # 将 dict 转换为数组
-            n_unique_faces = len(face_dict)
-            face_nodes_sorted = np.zeros((n_unique_faces, 3), dtype=np.int32)
-            face_connectivity = np.full((n_unique_faces, 2), -1, dtype=np.int32)
-            occurrence_count = np.zeros(n_unique_faces, dtype=np.int32)
-
-            for idx, (face_nodes, cell_list) in enumerate(face_dict.items()):
-                face_nodes_sorted[idx] = list(face_nodes)
-                for i, cell_idx in enumerate(cell_list[:2]):  # 每面最多 2 个单元
-                    face_connectivity[idx, i] = cell_idx
-                occurrence_count[idx] = len(cell_list)
-
-            n_interior = np.sum(occurrence_count == 2)
+        # 步骤 3：单次扫描去重并构建连接
+        (face_nodes_sorted, face_connectivity,
+         occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_numba(
+            face_key1_raw[sort_indices], face_max_raw[sort_indices], face_cell_map_raw[sort_indices], n_faces_raw
+        )
 
         all_cell_centers = _compute_tet_cell_centers(cell_connectivity, nodes)
         return finalize_face_data(
@@ -305,14 +252,10 @@ class FaceExtractor:
         现有 n_bl_cells 约定）：棱柱占据 [0, n_prism)，四面体占据
         [n_prism, n_prism + n_tet)。
 
-        每个棱柱直接贡献其 8 个边界三角形（2 个帽 + 3 个侧面四边形，
-        每个四边形沿相同的“底部低索引到顶部高索引”对角线分割，
-        mesh_prism_to_tet.convert_layers_to_tetrahedra 已使用的）而不是
-        实例化为 3 个独立四面体然后事后合并——见 _build_prism_face_
-        occurrences 了解推导。这保证共享侧面的两个棱柱选择相同的对角线
-        （规则仅依赖全局节点索引比较，不是每棱柱选择），棱柱的帽面与
-        相邻棱柱或四面体的面纯粹通过匹配排序节点三元组去重，与此处
-        任何其他面相同——棱柱/核心四面体接口不需要特殊处理。
+        每个棱柱直接贡献其 8 个边界三角形（2 个帽 + 3 个侧面四边形各拆成 2 个，对角线过四边形最小全局
+        编号顶点——`mesh_gen/utils/prism_split.py`，与 BL 转四面体、棱柱降级同一份规则）。规则只依赖
+        四边形自己的四个全局编号，共享侧面的两个单元（棱柱或按同一规则拆出的四面体）必然选同一条对角线，
+        所有面纯粹按排序节点三元组去重，棱柱 / 核心四面体界面不需要特殊处理。
 
         Args:
             prism_connectivity: (n_prism, 6) int32，见 PrismCells 文档
@@ -336,17 +279,8 @@ class FaceExtractor:
             prism_connectivity, cell_index_offset=0
         )
 
-        if NUMBA_AVAILABLE:
-            tet_key1, tet_max, tet_owner_local, n_tet_faces_raw = _build_face_dict_numba(
-                tet_connectivity.astype(np.int32), n_tet
-            )
-            tet_owner = tet_owner_local.astype(np.int64) + n_prism
-        else:
-            # 回退：复用与棱柱路径相同的向量化方法（numba 不可用）
-            # 而不是第三次复制慢速的 Python-dict 回退
-            tet_key1, tet_max, tet_owner = _build_tet_face_occurrences_numpy(
-                tet_connectivity, cell_index_offset=n_prism
-            )
+        tet_key1, tet_max, tet_owner_local, _ = _build_face_dict_numba(tet_connectivity.astype(np.int32), n_tet)
+        tet_owner = tet_owner_local.astype(np.int64) + n_prism
 
         face_key1_raw = np.concatenate([prism_key1, tet_key1])
         face_max_raw = np.concatenate([prism_max, tet_max])
@@ -360,16 +294,10 @@ class FaceExtractor:
         sorted_cells = face_cell_map_raw[sort_indices]
 
         logger.debug("Deduplicating faces via single-pass scan...")
-        if NUMBA_AVAILABLE:
-            (face_nodes_sorted, face_connectivity,
-             occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_numba(
-                sorted_key1, sorted_max, sorted_cells, n_faces_raw
-            )
-        else:
-            (face_nodes_sorted, face_connectivity,
-             occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_python(
-                sorted_key1, sorted_max, sorted_cells, n_faces_raw
-            )
+        (face_nodes_sorted, face_connectivity,
+         occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_numba(
+            sorted_key1, sorted_max, sorted_cells, n_faces_raw
+        )
 
         all_cell_centers = np.vstack([
             _compute_prism_cell_centers(prism_connectivity, nodes),
