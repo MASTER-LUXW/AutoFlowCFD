@@ -101,8 +101,9 @@ def generate_core_background_points(
           通过 KDTree 检查最近 PLC 点）——靠近 BL 外表面或精细的
           core-only 壁，现有网格已经足够精细，在那里挤入背景点
           反而有产生退化薄片的风险；
-      (b) 真正在封闭 PLC 体积内部（射线投射奇偶检验，复用
-          mesh_domain_classify 自身的向量射线/三角相交例程）——
+      (b) 真正在封闭 PLC 体积内部（射线奇偶，`point_inside_closed_surface`：擦过边 / 顶点的
+          退化射线换方向重投；此前固定 +x 方向、包含式计数，方形远场面沿对角线三角化时，
+          y、z 同序号的规则网格候选点恰好落在对角线上，系统性误判）——
           PLC 外的点会违反 tetgen 的假设（每个输入点在其面围成
           的区域内），而对于非凸域（此处的真实可能性——车身自身
           的孔在箱形隧道中凿出凹面），单纯的包围盒网格不能保证。
@@ -126,7 +127,7 @@ def generate_core_background_points(
         没有任何网格单元能通过两个过滤器则 k 可能为 0
     """
     from scipy.spatial import cKDTree
-    from ..utils.mesh_domain_classify_geometry import _ray_triangle_intersect_count
+    from ..utils.mesh_domain_classify_geometry import point_inside_closed_surface
 
     if target_edge_length <= 0.0 or len(plc_points) == 0:
         return np.empty((0, 3), dtype=np.float64)
@@ -156,11 +157,9 @@ def generate_core_background_points(
     v0 = plc_points[plc_faces[:, 0]]
     v1 = plc_points[plc_faces[:, 1]]
     v2 = plc_points[plc_faces[:, 2]]
-    direction = np.array([1.0, 0.0, 0.0])
-    inside_mask = np.zeros(len(candidates), dtype=bool)
-    for i in range(len(candidates)):
-        hits = _ray_triangle_intersect_count(candidates[i], direction, v0, v1, v2)
-        inside_mask[i] = (hits % 2) == 1
+    # 候选点离曲面至少 clearance，非退化射线总能找到；万一全部方向退化（None），该点不作背景点（背景点
+    # 只是给 tetgen 打散初始大四面体，少一个不影响正确性）
+    inside_mask = np.array([point_inside_closed_surface(c, v0, v1, v2) is True for c in candidates], dtype=bool)
 
     result = candidates[inside_mask].astype(np.float64)
     logger.info(

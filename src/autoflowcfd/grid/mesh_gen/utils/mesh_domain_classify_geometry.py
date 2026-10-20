@@ -1,7 +1,7 @@
 """mesh_domain_classify.classify_boundary_groups 用到的底层几何原语。
 
 从 mesh_domain_classify.py 拆分出来：面/边连通分量分析、射线-三角形相交
-计数（用于内外判定）、封闭壳体内部点查找（tetgen hole 种子 用）、带符号
+奇偶（用于内外判定）、封闭壳体内部点查找（tetgen hole 种子 用）、带符号
 体积、以及包围盒接触面判定。这些都是纯几何计算，和"怎么分类边界组"这个
 上层策略无关。
 """
@@ -53,29 +53,66 @@ def _connected_components(faces: np.ndarray, inverse: np.ndarray, face_of_edge: 
     return labels
 
 
-def _ray_triangle_intersect_count(
-    origin: np.ndarray, direction: np.ndarray,
-    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
-) -> int:
-    """计数 Moller-Trumbore 射线/三角形相交次数（`origin` 前方）。
-    对所有三角形向量化，用于射线投射奇偶性内外测试。"""
-    eps = 1e-9
-    edge1 = v1 - v0
-    edge2 = v2 - v0
-    h = np.cross(direction, edge2)
-    a = np.einsum('ij,ij->i', edge1, h)
-    valid = np.abs(a) > eps
-    f = np.zeros_like(a)
-    f[valid] = 1.0 / a[valid]
+# 射线判内外的退化容差（全部无量纲）：重心坐标离 0 不到它（射线擦过边 / 顶点）、射线方向与三角形平面夹角的
+# 正弦不到它（贴着平面）、或交点沿射线的距离不到它乘曲面尺度（起点在面上）时，这条射线的奇偶不可信。
+_RAY_DEGENERATE_TOL = 1e-9
+# 确定性的通用射线方向（固定种子的随机单位向量，不与坐标轴或任何规则网格对齐）；前一个方向退化时用下一个
+_RAY_DIRECTIONS = np.random.default_rng(20261020).normal(size=(16, 3))
+_RAY_DIRECTIONS /= np.linalg.norm(_RAY_DIRECTIONS, axis=1, keepdims=True)
+
+
+def _ray_parity(origin: np.ndarray, direction: np.ndarray,
+                v0: np.ndarray, v1: np.ndarray, v2: np.ndarray, scale: float) -> Optional[int]:
+    """射线 origin + t·direction（t > 0）穿过三角形次数的奇偶；射线退化（擦过边 / 顶点、贴着某个三角形的平面、
+    起点在面上）时返回 None，由调用方换方向重投。
+
+    2026-10-20 以前（`_ray_triangle_intersect_count`）重心坐标用包含式 >= -eps 判定：射线恰过两三角形公共边
+    或公共顶点时被重复计数、奇偶翻转；平行判据 |e1·(d×e2)| > 1e-9 是带量纲的绝对量（量纲为长度平方），边长约
+    3e-5 m 的细小三角形被当成平行而漏计。这里全部判据无量纲，退化不再被计数而是让调用方换方向。
+    """
+    e1 = v1 - v0
+    e2 = v2 - v0
+    normal = np.cross(e1, e2)
+    n_len = np.linalg.norm(normal, axis=1)
+    h = np.cross(direction, e2)
+    a = np.einsum('ij,ij->i', e1, h)                                   # = -direction·normal
     s = origin - v0
+    parallel = np.abs(a) <= _RAY_DEGENERATE_TOL * n_len
+    if np.any(parallel & (np.abs(np.einsum('ij,ij->i', s, normal)) <= _RAY_DEGENERATE_TOL * scale * n_len)):
+        return None                                                    # 射线贴着某个三角形的平面
+    f = np.where(parallel, 0.0, 1.0 / np.where(parallel, 1.0, a))
     u = f * np.einsum('ij,ij->i', s, h)
-    valid &= (u >= -eps) & (u <= 1 + eps)
-    q = np.cross(s, edge1)
-    v = f * np.einsum('j,ij->i', direction, q)
-    valid &= (v >= -eps) & (u + v <= 1 + eps)
-    t = f * np.einsum('ij,ij->i', edge2, q)
-    valid &= t > eps
-    return int(np.sum(valid))
+    q = np.cross(s, e1)
+    v = f * (q @ direction)
+    w = 1.0 - u - v
+    t = f * np.einsum('ij,ij->i', e2, q)
+    tol, t_tol = _RAY_DEGENERATE_TOL, _RAY_DEGENERATE_TOL * scale
+    hit = ~parallel & (u > tol) & (v > tol) & (w > tol) & (t > t_tol)
+    near = ~parallel & (u >= -tol) & (v >= -tol) & (w >= -tol) & (t >= -t_tol) & ~hit
+    if np.any(near):
+        return None
+    return int(np.count_nonzero(hit)) % 2
+
+
+def point_inside_closed_surface(point: np.ndarray, v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+                                n_agree: int = 1) -> Optional[bool]:
+    """点是否在封闭三角形曲面（三角形角点 v0 / v1 / v2，(n, 3)）内部：沿 _RAY_DIRECTIONS 依次投射射线，跳过
+    退化的方向，取前 `n_agree` 条非退化射线的奇偶，全部为奇才算内部、全部为偶才算外部。
+
+    Returns:
+        True / False；非退化射线不足 `n_agree` 条或彼此不一致（曲面不水密）时返回 None。
+    """
+    scale = float(np.ptp(np.vstack([v0, v1, v2]), axis=0).max())
+    parities = []
+    for direction in _RAY_DIRECTIONS:
+        parity = _ray_parity(point, direction, v0, v1, v2, scale)
+        if parity is not None:
+            parities.append(parity)
+            if len(parities) == n_agree:
+                break
+    if len(parities) < n_agree or len(set(parities)) != 1:
+        return None
+    return parities[0] == 1
 
 
 def _min_dist_to_edges(p: np.ndarray, v0: np.ndarray, v1: np.ndarray, v2: np.ndarray) -> float:
@@ -113,16 +150,15 @@ def find_point_inside_closed_shell(
     每个候选点在接受前需通过两种验证：不能太靠近壳体表面本身
     （顶点质心可能恰好命中的退化情况，例如正好落在凹边上——
     普通的顶点距离检查会遗漏，因为最近的*顶点*仍可能很远），
-    且射线投射奇偶性（奇数个交点 = 内部）测试必须在多个独立
-    随机射线方向上一致，而非仅一个（单条射线可能擦过边/顶点
-    而偶然给出错误答案）。
+    且射线奇偶（`point_inside_closed_surface`：擦过边 / 顶点的退化射线换方向重投）必须在 `n_directions`
+    条非退化射线上一致为奇（曲面不严格水密时多条射线互相印证）。
 
     Args:
         nodes: (n_nodes, 3) 坐标（共享数组；仅 `faces` 引用的行被使用）
         faces: (n_faces, 3) 封闭、水密的三角形连接关系
         n_attempts: 每面回退候选点的尝试次数
-        n_directions: 每个候选点在接受前必须一致的独立射线方向数
-        seed: 随机数种子（确定性候选/方向采样）
+        n_directions: 每个候选点在接受前必须一致为奇的非退化射线数
+        seed: 随机数种子（确定性候选采样）
 
     Returns:
         壳体内部的一个点，若无候选点通过验证则返回 None
@@ -147,18 +183,11 @@ def find_point_inside_closed_shell(
     for i in rng.choice(len(faces), size=n_face_try, replace=False):
         candidates.append(face_centroids[i] - normals[i] * edge_len * 0.5)
 
-    directions = rng.normal(size=(n_directions, 3))
-    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
-
     min_clearance = edge_len * 0.05
     for cand in candidates:
         if _min_dist_to_edges(cand, v0, v1, v2) < min_clearance:
             continue
-        hit_parities = [
-            _ray_triangle_intersect_count(cand, d, v0, v1, v2) % 2
-            for d in directions
-        ]
-        if all(p == 1 for p in hit_parities):
+        if point_inside_closed_surface(cand, v0, v1, v2, n_agree=n_directions):
             return cand
     return None
 
