@@ -304,8 +304,10 @@ def step(solver, dt: float) -> float:
         # 逐方程 RMS 留给求解循环记进收敛历史（`convergence_history.py`，每个物理步一条）
         red = LocalReductions(np)
         is_prism = np.arange(n_cells) < int(solver.mesh.n_prism_cells)
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
         residual_norm, solver._residual_per_equation = monitor_residuals(
-            red, solver.state.dU_dt, is_prism, order_from_n_sps(n_sps))
+            red, solver.state.dU_dt, is_prism, order_from_n_sps(n_sps), _reference_scales(solver.freestream, n_vars))
         solver._residual_turbulence = explicit_turbulence_residual(
             red, solver.turb_model, is_prism, order_from_n_sps(n_sps))
 

@@ -64,8 +64,9 @@ class TestHistoryObject:
 
 
 @pytest.mark.parametrize("order", [1, 2])
-def test_monitor_residuals_per_equation_and_unchanged_total(order):
-    """逐方程 RMS 只统计真实自由度（四面体填充槽位不进）；合起来的监控残差与此前的定义逐位相同。"""
+def test_monitor_residuals_per_equation_and_scaled_total(order):
+    """逐方程 RMS 只统计真实自由度（四面体填充槽位不进）；监控残差是逐方程 RMS 除以参考量级后的均方根（I-81：
+    此前直接合成原始残差的 RMS，能量方程的量级压倒其余方程）。"""
     rng = np.random.default_rng(3)
     n_sps = sps_width(order)
     is_prism = np.array([True, False, True, False])
@@ -73,10 +74,13 @@ def test_monitor_residuals_per_equation_and_unchanged_total(order):
     n_tet = real_sps_per_cell(order)[1]
     R[~is_prism, n_tet:] = 1e30                                    # 填充槽位：变馊的值
     red = LocalReductions(np)
-    total, per_eq = monitor_residuals(red, R, is_prism, order)
+    scales = np.array([1.0, 10.0, 10.0, 10.0, 1e4])
+    total, per_eq = monitor_residuals(red, R, is_prism, order, scales)
     real = np.concatenate([R[0], R[1, :n_tet], R[2], R[3, :n_tet]])
-    assert total == red.rms(real)                                   # 此前 monitor_residual_norm 的定义
     np.testing.assert_allclose(per_eq, np.sqrt((real ** 2).mean(axis=0)), rtol=1e-14)
+    assert total == pytest.approx(float(np.sqrt(np.mean((per_eq / scales) ** 2))), rel=1e-15)
+    # 五个方程按参考量级归一化后同量级：各方程的贡献都在 O(1)，没有一个方程压倒其余方程
+    assert np.all((per_eq / scales) > 0.5) and np.all((per_eq / scales) < 2.0)
 
 
 def _solver(time_scheme, **kw):

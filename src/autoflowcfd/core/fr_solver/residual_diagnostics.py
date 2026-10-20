@@ -18,11 +18,9 @@ Fluent/STAR-CCM+ 里是 CLI 本该直接打印出来的信息：
   - STAR-CCM+：同样按方程分别报告 RMS 残差，且提供"Max"（最大残差）
     监视器，可以直接看到最大残差出现的位置。
 
-本模块提供的诊断（不改变、不替代现有 `get_residual_norm()` 驱动的
-`residual_drop_threshold`/Order Continuation 升阶判据——那条判据继续
-用现有的合并 RMS，保持已经验证过的行为不变；本模块只是在打印层面
-新增诊断信息，帮助用户/排查者一眼区分"大部分单元已收敛、被少数异常
-单元卡住统计量"与"真的在整体发散"这两种此前混淆过的情形）：
+收敛 / 升阶判据用的监控残差也按同一组参考量级逐方程归一化后合成（`time_integration/residual_norm.py::
+monitor_residuals`，2026-10-19 I-81；此前是原始残差的合并 RMS，由能量方程主导）。本模块给出的是打印层面的
+诊断信息，帮助用户/排查者一眼区分"大部分单元已收敛、被少数异常单元卡住统计量"与"真的在整体发散"：
 
 1. `compute_scaled_residuals`：每个守恒变量分别算 RMS，除以基于自由
    来流条件构造的参考量级（rho_inf/rho_inf*vel_inf/p_inf），得到

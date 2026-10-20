@@ -225,8 +225,10 @@ class _GPUSolverStepMixin:
 
         red = LocalReductions(cp)
         is_prism = np.arange(n_cells) < int(self.mesh.n_prism_cells)
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
         residual_norm, self._residual_per_equation = monitor_residuals(
-            red, residual0_raw, is_prism, order_from_n_sps(n_sps))
+            red, residual0_raw, is_prism, order_from_n_sps(n_sps), _reference_scales(self.freestream, self.n_vars))
         self._residual_turbulence = explicit_turbulence_residual(
             red, self.turb_model_gpu, is_prism, order_from_n_sps(n_sps))
         self.iteration += 1

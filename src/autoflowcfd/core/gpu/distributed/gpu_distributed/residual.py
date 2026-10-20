@@ -200,4 +200,6 @@ class _MultiGPUResidualMixin:
         is_prism = native_cell_is_prism(self.dist_flat_face)[:n_local]
         order = order_from_n_sps(self.mesh.n_sps_per_cell)
         self._residual_turbulence = explicit_turbulence_residual(red, self.turb_model_gpu, is_prism, order)
-        return monitor_residuals(red, residual_local, is_prism, order)
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
+        return monitor_residuals(red, residual_local, is_prism, order, _reference_scales(self.freestream, 5))

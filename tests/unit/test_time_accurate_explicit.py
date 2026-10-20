@@ -144,7 +144,11 @@ def test_residual_norm_is_rms_over_real_dofs_and_matches_across_backends():
     r_cpu = cpu.step(1e-6)
     mask = real_row_mask(np.arange(n) < mesh.n_prism_cells, U0.shape[1], order)
     rows = cpu.state.dU_dt.reshape(-1, 5)
-    assert r_cpu == pytest.approx(float(np.sqrt(np.mean(rows[mask] ** 2))), rel=1e-14)
+    from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
+    per_eq = np.sqrt(np.mean(rows[mask] ** 2, axis=0))
+    scaled = per_eq / _reference_scales(cpu.freestream, 5)
+    assert r_cpu == pytest.approx(float(np.sqrt(np.mean(scaled ** 2))), rel=1e-14)
     assert mask.sum() < mask.size                    # 网格含四面体，确有填充槽位被排除
     assert gpu.step(1e-6) == pytest.approx(r_cpu, rel=1e-11)
     assert dist.step(1e-6) == pytest.approx(r_cpu, rel=1e-11)

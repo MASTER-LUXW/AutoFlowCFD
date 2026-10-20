@@ -7,6 +7,13 @@
 
 `RESIDUAL_NORM_VERSION` 随阶段基准写进 checkpoint（`order_continuation/checkpoint_state.py`）：旧定义写出的基准
 续算时不再使用。
+
+## 版本 3：逐方程按参考量级归一化（2026-10-19，I-81）
+
+监控残差 = 各方程真实自由度 RMS 除以该方程参考量级（`fr_solver/residual_diagnostics.py::_reference_scales`：
+rho_inf、rho_inf |u_inf|、p_inf）后的均方根。版本 2 把五个守恒量的原始残差直接合成一个 RMS：能量方程的量级约为
+密度方程的 p_inf / rho_inf ~ 1e5 倍，收敛判据、升阶判据与显式自适应 CFL 实际只看能量方程，其余方程的停滞或发散
+被淹没。逐方程 RMS（未归一化）照旧进收敛历史。
 """
 
 from typing import Optional, Tuple
@@ -14,15 +21,15 @@ from typing import Optional, Tuple
 import numpy as np
 
 #: 当前定义的版本号（真实自由度上的 RMS）。旧 checkpoint 没有这个字段
-RESIDUAL_NORM_VERSION = 2
+RESIDUAL_NORM_VERSION = 3
 
 
-def monitor_residuals(red, residual, cell_is_prism, order: int) -> Tuple[float, np.ndarray]:
+def monitor_residuals(red, residual, cell_is_prism, order: int, scales) -> Tuple[float, np.ndarray]:
     """`residual (n_cells * n_sps, n_vars)` 或 `(n_cells, n_sps, n_vars)` 在真实自由度上的全局 RMS：
-    `(全部变量合起来的 RMS, 逐方程 RMS (n_vars,))`。
+    `(监控残差, 逐方程 RMS (n_vars,))`。
 
-    前者是收敛判据、阶段基准与自适应 CFL 用的监控残差（定义见模块文档，与此前逐位相同）；后者只进收敛历史
-    （`core/fr_solver/convergence_history.py`），每方程的平方和与真实行数一次归约。
+    监控残差是收敛判据、阶段基准与自适应 CFL 用的那个数：逐方程 RMS 除以 `scales` 后的均方根（定义见模块文档）；
+    逐方程 RMS（未归一化）进收敛历史（`core/fr_solver/convergence_history.py`）。每方程的平方和与真实行数一次归约。
 
     Args:
         red: 归约对象（`implicit/reductions.py::LocalReductions` 或分布式的 `MPIReductions`），数组模块即
@@ -30,6 +37,8 @@ def monitor_residuals(red, residual, cell_is_prism, order: int) -> Tuple[float, 
         residual: 本进程拥有的单元的残差（分布式为 local 单元、原生排列）
         cell_is_prism: (n_cells,) 主机布尔数组，与 `residual` 的单元顺序一致
         order: 多项式阶数（填充槽位划分）
+        scales: `(n_vars,)` 各方程的参考量级（平均流取 `_reference_scales(freestream, n_vars)`；已按尺度归一化的
+            量传全 1）
     """
     from autoflowcfd.fr.native_padding import real_row_mask
 
@@ -40,11 +49,11 @@ def monitor_residuals(red, residual, cell_is_prism, order: int) -> Tuple[float, 
     n_sps = flat.shape[1]
     rows = flat.reshape(n_cells * n_sps, -1)
     real = rows[xp.asarray(real_row_mask(cell_is_prism, n_sps, int(order)))]
-    total = red.rms(real)
     sq = xp.sum(real * real, axis=0)
     sums = red.sum_array(np.append(np.asarray(sq.get() if hasattr(sq, "get") else sq), float(real.shape[0])))
     per_equation = np.sqrt(sums[:-1] / sums[-1]) if sums[-1] > 0 else np.zeros(sums.size - 1)
-    return total, per_equation
+    scaled = per_equation / np.asarray(scales, dtype=np.float64)
+    return float(np.sqrt(np.mean(scaled * scaled))), per_equation
 
 
 def explicit_turbulence_residual(red, model, cell_is_prism, order: int) -> Optional[float]:
@@ -58,7 +67,7 @@ def explicit_turbulence_residual(red, model, cell_is_prism, order: int) -> Optio
     if rates is None:
         return None
     model.last_update_rates = None
-    return float(monitor_residuals(red, rates, cell_is_prism, order)[0])
+    return monitor_residuals(red, rates, cell_is_prism, order, np.ones(rates.shape[-1]))[0]   # 速率已按尺度归一化
 
 
 def turbulence_monitor_residual(solver) -> Optional[float]:
