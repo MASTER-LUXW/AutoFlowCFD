@@ -48,6 +48,10 @@ AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
 #   再压到 1"后：残差与"全程多线程"**逐位相同**（P1/P2/P3 三阶实测最大
 #   绝对差 0.0），同时完整保留上面 9~11% 的求解阶段收益。
 #
+# 线程数取"本节点可用核数 / 本节点 MPI rank 数"：MPI 每节点多个 rank 时各 rank 都开满全部核数会超订
+# （rank 数 x 核数个 BLAS 线程互相抢核）。本节点 rank 数取 OpenMPI 的 OMPI_COMM_WORLD_LOCAL_SIZE 或 MPICH 的
+# MPI_LOCALNRANKS；都没有时按单进程。2026-10-20 以前恒为全部核数。
+#
 # 全部用 `setdefault`：用户/CI 显式设过的环境变量一律优先，不覆盖。
 # ============================================================================
 import os
@@ -59,21 +63,21 @@ from ._numba_cache import configure_numba_cache_dir
 
 configure_numba_cache_dir()
 
-_cpu_count = multiprocessing.cpu_count()
-os.environ.setdefault('MKL_NUM_THREADS', str(_cpu_count))
-os.environ.setdefault('OPENBLAS_NUM_THREADS', str(_cpu_count))
-os.environ.setdefault('NUMEXPR_NUM_THREADS', str(_cpu_count))
-os.environ.setdefault('VECLIB_MAXIMUM_THREADS', str(_cpu_count))
-os.environ.setdefault('OMP_NUM_THREADS', str(_cpu_count))
+_ranks_per_node = int(os.environ.get('OMPI_COMM_WORLD_LOCAL_SIZE') or os.environ.get('MPI_LOCALNRANKS') or 1)
+_blas_threads = str(max(1, multiprocessing.cpu_count() // max(1, _ranks_per_node)))
+for _var in ('MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS',
+             'OMP_NUM_THREADS'):
+    os.environ.setdefault(_var, _blas_threads)
 
-__version__ = "0.1.0"
+from typing import Dict
+
+from ._version import read_version
+
+__version__ = read_version()
 __author__ = "AutoFlowCFD Team"
 __maintainer__ = "Mr Lu"
 __email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
-__name__ = "AutoFlowCFD"  # 添加包名称
-
-from typing import Dict
 
 # 导入主 API 类
 from .api import AutoFlowCFDAPI
@@ -81,7 +85,6 @@ from .api import AutoFlowCFDAPI
 # 模块元数据
 __all__ = [
     "__version__",
-    "__name__",
     "__author__",
     "__email__",
     "__license__",
@@ -115,7 +118,7 @@ def get_info() -> Dict[str, str]:
         >>> print(info['version'])
     """
     return {
-        "name": __name__,
+        "name": "AutoFlowCFD",
         "version": __version__,
         "author": __author__,
         "maintainer": __maintainer__,
