@@ -36,8 +36,8 @@ def enforce_solve_quality_gate(volume_data, report=None, skip: bool = False) -> 
 def high_order_mesh_for_solver(volume_data, order: int, report=None, skip_quality_check: bool = False) -> HighOrderMesh:
     """质量门 + 高阶网格构造。
 
-    质量门用启发式指标筛查，不保证拦住所有退化/反转单元（尤其跳过质量门时）；曲边映射构造高阶几何时做严格的
-    Jacobian 符号检查，这里把它的 `MeshDistortionError` 换成同一个异常类型、给出可读诊断。
+    质量门用启发式指标筛查，不保证拦住所有退化/反转单元（尤其跳过质量门时）；构造高阶网格几何（直边单元）时在
+    全部求值点上做严格的 Jacobian 符号检查，这里把它的 `MeshDistortionError` 换成同一个异常类型、给出可读诊断。
 
     Raises:
         MeshQualityGateError: 质量门未通过，或检测到畸变单元
@@ -48,8 +48,9 @@ def high_order_mesh_for_solver(volume_data, order: int, report=None, skip_qualit
         mesh.load_from_volume_mesh(volume_data)
     except MeshDistortionError as e:
         raise MeshQualityGateError(
-            f"网格在构造高阶曲边几何时检测到畸变单元，拒绝求解：{e}\n"
-            f"请在网格生成/修复阶段处理该单元（'autoflowcfd grid check'/'repair'），不要跳过质量门强行求解。") from e
+            f"构造高阶网格几何时检测到 Jacobian 非正的单元（翻转或退化），拒绝求解：{e}\n"
+            f"请重新生成网格（'autoflowcfd grid generate-volume'），或对外部体网格用 'autoflowcfd grid import-volume'"
+            f"（质量不过时做 Stage A 修复）处理后再求解；不要跳过质量门强行求解。") from e
     return mesh
 
 

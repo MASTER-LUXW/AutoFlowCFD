@@ -101,7 +101,10 @@ def load_mesh_for_solver(
         print("Detected volume-mesh NAS format. Parsing and attributing boundaries...")
         from autoflowcfd.grid.nas_io.boundary_types import BoundaryTypeError
         try:
-            volume_data, report = import_external_volume_mesh(input_file, surface_mesh)
+            # repair=False：求解用的必须是用户给的网格。修复（Stage A 光顺会移动节点）只在 `grid import-volume` 里
+            # 显式进行；质量不过时由下方的质量门拦截。2026-10-20 以前这里用默认 repair=True，质量门不过就静默移动
+            # 用户网格的节点再求解
+            volume_data, report = import_external_volume_mesh(input_file, surface_mesh, repair=False)
         except BoundaryTypeError as e:
             raise click.ClickException(
                 f"{e}\n边界条件类型在建立体网格时确定：请用 'autoflowcfd grid import-volume {input_file} "
