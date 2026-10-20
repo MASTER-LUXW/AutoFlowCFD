@@ -1,11 +1,4 @@
-"""后处理 CLI 共用辅助函数 (从 post_commands.py 拆分)。
-
-从 post_commands.py 拆出来（该文件原有 974 行，超过 400 行硬性拆分
-阈值）：这一批"案例目录/checkpoint 定位与加载"辅助函数被
-coefficients/export-vtk/report/convergence/transient-mean/
-transient-rms/transient-psd 七个命令共用，与任何单个具体命令都不是
-强绑定关系，独立成一个纯辅助模块最清晰（重量级命令主体保留在 *_commands.py）。
-"""
+"""后处理命令共用的辅助函数：算例目录里体网格与 checkpoint 的定位与加载、收敛历史重放、物理时间读取、节点场写出。"""
 
 import pickle
 from pathlib import Path

@@ -1,15 +1,8 @@
-"""`post transient-mean` / `transient-rms` / `transient-psd` 命令
-(从 post_commands.py 拆分)。
+"""`post transient-mean` / `transient-rms` / `transient-psd`：瞬态历史统计。
 
-从 post_commands.py 拆出来（该文件原有 974 行，超过 400 行硬性拆分
-阈值）：这三个命令都是围绕"瞬态历史统计"这一主题（依次遍历案例目录下
-全部 checkpoint、累积统计量），合计约 260 行，与文件里其余偏"单个
-checkpoint"的命令（coefficients/export-vtk/report/convergence）自成
-一组，是清晰的拆分边界。用普通 `@click.command()`（而不是
-`@post.command()`）定义——因为定义时这里还拿不到 `post` 这个 group
-对象——由 post_commands.py 在模块加载末尾 `post.add_command(...)`
-注册，与 cli/grid/commands.py 给 generate-volume/import-volume 注册到
-`grid` 完全是同一套机制。纯代码搬移，不改变任何行为。
+mean / rms 依次读取算例目录下全部 checkpoint（按物理时间取样，`--warmup-time` 之前的不计），累积节点分辨率的
+时均与脉动均方根（`postprocess/transient_stats.py`）；mean 另可统计气动系数的时均与标准差。psd 读求解器每个物理步
+写出的探针时间序列（`core/probes`）。三个命令用普通 `@click.command()` 定义，由 `commands.py` 注册到 `post`。
 """
 
 import csv
@@ -30,149 +23,114 @@ from autoflowcfd.cli.post.helpers import (
 )
 
 
+def _accumulate_history(case: str, grid: Optional[str], warmup_time: float, on_sample=None):
+    """逐个 checkpoint 累积时均 / RMS（mean 与 rms 共用）；`on_sample(stats, ckpt_file, metadata)` 在每个计入统计
+    的样本上调用一次（mean 的气动系数统计）。返回 `(grid_data, stats)`。
+
+    Raises:
+        click.ClickException: 算例目录没有 checkpoint，或全部样本都早于 warmup_time
+    """
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+    from autoflowcfd.postprocess import TransientStatistics
+
+    case_path = Path(case)
+    grid_data = _load_grid_data(_locate_grid_file(case_path, grid))
+    ckpt_files = _list_checkpoints(case_path)
+    if not ckpt_files:
+        raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
+
+    manager = CheckpointManager()
+    stats = TransientStatistics(grid_data)
+    n_excluded = 0
+    for ckpt_file in ckpt_files:
+        solution_data, _history, _iteration, metadata = manager.load(ckpt_file)
+        time = _physical_time(metadata, ckpt_file)
+        if time < warmup_time:
+            n_excluded += 1
+            continue
+        stats.accumulate(_to_solution_vector(solution_data), time=time)
+        if on_sample is not None:
+            on_sample(stats, ckpt_file, metadata)
+    if n_excluded == len(ckpt_files):
+        raise click.ClickException(f"全部 {n_excluded} 个 checkpoint 都早于 --warmup-time={warmup_time}s")
+    if n_excluded:
+        logger.info(f"Excluded {n_excluded} checkpoint(s) with time < warmup_time={warmup_time}s")
+    return grid_data, stats
+
+
+def _vtk_path(output: str) -> Path:
+    output_path = Path(output)
+    return output_path if output_path.suffix else output_path.with_suffix('.vtk')
+
+
 @click.command(name="transient-mean")
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="案例目录")
+              help="算例目录")
 @click.option("--grid", "-g", type=click.Path(exists=True),
-              help="网格文件路径（如果不在案例目录中）")
+              help="体网格文件（缺省取算例目录的 volume_mesh.pkl 或 checkpoint 记录的求解输入）")
 @click.option("--output", "-o", type=click.Path(), default="mean_flow.vtk",
               help="输出文件")
 @click.option("--warmup-time", type=float, default=0.0,
-              help="排除物理时间早于此值的 checkpoint（启动瞬态，例如从"
-                   "静止/自由来流阶跃启动时尾流/边界层尚未发展完全的阶段），"
-                   "不计入时间平均/RMS 统计。默认 0.0（不排除任何样本）。")
+              help="排除物理时间早于此值的 checkpoint（起动瞬态：尾流 / 边界层尚未发展完全的阶段），不计入统计。"
+                   "默认 0.0（不排除）")
+@click.option("--coefficients/--no-coefficients", default=True, show_default=True,
+              help="同时统计气动系数（Cd/Cl/Cs）的时均与标准差：用第一个计入统计的 checkpoint 重建一次求解器，"
+                   "之后每个 checkpoint 只替换状态、积分物理无滑移固壁上的力。没有物体（无物理无滑移固壁）的算例用 "
+                   "--no-coefficients")
 @click.option("--reference-area", type=float, default=None,
-              help="气动系数参考面积 (m^2)。提供后会额外为每个 checkpoint 重建"
-                   "求解器状态、积分 WALL 边界力，输出时间平均 Cd/Cl/Cs（P-03）。"
-                   "省略时尝试从体网格自动估算迎风投影面积；估算失败则跳过"
-                   "系数统计（不猜一个可能误导的值）。")
-def transient_mean(case: str, grid: Optional[str], output: str,
-                    warmup_time: float, reference_area: Optional[float]) -> None:
-    """计算时间平均流场。
-
-    通过累积案例目录 checkpoints/ 文件夹下每个已保存的 checkpoint（参见
-    TransientStatistics.accumulate），从瞬态仿真数据计算平均流场统计量，
-    并把节点分辨率的平均场导出为 VTK。当参考面积可用时（P-03），同时
-    累积时间平均气动系数（Cd/Cl/Cs）。
-
-    Args:
-        case: 案例目录
-        grid: 网格文件路径（如果省略则从案例目录自动检测）
-        output: 输出文件
-        warmup_time: 排除早于此物理时间的 checkpoint（启动瞬态）
-        reference_area: 气动系数用的参考面积
+              help="气动系数参考面积 (m^2)；不给时沿来流方向由物体面的迎风投影自动估算（同 solve 命令）")
+@click.option("--skip-quality-check", is_flag=True,
+              help="重建求解器时跳过网格质量门（原求解靠该选项才跑得起来的网格，统计气动系数时同样需要）")
+def transient_mean(case: str, grid: Optional[str], output: str, warmup_time: float, coefficients: bool,
+                   reference_area: Optional[float], skip_quality_check: bool) -> None:
+    """时间平均流场（节点分辨率，导出为 VTK）与气动系数时均。
 
     Examples:
-        $ autoflowcfd post transient-mean --case transient_results/
+        $ autoflowcfd post transient-mean --case transient_results/ --warmup-time 0.05
     """
     logger.info(f"Computing time-averaged flow for case: {case}")
 
     try:
-        from autoflowcfd.postprocess import TransientStatistics
+        coeff = {}
 
-        case_path = Path(case)
-        grid_file = _locate_grid_file(case_path, grid)
-        grid_data = _load_grid_data(grid_file)
+        def on_sample(stats, ckpt_file, metadata):
+            from autoflowcfd.cli.solve.checkpoint_io import (
+                rebuild_solver_from_checkpoint, restore_solver_state_from_fields,
+            )
+            from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
-        ckpt_files = _list_checkpoints(case_path)
-        if not ckpt_files:
-            raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
+            if "solver" not in coeff:
+                # 只重建一次（真实网格上一次重建要 1~2 分钟），之后的 checkpoint 只替换状态数组；
+                # 后处理只读状态，一律在 CPU 上重建（与 post coefficients 同一约定）
+                coeff["solver"], _it, _meta = rebuild_solver_from_checkpoint(
+                    str(ckpt_file), backend="cpu", reference_area=reference_area,
+                    skip_quality_check=skip_quality_check)
+            else:
+                restore_solver_state_from_fields(coeff["solver"], metadata["fields"], metadata)
+            solver = coeff["solver"]
+            c = compute_aerodynamic_coefficients_fr(solver, reference_area=solver._reference_area)
+            stats.accumulate_coefficients(c.Cd, c.Cl, c.Cs)
 
-        from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager()
-        stats = TransientStatistics(grid_data)
-
-        # P-03 气动系数时间平均：懒构造一次 FRSolver（几何/gh ost provider
-        # 只建一次，见 restore_solver_state_from_fields 文档——每个 checkpoint
-        # 都完整 rebuild_solver_from_checkpoint 在真实网格上要 1~2 分钟/次，
-        # 乘以 checkpoint 数会让这条命令实际不可用），后续 checkpoint 只
-        # 原地替换状态数组。reference_area 解析失败（未提供且自动估算
-        # 也失败）时不猜测，直接跳过系数统计，只做流场 mean/RMS。
-        coeff_solver = None
-        coeff_reference_area = None
-        coeff_enabled = True
-        n_excluded = 0
-
-        for ckpt_file in ckpt_files:
-            solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
-            time = _physical_time(metadata, ckpt_file)
-            if time < warmup_time:
-                n_excluded += 1
-                continue
-
-            solution = _to_solution_vector(solution_data)
-            stats.accumulate(solution, time=time)
-
-            if coeff_enabled:
-                try:
-                    if coeff_solver is None:
-                        from autoflowcfd.cli.solve.checkpoint_io import (
-                            rebuild_solver_from_checkpoint, restore_solver_state_from_fields,
-                        )
-                        # 后处理只读状态，一律在 CPU 上重建（与 post coefficients 同一约定）
-                        coeff_solver, _it, _meta = rebuild_solver_from_checkpoint(
-                            str(ckpt_file), backend="cpu", reference_area=reference_area,
-                        )
-                        coeff_reference_area = coeff_solver._reference_area
-                        if not coeff_reference_area or coeff_reference_area <= 0:
-                            logger.warning(
-                                "未提供 --reference-area 且无法从体网格自动估算，"
-                                "跳过气动系数时间平均统计（仅输出流场 mean/RMS）。"
-                            )
-                            coeff_enabled = False
-                            coeff_solver = None
-                    else:
-                        fields = metadata.get("fields", {})
-                        if "U_sps" not in fields:
-                            raise ValueError("checkpoint 缺少 U_sps，无法精确重建气动力积分状态")
-                        restore_solver_state_from_fields(coeff_solver, fields, metadata)
-
-                    if coeff_solver is not None:
-                        from autoflowcfd.postprocess.fr_coefficients import (
-                            compute_aerodynamic_coefficients_fr,
-                        )
-                        coeffs = compute_aerodynamic_coefficients_fr(
-                            coeff_solver, reference_area=coeff_reference_area,
-                        )
-                        stats.accumulate_coefficients(coeffs.Cd, coeffs.Cl, coeffs.Cs)
-                except Exception as e:
-                    logger.warning(
-                        f"Checkpoint {ckpt_file.name} 气动系数计算失败，跳过该样本"
-                        f"的系数统计（流场 mean/RMS 不受影响）：{e}"
-                    )
-
-        if n_excluded:
-            logger.info(f"Excluded {n_excluded} checkpoint(s) with time < warmup_time={warmup_time}s")
-
+        grid_data, stats = _accumulate_history(case, grid, warmup_time, on_sample=on_sample if coefficients else None)
         result = stats.compute_statistics()
 
-        vector_fields = {}
-        scalar_fields = {}
+        vector_fields, scalar_fields = {}, {}
         if all(k in result.mean_fields for k in ('velocity_u', 'velocity_v', 'velocity_w')):
             vector_fields['MeanVelocity'] = np.column_stack([
-                result.mean_fields['velocity_u'],
-                result.mean_fields['velocity_v'],
-                result.mean_fields['velocity_w'],
-            ])
+                result.mean_fields['velocity_u'], result.mean_fields['velocity_v'], result.mean_fields['velocity_w']])
         if 'pressure' in result.mean_fields:
             scalar_fields['MeanPressure'] = result.mean_fields['pressure']
-
-        output_path = Path(output)
-        if not output_path.suffix:
-            output_path = output_path.with_suffix('.vtk')
+        output_path = _vtk_path(output)
         _export_point_fields_vtk(output_path, grid_data, vector_fields, scalar_fields)
 
-        click.echo(
-            f"✓ Time-averaged flow field exported: {output_path} "
-            f"({result.num_samples} samples, {result.sampling_time:.4f}s)"
-        )
+        click.echo(f"✓ Time-averaged flow field exported: {output_path} "
+                   f"({result.num_samples} samples, {result.sampling_time:.4f}s)")
         if result.mean_coefficients:
             click.echo(
                 f"✓ Mean aerodynamic coefficients ({stats.n_coeff_samples} samples): "
                 f"Cd={result.mean_coefficients['Cd']:.6f} (std={result.std_coefficients['Cd']:.6f}), "
                 f"Cl={result.mean_coefficients['Cl']:.6f} (std={result.std_coefficients['Cl']:.6f}), "
-                f"Cs={result.mean_coefficients['Cs']:.6f} (std={result.std_coefficients['Cs']:.6f})"
-            )
+                f"Cs={result.mean_coefficients['Cs']:.6f} (std={result.std_coefficients['Cs']:.6f})")
 
     except click.ClickException:
         raise
@@ -183,81 +141,37 @@ def transient_mean(case: str, grid: Optional[str], output: str,
 
 @click.command(name="transient-rms")
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="案例目录")
+              help="算例目录")
 @click.option("--grid", "-g", type=click.Path(exists=True),
-              help="网格文件路径（如果不在案例目录中）")
+              help="体网格文件（缺省取算例目录的 volume_mesh.pkl 或 checkpoint 记录的求解输入）")
 @click.option("--output", "-o", type=click.Path(), default="rms.vtk",
               help="输出文件")
 @click.option("--warmup-time", type=float, default=0.0,
-              help="排除物理时间早于此值的 checkpoint（启动瞬态），不计入 RMS 统计。"
-                   "默认 0.0（不排除任何样本）。")
+              help="排除物理时间早于此值的 checkpoint（起动瞬态），不计入统计。默认 0.0（不排除）")
 def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: float) -> None:
-    """计算 RMS 脉动。
-
-    从瞬态数据中计算流场脉动的均方根 (RMS)，使用与
-    transient-mean 相同的检查点累积过程（参见 TransientStatistics.accumulate/compute_statistics）。
-
-    Args:
-        case: 案例目录
-        grid: 网格文件路径（如果省略则从案例目录自动检测）
-        output: 输出文件
-        warmup_time: 排除早于此物理时间的 checkpoint（启动瞬态）
+    """速度与压力脉动的均方根（节点分辨率，导出为 VTK）。
 
     Examples:
-        $ autoflowcfd post transient-rms --case transient_results/
+        $ autoflowcfd post transient-rms --case transient_results/ --warmup-time 0.05
     """
     logger.info(f"Computing RMS fluctuations for case: {case}")
 
     try:
-        from autoflowcfd.postprocess import TransientStatistics
-
-        case_path = Path(case)
-        grid_file = _locate_grid_file(case_path, grid)
-        grid_data = _load_grid_data(grid_file)
-
-        ckpt_files = _list_checkpoints(case_path)
-        if not ckpt_files:
-            raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
-
-        from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        ckpt_manager = CheckpointManager()
-        stats = TransientStatistics(grid_data)
-
-        n_excluded = 0
-        for ckpt_file in ckpt_files:
-            solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
-            time = _physical_time(metadata, ckpt_file)
-            if time < warmup_time:
-                n_excluded += 1
-                continue
-            solution = _to_solution_vector(solution_data)
-            stats.accumulate(solution, time=time)
-
-        if n_excluded:
-            logger.info(f"Excluded {n_excluded} checkpoint(s) with time < warmup_time={warmup_time}s")
-
+        grid_data, stats = _accumulate_history(case, grid, warmup_time)
         result = stats.compute_statistics()
 
-        vector_fields = {}
-        scalar_fields = {}
+        vector_fields, scalar_fields = {}, {}
         if all(k in result.rms_fields for k in ('velocity_u_rms', 'velocity_v_rms', 'velocity_w_rms')):
             vector_fields['VelocityRMS'] = np.column_stack([
-                result.rms_fields['velocity_u_rms'],
-                result.rms_fields['velocity_v_rms'],
-                result.rms_fields['velocity_w_rms'],
-            ])
+                result.rms_fields['velocity_u_rms'], result.rms_fields['velocity_v_rms'],
+                result.rms_fields['velocity_w_rms']])
         if 'pressure_rms' in result.rms_fields:
             scalar_fields['PressureRMS'] = result.rms_fields['pressure_rms']
-
-        output_path = Path(output)
-        if not output_path.suffix:
-            output_path = output_path.with_suffix('.vtk')
+        output_path = _vtk_path(output)
         _export_point_fields_vtk(output_path, grid_data, vector_fields, scalar_fields)
 
-        click.echo(
-            f"✓ RMS fluctuation field exported: {output_path} "
-            f"({result.num_samples} samples, {result.sampling_time:.4f}s)"
-        )
+        click.echo(f"✓ RMS fluctuation field exported: {output_path} "
+                   f"({result.num_samples} samples, {result.sampling_time:.4f}s)")
 
     except click.ClickException:
         raise

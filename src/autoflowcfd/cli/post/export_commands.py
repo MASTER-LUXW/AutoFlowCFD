@@ -1,13 +1,6 @@
-"""`post export-vtk` 命令 (从 post_commands.py 拆分)。
+"""`post export-vtk`：把 checkpoint 的场导出为 VTK（体网格或命名边界面片；`--high-order` 导出高阶 Lagrange 单元）。
 
-从 post_commands.py 拆出来（该文件原有 974 行，超过 400 行硬性拆分
-阈值）：export-vtk 单个命令本身就有约 170 行（含较长的 docstring），
-是文件里最重的单个命令，独立成一个文件最清晰。用普通
-`@click.command()`（而不是 `@post.command()`）定义——因为定义时这里
-还拿不到 `post` 这个 group 对象——由 post_commands.py 在模块加载末尾
-`post.add_command(...)` 注册，与 cli/main.py 给顶层命令组注册到
-`cli`、cli/grid/commands.py 给 generate-volume/import-volume 注册到
-`grid` 完全是同一套机制。纯代码搬移，不改变任何行为。
+用普通 `@click.command()` 定义，由 `commands.py` 注册到 `post`。
 """
 
 from pathlib import Path
