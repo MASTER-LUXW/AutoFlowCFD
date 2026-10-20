@@ -120,11 +120,12 @@ def rebuild_distributed_solver_from_checkpoint(
                      artificial_viscosity_alpha=physics["artificial_viscosity_alpha"],
                      wall_treatment=physics["wall_treatment"])
     from autoflowcfd.cli.solve.checkpoint_io.rebuild import (
-        resolve_resume_low_mach_precond, resolve_resume_time_scheme,
+        resolve_resume_low_mach_precond, resolve_resume_time_accurate, resolve_resume_time_scheme,
     )
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
     # 不是物理参数（不改定常解），但与 av_kwargs 走同样的四条构造路径
     av_kwargs["low_mach_precond"] = resolve_resume_low_mach_precond(low_mach_precond, metadata)
+    av_kwargs["time_accurate"] = resolve_resume_time_accurate(time_scheme, metadata)
 
     if multi_gpu and fully_distributed:
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被
@@ -277,9 +278,12 @@ def rebuild_distributed_solver_from_checkpoint(
     metadata["target_order"] = target_order
     metadata["turbulence_model"] = turbulence_model
     metadata["surface_mesh"] = resolved_surface_mesh
-    from autoflowcfd.core.utils.checkpoint_time import restore_inner_iteration_limit
+    from autoflowcfd.core.utils.checkpoint_time import restore_time_state
 
-    restore_inner_iteration_limit(solver, metadata)
+    try:
+        restore_time_state(solver, metadata)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     return solver, iteration, metadata
 
 

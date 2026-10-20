@@ -8,6 +8,13 @@
 
 现在 checkpoint 一律写出 `dt`（元数据），dual-time 另写 `U_prev_sps`（字段，形状同 `U_sps`），续算时恢复。
 
+另有两项（2026-10-20 起写出）：
+
+* **是否时间精确推进**（`time_accurate`，瞬态 rk3 档）。此前不记，瞬态 rk3 的 checkpoint 续算重建成稳态的局部
+  时间步推进——算的已不是时间精确解（`cli/solve/checkpoint_io/rebuild.py::resolve_resume_time_accurate`）。
+* **物理时间**（`physical_time`，时间精确推进时）：瞬态统计、频谱与探针时间序列的时间轴。此前
+  `time_integrator.current_time` 从不推进、也不写出，`post transient-*` 拿迭代数当物理时间。
+
 湍流输运方程同样做双时间步（`core/turbulence/dual_time.py`），它的上一时间层 `turb_prev_unknowns`
 （`(n_cells, n_sps, n_transported)`，模型的未知量空间：SST 为 k 与 ln omega）一并写出与恢复。
 """
@@ -18,6 +25,8 @@ import numpy as np
 
 DT_KEY = "dt"
 INNER_ITERATIONS_KEY = "dual_time_inner_iter"
+TIME_ACCURATE_KEY = "time_accurate"
+PHYSICAL_TIME_KEY = "physical_time"
 PREVIOUS_LEVEL_FIELD = "U_prev_sps"
 TURBULENCE_PREVIOUS_FIELD = "turb_prev_unknowns"
 
@@ -28,18 +37,38 @@ def is_dual_time(solver) -> bool:
     return solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
 
 
+def is_time_accurate(solver) -> bool:
+    """物理时间推进（dual-time，或显式格式的时间精确模式 `time_accurate`）；否则是稳态的伪时间推进。"""
+    return is_dual_time(solver) or bool(getattr(solver, "time_accurate", False))
+
+
 def time_metadata(solver) -> dict:
-    """{"dt": 本次 `solve()` 的时间步长}（尚未求解过时没有）；dual-time 另记内迭代次数上限。"""
+    """时间推进的 checkpoint 元数据：`time_accurate`；本次 `solve()` 的时间步长 `dt`（尚未求解过时没有）；
+    时间精确推进时的物理时间；dual-time 另记内迭代次数上限。"""
     dt = getattr(solver, "_physical_dt", None)
-    out = {} if dt is None else {DT_KEY: float(dt)}
+    out = {TIME_ACCURATE_KEY: bool(getattr(solver, "time_accurate", False))}
+    if dt is not None:
+        out[DT_KEY] = float(dt)
+    if is_time_accurate(solver):
+        out[PHYSICAL_TIME_KEY] = float(solver.time_integrator.current_time)
     if is_dual_time(solver):
         out[INNER_ITERATIONS_KEY] = int(solver.time_integrator.dual_time_steps)
     return out
 
 
-def restore_inner_iteration_limit(solver, metadata: dict) -> None:
-    """dual-time 续算沿用 checkpoint 记录的内迭代次数上限（早于 2026-10-11 的 checkpoint 没有记录，
-    保持求解器构造时的默认值）。"""
+def restore_time_state(solver, metadata: dict) -> None:
+    """续算恢复时间推进状态（单机与分布式重建共用）：物理时间；dual-time 的内迭代次数上限（早于 2026-10-11 的
+    checkpoint 没有记录，保持求解器构造时的默认值）。
+
+    Raises:
+        ValueError: 时间精确的续算、checkpoint 没有记录物理时间（早于 2026-10-20 写出：当时物理时间不推进也不
+            记录，续算无法给出正确的时间轴）
+    """
+    if is_time_accurate(solver):
+        if PHYSICAL_TIME_KEY not in metadata:
+            raise ValueError("checkpoint 没有记录物理时间（早于 2026-10-20 写出）：时间精确的续算无法接上时间轴，"
+                             "请从头求解")
+        solver.time_integrator.current_time = float(metadata[PHYSICAL_TIME_KEY])
     if is_dual_time(solver) and INNER_ITERATIONS_KEY in metadata:
         solver.time_integrator.dual_time_steps = int(metadata[INNER_ITERATIONS_KEY])
 

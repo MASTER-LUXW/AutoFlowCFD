@@ -26,6 +26,7 @@ from autoflowcfd.cli.post.helpers import (
     _list_checkpoints,
     _load_grid_data,
     _locate_grid_file,
+    _physical_time,
     _to_solution_vector,
 )
 
@@ -95,7 +96,7 @@ def transient_mean(case: str, grid: Optional[str], output: str,
 
         for ckpt_file in ckpt_files:
             solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
-            time = float(metadata.get('current_time', iteration))
+            time = _physical_time(metadata, ckpt_file)
             if time < warmup_time:
                 n_excluded += 1
                 continue
@@ -226,7 +227,7 @@ def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: floa
         n_excluded = 0
         for ckpt_file in ckpt_files:
             solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
-            time = float(metadata.get('current_time', iteration))
+            time = _physical_time(metadata, ckpt_file)
             if time < warmup_time:
                 n_excluded += 1
                 continue
@@ -325,7 +326,7 @@ def transient_psd(case: str, grid: Optional[str], output: str, probe_location: t
             solution_data, _history, iteration, metadata = ckpt_manager.load(ckpt_file)
             solution = _to_solution_vector(solution_data)
             p_field = solution.get_pressure()
-            times.append(float(metadata.get('current_time', iteration)))
+            times.append(_physical_time(metadata, ckpt_file))
             pressures_per_ckpt.append([float(p_field[idx]) for idx in probe_cell_idx])
 
         # 采样间隔由 checkpoint 的物理时刻给出；不等间隔时 PressurePSD 报错（频率轴会错）

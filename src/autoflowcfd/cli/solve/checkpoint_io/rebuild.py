@@ -86,6 +86,37 @@ def resolve_resume_time_scheme(requested, metadata):
     return scheme_from_name(metadata["time_scheme"])
 
 
+def resolve_resume_time_accurate(requested_scheme, metadata) -> bool:
+    """续算是否沿用时间精确推进（显式格式全场同一物理步长，`core/time_integration/time_accurate.py`）。
+
+    checkpoint 记录了 `time_accurate` 就沿用；时间精确的算例不能用 `--time-scheme` 换成稳态格式（那是两个稳态
+    格式之间的切换）。没有记录（早于 2026-10-20 写出）时：给了 `--time-scheme`（只能是稳态格式）或记录的是
+    newton-krylov（只有稳态用法）、dual-time（本身时间精确、不用这个开关）即为否；记录的是显式格式时无法区分
+    稳态与瞬态 rk3，报错。2026-10-20 以前不记录、续算一律按稳态的局部时间步重建：瞬态 rk3 的续算算的已不是
+    时间精确解。
+
+    Raises:
+        click.ClickException: 见上
+    """
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
+
+    if "time_accurate" in metadata:
+        recorded = bool(metadata["time_accurate"])
+        if recorded and requested_scheme is not None:
+            raise click.BadParameter("时间精确（瞬态 rk3）算例续算沿用记录的格式，不能换成稳态格式",
+                                     param_hint="--time-scheme")
+        return recorded
+    if requested_scheme is not None:
+        return False
+    required_metadata(metadata, ("time_scheme",))
+    if scheme_from_name(metadata["time_scheme"]) in (TimeIntegrationScheme.NEWTON_KRYLOV,
+                                                     TimeIntegrationScheme.DUAL_TIME):
+        return False
+    raise click.ClickException(
+        "checkpoint 没有记录是否时间精确推进（早于 2026-10-20 写出），记录的显式格式无法区分稳态与瞬态 rk3：稳态续算"
+        "请显式给 --time-scheme；瞬态 rk3 算例请从头求解")
+
+
 def resolve_resume_low_mach_precond(requested, metadata) -> bool:
     """续算的低马赫预处理请求值：显式覆盖（`--low-mach-precond/--no-low-mach-precond`）> checkpoint 记录（缺失即
     报错——时间精确运行必须关闭它，按"多数情况开启"去猜会改变瞬态解）。"""
@@ -214,6 +245,7 @@ def rebuild_from_checkpoint(
         order=order,
         turb_model_name=turbulence_model,
         time_scheme=resolved_scheme,
+        time_accurate=resolve_resume_time_accurate(time_scheme, metadata),
         low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
         # 决定物理解的参数一律从 checkpoint 恢复（来流缺失即报错，见
         # physics_from_metadata）；CFL 等纯数值参数由调用方指定。
@@ -257,9 +289,12 @@ def rebuild_from_checkpoint(
     metadata["turbulence_model"] = turbulence_model
     metadata["backend"] = target_backend
     metadata["surface_mesh"] = resolved_surface_mesh
-    from autoflowcfd.core.utils.checkpoint_time import restore_inner_iteration_limit
+    from autoflowcfd.core.utils.checkpoint_time import restore_time_state
 
-    restore_inner_iteration_limit(solver, metadata)
+    try:
+        restore_time_state(solver, metadata)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     return solver, iteration, metadata, volume_data
 
 

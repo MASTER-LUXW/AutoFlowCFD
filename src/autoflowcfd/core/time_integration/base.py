@@ -268,6 +268,8 @@ class TimeIntegrator:
         self.dual_time_steps = dual_time_steps
         self.dual_time_tolerance = DEFAULT_DUAL_TIME_TOLERANCE
         self.n_steps = 0
+        # 物理时间（秒）：时间精确推进（dual-time、瞬态 rk3）每个物理步由 `time_accurate.advance` 累加 dt，
+        # 随 checkpoint 持久化（`core/utils/checkpoint_time.py`）；伪时间（稳态）推进不动它
         self.current_time = 0.0
         self._table = _SCHEME_TABLE.get(self.scheme, _EULER)
 

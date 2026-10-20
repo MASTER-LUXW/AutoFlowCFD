@@ -103,9 +103,16 @@ def sem_time_step(solver, dt: float) -> float:
 
 
 def advance(solver, dt: float) -> float:
-    """推进一个物理步 `dt`，返回最后一次 `step` 的残差范数。时间精确模式下切成若干全场同步长的子步。"""
+    """推进一个物理步 `dt`，返回最后一次 `step` 的残差范数。时间精确模式下切成若干全场同步长的子步。
+
+    时间精确的推进（dual-time、`time_accurate`）把物理时间 `time_integrator.current_time` 推进 dt（2026-10-20
+    以前从不推进，checkpoint 也不记，瞬态统计与频谱拿迭代数当时间）。
+    """
     if not getattr(solver, "time_accurate", False):
-        return solver.step(dt)
+        res = solver.step(dt)
+        if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
+            solver.time_integrator.current_time += float(dt)
+        return res
     dt = float(dt)
     if not dt > 0.0:
         raise ValueError(f"时间精确推进需要正的物理步长，收到 {dt}")
@@ -125,4 +132,5 @@ def advance(solver, dt: float) -> float:
         if res is not None and not math.isfinite(res):
             break
     solver.last_substeps = n
+    solver.time_integrator.current_time += dt          # 最后一个子步恰好落在 t + dt
     return res

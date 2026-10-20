@@ -13,7 +13,7 @@ import pytest
 from autoflowcfd.cli.solve.checkpoint_io.rebuild import resolve_resume_time_scheme
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as S
 from autoflowcfd.core.utils.checkpoint_time import (
-    INNER_ITERATIONS_KEY, restore_inner_iteration_limit, run_tolerance, time_metadata,
+    INNER_ITERATIONS_KEY, restore_time_state, run_tolerance, time_metadata,
 )
 
 
@@ -45,23 +45,24 @@ def test_transient_override_rejected():
         resolve_resume_time_scheme("dual-time", {})
 
 
-def _solver(scheme, inner=20, dt=None):
-    return SimpleNamespace(time_integrator=SimpleNamespace(scheme=scheme, dual_time_steps=inner), _physical_dt=dt)
+def _solver(scheme, inner=20, dt=None, t=0.0):
+    return SimpleNamespace(time_integrator=SimpleNamespace(scheme=scheme, dual_time_steps=inner, current_time=t),
+                           _physical_dt=dt, time_accurate=False)
 
 
 def test_dual_time_checkpoint_carries_the_inner_iteration_limit_and_runs_all_steps():
     """内迭代次数上限随 checkpoint 写出与恢复；时间精确的续算不以残差下降为停止条件。"""
-    meta = time_metadata(_solver(S.DUAL_TIME, inner=7, dt=1e-4))
-    assert meta == {"dt": 1e-4, INNER_ITERATIONS_KEY: 7}
+    meta = time_metadata(_solver(S.DUAL_TIME, inner=7, dt=1e-4, t=0.25))
+    assert meta == {"time_accurate": False, "dt": 1e-4, "physical_time": 0.25, INNER_ITERATIONS_KEY: 7}
     assert INNER_ITERATIONS_KEY not in time_metadata(_solver(S.NEWTON_KRYLOV, dt=1e-3))
 
     resumed = _solver(S.DUAL_TIME, inner=20)
-    restore_inner_iteration_limit(resumed, meta)
-    assert resumed.time_integrator.dual_time_steps == 7
-    restore_inner_iteration_limit(resumed, {})                     # 旧 checkpoint：保持当前值
+    restore_time_state(resumed, meta)
+    assert resumed.time_integrator.dual_time_steps == 7 and resumed.time_integrator.current_time == 0.25
+    restore_time_state(resumed, {"physical_time": 0.25})          # 早于 2026-10-11：内迭代上限保持当前值
     assert resumed.time_integrator.dual_time_steps == 7
     steady = _solver(S.NEWTON_KRYLOV, inner=20)
-    restore_inner_iteration_limit(steady, meta)
+    restore_time_state(steady, meta)
     assert steady.time_integrator.dual_time_steps == 20
 
     assert run_tolerance(1e-6, resumed) == 0.0

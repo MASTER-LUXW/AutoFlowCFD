@@ -102,6 +102,21 @@ def _list_checkpoints(case_path: Path) -> List[Path]:
     )
 
 
+def _physical_time(metadata: dict, ckpt_file) -> float:
+    """checkpoint 记录的物理时间（时间精确推进累计，`core/utils/checkpoint_time.py`）。
+
+    Raises:
+        ValueError: 没有记录——不是时间精确（瞬态）运行写出的 checkpoint，或早于 2026-10-20 写出（当时物理时间
+            不推进也不记录，此前这里拿迭代数当物理时间，--warmup-time 按迭代数比较）
+    """
+    from autoflowcfd.core.utils.checkpoint_time import PHYSICAL_TIME_KEY
+
+    if PHYSICAL_TIME_KEY not in metadata:
+        raise ValueError(f"{ckpt_file} 没有记录物理时间：不是瞬态（时间精确）运行写出的 checkpoint，或早于 2026-10-20 "
+                         "写出，无法给出时间轴")
+    return float(metadata[PHYSICAL_TIME_KEY])
+
+
 def _to_solution_vector(solution_data):
     """把 checkpoint 里读出的 numpy 数组包装成 SolutionVector。"""
     from autoflowcfd.core.backend.base import SolutionVector
