@@ -307,71 +307,73 @@ class TestTransientStatistics(unittest.TestCase):
 
 
 class TestPressurePSD(unittest.TestCase):
-    """压力 PSD 分析器的测试"""
-    
+    """压力 PSD 分析器（Welch 法，I-158）"""
+
     def setUp(self):
-        """准备测试夹具"""
         self.monitor_points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
         self.dt = 1e-4
-        self.psd = PressurePSD(self.monitor_points, self.dt)
-    
-    def test_initialization(self):
-        """PSD 分析器初始化"""
-        self.assertEqual(len(self.psd.monitor_points), 2)
-        self.assertEqual(self.psd.dt, 1e-4)
-    
-    def test_invalid_dt(self):
-        """拒绝非法的时间步长"""
-        with self.assertRaises(ValueError):
-            PressurePSD(self.monitor_points, dt=0.0)
-    
+        self.psd = PressurePSD(self.monitor_points)
+
+    def _fill(self, values, dt=None):
+        dt = self.dt if dt is None else dt
+        for k, v in enumerate(values):
+            self.psd.add_sample(time=k * dt, pressures=[v, v])
+
     def test_empty_monitor_points(self):
-        """拒绝空的监测点"""
         with self.assertRaises(ValueError):
-            PressurePSD([], dt=1e-4)
-    
+            PressurePSD([])
+
     def test_add_sample(self):
-        """添加压力样本"""
         self.psd.add_sample(time=0.0, pressures=[101325.0, 101326.0])
         self.assertEqual(len(self.psd.times), 1)
         self.assertEqual(len(self.psd.pressure_history[0]), 1)
-    
+
     def test_add_sample_length_mismatch(self):
-        """拒绝长度不符的压力数组"""
         with self.assertRaises(ValueError):
             self.psd.add_sample(time=0.0, pressures=[101325.0])
-    
+
+    def test_times_must_increase(self):
+        self.psd.add_sample(time=1.0, pressures=[0.0, 0.0])
+        with self.assertRaises(ValueError):
+            self.psd.add_sample(time=1.0, pressures=[0.0, 0.0])
+
     def test_compute_psd_insufficient_samples(self):
-        """样本不足时计算 PSD 报错"""
         with self.assertRaises(RuntimeError):
             self.psd.compute_psd(0)
-    
-    def test_compute_psd_valid(self):
-        """样本充足时计算 PSD"""
-        # Add enough samples
-        for i in range(20):
-            pressure = 101325.0 + 10.0 * np.sin(2 * np.pi * 100 * i * self.dt)
-            self.psd.add_sample(time=i*self.dt, pressures=[pressure, pressure])
-        
-        freqs, psd_vals = self.psd.compute_psd(0)
-        
-        self.assertGreater(len(freqs), 0)
-        self.assertEqual(len(freqs), len(psd_vals))
-        self.assertGreater(freqs[-1], 0)  # Max frequency > 0
-    
+
+    def test_non_uniform_sampling_is_an_error(self):
+        """自适应时间步 / 跳过的样本：频率轴会错，必须报错（此前只用构造时的 dt，从不检查）。"""
+        for t in np.r_[np.arange(20) * self.dt, 20 * self.dt + 0.5 * self.dt]:
+            self.psd.add_sample(time=t, pressures=[0.0, 0.0])
+        with self.assertRaisesRegex(ValueError, "等间隔"):
+            self.psd.compute_psd(0)
+
+    def test_parseval_white_noise(self):
+        """单边 PSD 的积分等于脉动方差（窗能量修正正确）。"""
+        rng = np.random.default_rng(0)
+        self._fill(101325.0 + rng.normal(0.0, 3.0, 4096))
+        freqs, psd = self.psd.compute_psd(0)
+        self.assertAlmostEqual(np.sum(psd) * (freqs[1] - freqs[0]) / 9.0, 1.0, delta=0.05)
+
+    def test_nyquist_bin_is_not_doubled(self):
+        """全部能量在 Nyquist 频率的序列（+1, -1 交替，方差 1）：积分必须为 1（此前 Nyquist 频点也乘 2，得 2）。"""
+        self._fill(np.where(np.arange(64) % 2 == 0, 1.0, -1.0))
+        freqs, psd = self.psd.compute_psd(0)
+        self.assertAlmostEqual(np.sum(psd) * (freqs[1] - freqs[0]), 1.0, places=6)
+
+    def test_welch_averaging_reduces_variance(self):
+        """白噪声谱的相对离散度随分段平均下降（此前单段周期图约为 1，不随样本数下降）。"""
+        rng = np.random.default_rng(1)
+        self._fill(rng.normal(0.0, 1.0, 8192))
+        _, psd = self.psd.compute_psd(0)
+        self.assertLess(np.std(psd[1:-1]) / np.mean(psd[1:-1]), 0.5)
+
     def test_find_dominant_frequency(self):
-        """找主频"""
-        # Add sinusoidal signal at 100 Hz
-        for i in range(100):
-            pressure = 101325.0 + 10.0 * np.sin(2 * np.pi * 100 * i * self.dt)
-            self.psd.add_sample(time=i*self.dt, pressures=[pressure, pressure])
-        
-        freq, psd_val = self.psd.find_dominant_frequency(0, min_freq=50, max_freq=150)
-        
-        # 应找到接近 100 Hz 的频率
+        self._fill(101325.0 + 10.0 * np.sin(2 * np.pi * 100 * np.arange(1000) * self.dt))
+        freq, _ = self.psd.find_dominant_frequency(0, min_freq=50, max_freq=150)
         self.assertGreater(freq, 90)
         self.assertLess(freq, 110)
-    
+
     def test_invalid_point_index(self):
         """拒绝非法的点索引"""
         with self.assertRaises(IndexError):

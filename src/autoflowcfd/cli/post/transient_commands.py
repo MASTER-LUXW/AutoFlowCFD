@@ -328,19 +328,8 @@ def transient_psd(case: str, grid: Optional[str], output: str, probe_location: t
             times.append(float(metadata.get('current_time', iteration)))
             pressures_per_ckpt.append([float(p_field[idx]) for idx in probe_cell_idx])
 
-        # 基于 FFT 的 PSD 假设采样均匀——用已保存 checkpoint 之间的
-        # 间隔中位数作为 dt（通常按固定迭代数/时间间隔保存），如果实际
-        # 间隔波动很大就给出警告，而不是静默把非均匀采样序列喂进 rfft。
-        dts = np.diff(times)
-        dt = float(np.median(dts)) if len(dts) else 1.0
-        if len(dts) and np.std(dts) > 0.1 * abs(dt):
-            logger.warning(
-                f"Checkpoint sampling interval is not uniform (std={np.std(dts):.3e}s, "
-                f"median={dt:.3e}s) - PSD assumes uniform dt, so results may be "
-                f"inaccurate. Save checkpoints at a fixed interval for a clean spectrum."
-            )
-
-        psd_analyzer = PressurePSD(monitor_points=list(probe_location), dt=max(dt, 1e-12))
+        # 采样间隔由 checkpoint 的物理时刻给出；不等间隔时 PressurePSD 报错（频率轴会错）
+        psd_analyzer = PressurePSD(monitor_points=list(probe_location))
         for t, pressures in zip(times, pressures_per_ckpt):
             psd_analyzer.add_sample(time=t, pressures=pressures)
 

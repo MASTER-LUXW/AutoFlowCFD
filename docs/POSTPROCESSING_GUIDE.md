@@ -96,7 +96,7 @@ print(f"RMS fields: {list(result.rms_fields.keys())}")
 
 # PSD频谱分析
 monitor_points = [(0.5, 0.0, 0.1)]
-psd = PressurePSD(monitor_points, dt)
+psd = PressurePSD(monitor_points)   # 采样间隔由样本时刻给出，必须等间隔
 
 for step in range(num_steps):
     pressure = get_pressure_at_point(...)
@@ -193,7 +193,9 @@ python benchmarks/benchmark_gpu.py
 
 **主要方法**:
 - `add_sample(time, pressures)`: 添加压力样本
-- `compute_psd(point_index)` → Tuple[freqs, psd]: 计算功率谱
+- `compute_psd(point_index, nperseg=None, overlap=0.5, window="hann")` → Tuple[freqs, psd]: Welch 法单边 PSD（Pa²/Hz）；
+  nperseg 缺省时样本少于 64 个用单段，否则约 8 段（50% 重叠）
+- `sampling_interval()` → float: 由样本时刻给出的采样间隔（不等间隔报错）
 - `find_dominant_frequency(point_index, min_freq, max_freq)` → Tuple[freq, psd]: 找主导频率
 
 ## 已知限制
