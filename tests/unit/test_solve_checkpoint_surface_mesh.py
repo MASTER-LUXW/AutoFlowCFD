@@ -29,6 +29,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7):
     return with_host_state(SimpleNamespace(
         state=state,
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+        bc_overrides=None,
         wall_treatment="resolved", low_mach_precond=True,
         mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
         artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
@@ -85,6 +86,8 @@ class TestRebuildSolverSurfaceMeshFallback:
             "autoflowcfd.core.FRSolver", return_value=fake_solver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
+        ), patch(
+            "autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"
         ):
             rebuild_solver_from_checkpoint(str(ckpt), surface_mesh=call_surface_mesh)
 

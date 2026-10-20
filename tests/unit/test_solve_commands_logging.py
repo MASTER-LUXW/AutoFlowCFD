@@ -26,8 +26,8 @@ def test_solve_status_prints_content_on_stderr():
     runner = CliRunner()
     result = runner.invoke(cli, ["solve", "status"])
     assert result.exit_code == 0
-    assert "Ready" in result.output
-    assert "Orders" in result.output
+    assert "solve steady" in result.output and "solve transient" in result.output
+    assert "P0 ~ P3" in result.output
 
 
 def test_solve_status_backend_prints_content():

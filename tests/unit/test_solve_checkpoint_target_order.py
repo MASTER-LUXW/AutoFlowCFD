@@ -56,6 +56,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0):
         # n_cells）——本文件测的是 target_order 的读写，单元类型不参与。
         mesh=SimpleNamespace(n_prism_cells=n_cells, jacobians={"det_jacs": np.ones(n_cells * n_sps)}),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+        bc_overrides=None,
         wall_treatment="resolved", low_mach_precond=True,
         mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
         artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
@@ -114,6 +115,8 @@ class TestRebuildRestoresSolverOrderToTarget:
             "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
+        ), patch(
+            "autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"
         ):
             solver, iteration, metadata = rebuild_solver_from_checkpoint(str(ckpt))
 
@@ -146,6 +149,8 @@ class TestRebuildRestoresSolverOrderToTarget:
             "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
+        ), patch(
+            "autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"
         ):
             solver, iteration, metadata = rebuild_solver_from_checkpoint(str(ckpt))
 

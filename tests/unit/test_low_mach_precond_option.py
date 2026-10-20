@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -30,7 +31,8 @@ def test_resume_resolution_order():
     assert resolve_resume_low_mach_precond(None, {"low_mach_precond": True}) is True
     assert resolve_resume_low_mach_precond(True, {"low_mach_precond": False}) is True
     assert resolve_resume_low_mach_precond(False, {"low_mach_precond": True}) is False
-    assert resolve_resume_low_mach_precond(None, {}) is True          # 旧 checkpoint：当时默认开启
+    with pytest.raises(click.ClickException, match="low_mach_precond"):   # 未记录且未覆盖：不猜（I-173）
+        resolve_resume_low_mach_precond(None, {})
 
 
 @pytest.mark.parametrize("scheme,enabled", [
@@ -73,6 +75,7 @@ def _fake_solver(low_mach_precond, order=0, n_cells=2, n_sps=1, n_vars=7):
         state=state, order=order, current_order=order,
         mesh=SimpleNamespace(n_prism_cells=n_cells, jacobians={"det_jacs": np.ones(n_cells * n_sps)}),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+        bc_overrides=None,
         wall_treatment="resolved", low_mach_precond=low_mach_precond,
         mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
         artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
@@ -97,7 +100,8 @@ def test_single_node_rebuild_restores_and_overrides(tmp_path, override, expected
 
     with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(MagicMock(), MagicMock())), \
          patch("autoflowcfd.core.FRSolver", side_effect=_fake_frsolver), \
-         patch("autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"):
+         patch("autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"), \
+         patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"):
         rebuild_solver_from_checkpoint(ckpt, low_mach_precond=override)
     assert built["low_mach_precond"] is expected
 
