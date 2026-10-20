@@ -6,7 +6,6 @@ AutoFlowCFD V2.0 - FR 求解器状态数据结构 (S-01)
 """
 
 import numpy as np
-from numba import njit, prange
 from dataclasses import dataclass
 
 from autoflowcfd.core.thermo import GAMMA
@@ -45,6 +44,20 @@ class SolverResult:
     converged: bool
     iterations: int
     final_residual: float
+
+
+def solve_status(converged: bool, tol: float) -> str:
+    """一次 `solve()` 结束时的状态（写进 checkpoint 元数据 `solve_status`，后处理报告据此给出收敛结论）：
+
+    - "converged"：稳态相对收敛判据达到；
+    - "not_converged"：稳态运行结束（步数用完、或停在平台）但判据没有达到；
+    - "finished"：定步数运行（tol <= 0，瞬态）跑完——没有稳态收敛判据可言。
+
+    求解进行中写出的 checkpoint 记为 "running"。
+    """
+    if converged:
+        return "converged"
+    return "not_converged" if tol > 0.0 else "finished"
 
 
 class FRState:

@@ -15,7 +15,7 @@ from typing import Optional
 from autoflowcfd.core.mpi import get_size
 
 from autoflowcfd.core.mpi.comm import run_on_root
-from autoflowcfd.core.utils.checkpoint_physics import physics_metadata, solve_path_metadata
+from autoflowcfd.core.utils.checkpoint_physics import physics_metadata, run_status_metadata, solve_path_metadata
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_metadata
 from autoflowcfd.core.utils.checkpoint_time import (
@@ -120,6 +120,7 @@ def _write_checkpoint_on_root(solver, output_dir, iteration, input_file, turbule
         "distributed": True,
         # 时间格式（2026-09-25）与低马赫预处理开关（2026-10-18）：`solve resume` 默认沿用，与单机写入端共用
         **solve_path_metadata(solver),
+        **run_status_metadata(solver),
         # 决定物理解的参数（2026-09-25 补齐）：此前一个都不写，分布式 resume
         # 因此要么按默认来流静默重建另一个算例、要么（09-24 起）直接报错。
         # 与单机写入端共用同一个函数。

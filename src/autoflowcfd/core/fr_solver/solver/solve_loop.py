@@ -26,7 +26,7 @@ from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import new
 from autoflowcfd.core.time_integration.implicit.newton.physical_time import inner_iteration_suffix
 from autoflowcfd.core.fr_solver.convergence_history import record_step
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
-from autoflowcfd.core.fr_solver.state import SolverResult
+from autoflowcfd.core.fr_solver.state import SolverResult, solve_status
 from autoflowcfd.core.utils import order_continuation
 
 from .. import step as fr_solver_step
@@ -237,6 +237,9 @@ class SolveLoopMixin:
 
             check_resumed_turbulence(self)
 
+        # 求解状态：进行中写出的 checkpoint 记 "running"，结束时按结果设置（`state.solve_status`）
+        self.solve_status = "running"
+
         report = is_root()
         if report:
             logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
@@ -248,11 +251,13 @@ class SolveLoopMixin:
         if uses_order_continuation(self):
             # Order Continuation 路径在 `core/utils/order_continuation.py`
             # 里自己套 `blas_threads_limited`（求解循环在那边）。
-            return self._solve_with_order_continuation(
+            result = self._solve_with_order_continuation(
                 max_iter, dt, tol, checkpoint_callback,
                 phase_max_iter=phase_max_iter,
                 residual_drop_threshold=residual_drop_threshold,
             )
+            self.solve_status = solve_status(result.converged, tol)
+            return result
 
         import time
         converged = False
@@ -329,6 +334,7 @@ class SolveLoopMixin:
         if report:
             report_pseudo_time_summary(self, i + 1)
 
+        self.solve_status = solve_status(converged, tol)
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
 
 

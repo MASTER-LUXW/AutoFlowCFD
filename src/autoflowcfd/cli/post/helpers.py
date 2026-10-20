@@ -157,14 +157,12 @@ def _replay_history(history: dict):
     """把 checkpoint 里的收敛历史（每方程残差 + 系数的并行数组，`core/fr_solver/convergence_history.py`）重放进
     一个新的 ConvergenceAnalyzer，供 report/convergence 复用 ConvergenceAnalyzer/SimulationReport 已有的分析/导出逻辑。
 
-    逐步力系数是压力积分部分（Cd_p/Cl_p，求解时设置了参考面积才有），以 Cd/Cl 填进分析器；没算的步为 nan、不填。
+    逐步力系数是压力积分部分（Cd_p / Cl_p / Cs_p，求解时设置了参考面积才有），按记录的名称原样填进分析器
+    （2026-10-20 以前当作完整的 Cd / Cl 填入、Cs_p 丢掉、其余系数写 0.0）；没算的步为 nan、不填。
     """
     import math
 
-    from autoflowcfd.core.fr_solver.convergence_history import COEFFICIENT_KEYS
-    from autoflowcfd.postprocess import AerodynamicCoefficients, ConvergenceAnalyzer
-
-    cd_key, cl_key = COEFFICIENT_KEYS[0], COEFFICIENT_KEYS[1]
+    from autoflowcfd.postprocess import ConvergenceAnalyzer
 
     analyzer = ConvergenceAnalyzer()
     iterations = history.get('iterations', [])
@@ -175,9 +173,8 @@ def _replay_history(history: dict):
     for idx, it in enumerate(iterations):
         residuals = {eq: values[idx] for eq, values in residuals_by_eq.items() if idx < len(values)}
         cfl = cfl_history[idx] if idx < len(cfl_history) else 0.0
-        coefficients = None
-        if cd_key in coeffs_by_name and not math.isnan(coeffs_by_name[cd_key][idx]):
-            coefficients = AerodynamicCoefficients(Cd=coeffs_by_name[cd_key][idx], Cl=coeffs_by_name[cl_key][idx])
+        coefficients = {name: float(values[idx]) for name, values in coeffs_by_name.items()
+                        if idx < len(values) and not math.isnan(values[idx])}
         analyzer.add_iteration(iteration=it, residuals=residuals, cfl=cfl, coefficients=coefficients)
 
     return analyzer

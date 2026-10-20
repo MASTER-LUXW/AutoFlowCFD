@@ -23,7 +23,6 @@ from loguru import logger
 from dataclasses import dataclass, field, asdict
 
 from .. import __version__
-from .coefficients import AerodynamicCoefficients
 
 
 @dataclass
@@ -34,13 +33,14 @@ class IterationData:
         iteration: 迭代数
         residuals: 各方程的残差值
         cfl: CFL 数
-        coefficients: 气动系数（可选）
+        coefficients: 这一步实际算出的系数 {名称: 值}（例如求解器逐步记录的压力部分 Cd_p / Cl_p / Cs_p）；
+            没算的系数不出现，不以 0 代替
         timestamp: 迭代时间戳
     """
     iteration: int
     residuals: Dict[str, float] = field(default_factory=dict)
     cfl: float = 0.0
-    coefficients: Optional[AerodynamicCoefficients] = None
+    coefficients: Dict[str, float] = field(default_factory=dict)
     timestamp: Optional[datetime] = None
 
 
@@ -51,32 +51,24 @@ class SimulationSummary:
     Attributes:
         total_iterations: 总迭代数
         final_residuals: 最终残差值
-        initial_coefficients: 初始气动系数
-        final_coefficients: 最终气动系数
+        initial_coefficients: 第一步实际算出的系数
+        final_coefficients: 最后一步实际算出的系数
         computation_time: 总计算时间（秒）
-        converged: 仿真是否收敛
-        convergence_criteria: 使用的收敛判据
+        solve_status: 求解器自己的结论（checkpoint 元数据 `solve_status`：converged / not_converged / finished /
+            running，见 `core/fr_solver/state.py::solve_status`）；不知道时为 None
+        converged: solve_status == "converged"；solve_status 未知时为 None——报告不按别的阈值重新判定
     """
     total_iterations: int = 0
     final_residuals: Dict[str, float] = field(default_factory=dict)
-    initial_coefficients: Optional[AerodynamicCoefficients] = None
-    final_coefficients: Optional[AerodynamicCoefficients] = None
+    initial_coefficients: Dict[str, float] = field(default_factory=dict)
+    final_coefficients: Dict[str, float] = field(default_factory=dict)
     computation_time: float = 0.0
-    converged: bool = False
-    convergence_criteria: Dict[str, float] = field(default_factory=dict)
+    solve_status: Optional[str] = None
+    converged: Optional[bool] = None
 
     def to_dict(self) -> Dict:
         """转换成字典。"""
-        d = asdict(self)
-        if self.initial_coefficients:
-            d['initial_coefficients'] = self.initial_coefficients.to_dict()
-        else:
-            d['initial_coefficients'] = None
-        if self.final_coefficients:
-            d['final_coefficients'] = self.final_coefficients.to_dict()
-        else:
-            d['final_coefficients'] = None
-        return d
+        return asdict(self)
 
 
 class ConvergenceAnalyzer:
@@ -109,7 +101,7 @@ class ConvergenceAnalyzer:
         iteration: int,
         residuals: Optional[Dict[str, float]] = None,
         cfl: float = 0.0,
-        coefficients: Optional[AerodynamicCoefficients] = None
+        coefficients: Optional[Dict[str, float]] = None
     ) -> None:
         """把一次迭代的数据加入历史。
 
@@ -117,7 +109,7 @@ class ConvergenceAnalyzer:
             iteration: 迭代数
             residuals: 各方程的残差值
             cfl: CFL 数
-            coefficients: 气动系数（可选）
+            coefficients: 这一步实际算出的系数 {名称: 值}（可选，没算的不要填）
 
         Example:
             >>> analyzer.add_iteration(
@@ -133,7 +125,7 @@ class ConvergenceAnalyzer:
             iteration=iteration,
             residuals=residuals.copy(),
             cfl=cfl,
-            coefficients=coefficients,
+            coefficients=dict(coefficients or {}),
             timestamp=datetime.now()
         )
 
@@ -165,36 +157,19 @@ class ConvergenceAnalyzer:
 
         logger.info(f"Exporting convergence history to: {output_path}")
 
+        # 列取全历史的并集（湍流方程随阶段出现 / 消失、只有部分步算了系数时都不错位）；某步没有的量留空。
+        # 2026-10-20 以前表头取第一行的键、每行按自己的键写，键集合变化时列错位；首行无系数而后续有系数时
+        # 系数列没有表头；没算的系数写 0.0。
+        residual_keys = sorted({k for data in self.history for k in data.residuals})
+        coefficient_keys = list(dict.fromkeys(k for data in self.history for k in data.coefficients))
         try:
             with open(output_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-
-                # 写表头
-                header = ['iteration', 'cfl']
-                if self.history:
-                    header.extend(sorted(self.history[0].residuals.keys()))
-                    if self.history[0].coefficients:
-                        header.extend(['Cd', 'Cl', 'Cm', 'Cs', 'Cy', 'Cr'])
-                writer.writerow(header)
-
-                # 写数据行
+                writer.writerow(['iteration', 'cfl', *residual_keys, *coefficient_keys])
                 for data in self.history:
-                    row = [data.iteration, data.cfl]
-                    res_keys = sorted(data.residuals.keys())
-                    row.extend([data.residuals.get(k, 0.0) for k in res_keys])
-
-                    if data.coefficients:
-                        coeffs = data.coefficients.to_dict()
-                        row.extend([
-                            coeffs.get('Cd', 0.0),
-                            coeffs.get('Cl', 0.0),
-                            coeffs.get('Cm', 0.0),
-                            coeffs.get('Cs', 0.0),
-                            coeffs.get('Cy', 0.0),
-                            coeffs.get('Cr', 0.0)
-                        ])
-
-                    writer.writerow(row)
+                    writer.writerow([data.iteration, data.cfl]
+                                    + [data.residuals.get(k, '') for k in residual_keys]
+                                    + [data.coefficients.get(k, '') for k in coefficient_keys])
 
             logger.success(f"Convergence history exported: {output_path}")
             return output_path
@@ -203,43 +178,36 @@ class ConvergenceAnalyzer:
             logger.error(f"Failed to export CSV: {e}")
             raise
 
-    def get_summary(self, computation_time: float = 0.0) -> SimulationSummary:
+    def get_summary(self, computation_time: float = 0.0, solve_status: Optional[str] = None) -> SimulationSummary:
         """获取仿真汇总统计。
 
         Args:
             computation_time: 总计算时间（秒）
+            solve_status: 求解器自己的结论（checkpoint 元数据 `solve_status`）。2026-10-20 以前这里用写死的
+                "全部残差绝对值 < 1e-4" 重新判定 converged，与求解器实际的判据（相对下降、阶段门控）无关，
+                同一次运行报告与求解日志可能结论相反。
 
         Returns:
             SimulationSummary: 汇总统计
         """
         if not self.history:
-            return SimulationSummary()
+            return SimulationSummary(solve_status=solve_status,
+                                     converged=None if solve_status is None else solve_status == "converged")
 
-        # 取首尾两次迭代
-        first_iter = self.history[0]
-        last_iter = self.history[-1]
-
-        # 检查收敛（简单判据：残差 < 1e-4）。空的 residuals 字典**不能**
-        # 算作已收敛——对空可迭代对象调用 all() 会因为"真空为真"而返回
-        # True，没有这个保护，一个从未填充过逐方程残差的调用方（例如只
-        # 记录了 CFL/系数）会得到一个假阳性的"已收敛"汇总。
-        converged = bool(last_iter.residuals) and all(v < 1e-4 for v in last_iter.residuals.values())
-
+        first_iter, last_iter = self.history[0], self.history[-1]
         summary = SimulationSummary(
             total_iterations=len(self.history),
             final_residuals=last_iter.residuals.copy(),
-            initial_coefficients=first_iter.coefficients,
-            final_coefficients=last_iter.coefficients,
+            initial_coefficients=dict(first_iter.coefficients),
+            final_coefficients=dict(last_iter.coefficients),
             computation_time=computation_time,
-            converged=converged,
-            convergence_criteria={'residual_threshold': 1e-4}
+            solve_status=solve_status,
+            converged=None if solve_status is None else solve_status == "converged",
         )
-
         logger.info(f"Simulation summary:\n"
-                   f"  Iterations: {summary.total_iterations}\n"
-                   f"  Converged:  {summary.converged}\n"
-                   f"  Time:       {summary.computation_time:.1f}s")
-
+                    f"  Iterations: {summary.total_iterations}\n"
+                    f"  Status:     {summary.solve_status}\n"
+                    f"  Time:       {summary.computation_time:.1f}s")
         return summary
 
 
@@ -260,16 +228,19 @@ class SimulationReport:
     def __init__(
         self,
         config: dict,
-        analyzer: ConvergenceAnalyzer
+        analyzer: ConvergenceAnalyzer,
+        solve_status: Optional[str] = None,
     ):
         """初始化报告生成器。
 
         Args:
             config: 仿真配置字典
             analyzer: 带历史数据的收敛分析器
+            solve_status: 求解器自己的结论（checkpoint 元数据 `solve_status`），见 ConvergenceAnalyzer.get_summary
         """
         self.config = config
         self.analyzer = analyzer
+        self.solve_status = solve_status
         logger.info("SimulationReport initialized")
 
     def generate(
@@ -309,17 +280,16 @@ class SimulationReport:
                 **(metadata or {})
             },
             'configuration': self.config,
-            'summary': self.analyzer.get_summary(computation_time).to_dict(),
+            'summary': self.analyzer.get_summary(computation_time, self.solve_status).to_dict(),
             'convergence_history': {
                 'total_iterations': len(self.analyzer.history),
                 'final_residuals': self.analyzer.history[-1].residuals if self.analyzer.history else {},
             }
         }
 
-        # 若有气动系数则加入报告
+        # 最后一步实际算出的系数（只有算过的键）
         if self.analyzer.history and self.analyzer.history[-1].coefficients:
-            report['aerodynamic_coefficients'] = \
-                self.analyzer.history[-1].coefficients.to_dict()
+            report['aerodynamic_coefficients'] = dict(self.analyzer.history[-1].coefficients)
 
         try:
             with open(output_path, 'w') as f:

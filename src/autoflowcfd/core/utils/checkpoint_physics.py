@@ -51,3 +51,9 @@ def solve_path_metadata(solver) -> dict:
         "time_scheme": solver.time_integrator.scheme.value,
         "low_mach_precond": bool(solver.low_mach_precond),
     }
+
+
+def run_status_metadata(solver) -> dict:
+    """求解器自己的收敛结论（`core/fr_solver/state.py::solve_status`）；还没有调用过 `solve()` 时为 "running"。
+    后处理报告的收敛结论只取它，不按别的阈值重新判定。"""
+    return {"solve_status": getattr(solver, "solve_status", "running")}

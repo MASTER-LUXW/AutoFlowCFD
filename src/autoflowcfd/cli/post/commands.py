@@ -192,7 +192,7 @@ def report(case: str, checkpoint: Optional[str], output: str) -> None:
         if output_path.suffix not in ('.json',):
             output_path = output_path.with_suffix('.json')
 
-        sim_report = SimulationReport(config_summary, analyzer)
+        sim_report = SimulationReport(config_summary, analyzer, solve_status=metadata.get('solve_status'))
         path = sim_report.generate(str(output_path), metadata={'source_iteration': iteration})
 
         click.echo(f"✓ Report generated: {path}")
