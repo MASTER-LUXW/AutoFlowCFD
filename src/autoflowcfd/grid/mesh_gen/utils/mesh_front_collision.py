@@ -49,6 +49,8 @@ mesh_front_collision_detect.py，本文件只保留事前裁剪
 这两个真正对外使用的入口。
 """
 
+import itertools
+
 import numpy as np
 from loguru import logger
 
@@ -142,19 +144,20 @@ def clamp_budget_for_convergence(
         remaining_budget: (n_nodes,) float，米，原地修改，
             只会降低，不会升高
         search_multiplier: 广相位 KD-tree 查询半径，作为每个面
-            自身 sqrt(area) 的倍数——比 find_self_colliding_faces
-            的默认值大，因为这个还必须捕获仅靠近但尚未接触的对
+            自身 sqrt(area) 的倍数（接近度启发式：捕获仅靠近但尚未接触的会聚对；
+            真实相交由 find_self_colliding_faces 的完备广相位检测）
         chunk_size: 每个 KD-tree 批次处理的面数
     """
     n_faces = len(faces)
     if n_faces == 0:
         return
 
-    tri, centroids, face_size, normal = _face_geometry(nodes, faces)
+    tri, centroids, face_size, normal, _circ = _face_geometry(nodes, faces)
     budget_before = remaining_budget.copy()
 
+    # 接近度判据：质心距离不超过查询面自身 search_multiplier x sqrt(面积)（树侧半径为 0）
     for row_idx, col_idx in _iter_candidate_pairs(
-        faces, centroids, face_size, search_multiplier, chunk_size
+        faces, centroids, search_multiplier * face_size, centroids, np.zeros(n_faces), chunk_size
     ):
         # 仅实际会聚的对——沿它们的自身法向移动会缩小它们之间的距离——
         # 才会被限制；见 CONVERGING_CLOSING_RATE_THRESHOLD 自己的注释
@@ -213,7 +216,6 @@ def freeze_self_colliding_nodes(
     current_nodes: np.ndarray,
     faces: np.ndarray,
     remaining_budget: np.ndarray,
-    max_iterations: int = 5,
 ) -> np.ndarray:
     """回滚并永久冻结自交叉面上的每个节点，原地修改 `new_nodes`
     和 `remaining_budget`。
@@ -226,12 +228,14 @@ def freeze_self_colliding_nodes(
     （见 mesh_extrusion.py），所以冻结的节点在运行剩余时间内完全停止
     移动——T-Rex 的“局部终止，其他地方继续”语义，其他节点不受影响。
 
-    迭代（受 `max_iterations` 限定），因为消除一对的碰撞偶尔会留下一个
-    仍在移动的邻居与否则不会出问题的东西交叉——只有在其邻居回滚后才成为
-    问题（级联）。每次迭代要么冻结至少一个额外节点，要么找不到并停止，
-    所以这总是自行终止的；上限只限定最坏情况下的每层成本——超出上限的
-    未解决级联仍会在下一层自己的调用中重新检查，并且无论如何会被最终的
-    网格宽重叠验证（mesh_overlap_check.py，在四面体化后运行）捕获。
+    迭代到不再有相交，因为消除一对的碰撞偶尔会留下一个仍在移动的邻居与
+    否则不会出问题的东西交叉——只有在其邻居回滚后才成为问题（级联）。每次
+    迭代至少冻结一个额外节点，否则停止，所以总会终止，且结果确定（与机器
+    无关）。2026-10-20 以前迭代 5 次即返回，残留相交与"相交面的节点全部已
+    冻结"都静默放过。
+
+    相交面的节点全部已冻结时，这些面都在上一层（已接受）的位置上——上一层
+    或输入面网格本身就自交，违反归纳前提，报错并给出位置。
 
     Args:
         new_nodes: 本层的试探节点位置——为新冻结的节点原地修改
@@ -239,15 +243,17 @@ def freeze_self_colliding_nodes(
         faces: (n_faces, 3) 三角形连接，两层挤出用的同一个
         remaining_budget: 每节点剩余挤出预算（米），原地修改，
             新冻结的节点设为 0
-        max_iterations: 级联解决上限（见上方）
 
     Returns:
         int64 数组，本次调用中冻结的节点索引（无则为空）
+
+    Raises:
+        RuntimeError: 相交面的节点全部已冻结（上一层或输入面网格本身自交）
     """
     frozen = np.zeros(len(new_nodes), dtype=bool)
     total_frozen_count = 0
 
-    for i in range(max_iterations):
+    for i in itertools.count():
         colliding_faces = find_self_colliding_faces(new_nodes, faces)
         # 还检查快速推进的面在同一时间步中扫过不同、较慢/已冻结
         # 邻居的领地——见 find_cross_state_colliding_faces 自己的文档
@@ -262,7 +268,10 @@ def freeze_self_colliding_nodes(
         guilty = np.unique(faces[colliding_faces].ravel())
         guilty = guilty[remaining_budget[guilty] > 0]
         if len(guilty) == 0:
-            break
+            where = new_nodes[np.unique(faces[colliding_faces])]
+            raise RuntimeError(
+                f"BL 前沿有 {len(colliding_faces)} 个相交面的节点已全部冻结（位于 {where.min(axis=0)} ~ "
+                f"{where.max(axis=0)}）：这些面都在上一层已接受的位置上，上一层或输入面网格本身自交")
 
         new_nodes[guilty] = current_nodes[guilty]
         remaining_budget[guilty] = 0.0
