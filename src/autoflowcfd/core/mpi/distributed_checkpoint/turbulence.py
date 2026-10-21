@@ -56,18 +56,19 @@ def gather_turbulence_fields(solver, n_global: int, W_local):
     cols = [_host(f)[:n_local] for f in model.transported_fields()]
     cols.append(_host(model.nu_t)[:n_local])
     stacked = gather_global_state(np.stack(cols, axis=-1), solver.partition.local_cells, n_global)
-    if stacked is None:
-        return None
-    names = model.TRANSPORTED_FIELDS
-    out = {name: np.ascontiguousarray(stacked[..., j]) for j, name in enumerate(names)}
-    out["nu_t"] = np.ascontiguousarray(stacked[..., len(names)])
 
     from autoflowcfd.core.turbulence.output import CHECKPOINT_PREFIX, turbulence_cell_means
 
     means = turbulence_cell_means(model, W_local)                 # 本 rank 本地积分平均
     keys = list(means)
+    # 两次收集都是集体调用（点对点收发），全部 rank 都做完才能让非 root 返回
     gathered = gather_global_state(np.stack([means[k] for k in keys], axis=-1)[:, None, :],
                                    solver.partition.local_cells, n_global)
+    if stacked is None or gathered is None:                       # 非 root
+        return None
+    names = model.TRANSPORTED_FIELDS
+    out = {name: np.ascontiguousarray(stacked[..., j]) for j, name in enumerate(names)}
+    out["nu_t"] = np.ascontiguousarray(stacked[..., len(names)])
     for j, key in enumerate(keys):
         out[CHECKPOINT_PREFIX + key] = np.ascontiguousarray(gathered[:, 0, j])
     return out
