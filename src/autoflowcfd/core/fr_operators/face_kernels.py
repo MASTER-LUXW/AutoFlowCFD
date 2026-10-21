@@ -288,18 +288,9 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     _v = np.where(_nb >= 0, np.minimum(_v, cell_volume[np.maximum(_nb, 0)]), _v)
     ip_length = np.ascontiguousarray(_v / np.maximum(face_area, 1e-300))
 
-    # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
-    # 贪心着色覆盖 owner_cell 与非边界面 neighbor_cell 两侧的写冲突——
-    # 图着色 kernel 对内部面会分别向 owner_cell 与 neighbor_cell 做非原子
-    # scatter-add，只按 owner_cell 分组会漏掉跨面的 owner/neighbor 交叉
-    # 冲突（面 A 的 owner 是面 B 的 neighbor），必须一并传入才能保证同色
-    # 面之间真正无写冲突。
+    # 面图着色（界面核逐色并行、无写冲突，见 `core/utils/face_coloring.py`）：几何构建时算一次，残差求值复用
     from autoflowcfd.core.utils.face_coloring import greedy_face_coloring
-    n_cells_est = int(np.max(fc.owner_cell)) + 1
-    colors = greedy_face_coloring(
-        fc.owner_cell.astype(np.int64), n_cells_est,
-        fc.neighbor_cell.astype(np.int64), fc.is_boundary.astype(np.bool_),
-    )
+    colors = greedy_face_coloring(fc.owner_cell, fc.neighbor_cell, fc.is_boundary)
     n_colors = int(np.max(colors)) + 1
     color_face_indices = [
         np.where(colors == c)[0].astype(np.int64) for c in range(n_colors)

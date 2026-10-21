@@ -10,7 +10,7 @@
 """
 
 import numpy as np
-from autoflowcfd.core.utils.face_coloring import greedy_face_coloring, get_color_masks
+from autoflowcfd.core.utils.face_coloring import greedy_face_coloring
 
 
 def _assert_no_write_conflict(colors, owner_cell, neighbor_cell, is_boundary):
@@ -47,7 +47,7 @@ class TestGreedyFaceColoring:
         owner_cell = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4], dtype=np.int64)
         neighbor_cell = np.full(10, -1, dtype=np.int64)
         is_boundary = np.ones(10, dtype=np.bool_)
-        colors = greedy_face_coloring(owner_cell, 5, neighbor_cell, is_boundary)
+        colors = greedy_face_coloring(owner_cell, neighbor_cell, is_boundary)
         n_colors = int(np.max(colors)) + 1
 
         assert n_colors >= 2
@@ -66,7 +66,7 @@ class TestGreedyFaceColoring:
         neighbor_cell = np.array([1, 2], dtype=np.int64)
         is_boundary = np.array([False, False], dtype=np.bool_)
 
-        colors = greedy_face_coloring(owner_cell, 3, neighbor_cell, is_boundary)
+        colors = greedy_face_coloring(owner_cell, neighbor_cell, is_boundary)
         assert colors[0] != colors[1], "面0/面1 在 cell 1 上有真实写冲突，不能同色"
         _assert_no_write_conflict(colors, owner_cell, neighbor_cell, is_boundary)
 
@@ -81,7 +81,7 @@ class TestGreedyFaceColoring:
         neighbor_cell = np.random.randint(0, n_cells, size=n_faces, dtype=np.int64)
         neighbor_cell[is_boundary] = -1
 
-        colors = greedy_face_coloring(owner_cell, n_cells, neighbor_cell, is_boundary)
+        colors = greedy_face_coloring(owner_cell, neighbor_cell, is_boundary)
         n_colors = int(np.max(colors)) + 1
 
         _assert_no_write_conflict(colors, owner_cell, neighbor_cell, is_boundary)
@@ -90,19 +90,25 @@ class TestGreedyFaceColoring:
         # 比纯 owner_cell 版本略多，但仍应远小于面数）
         assert n_colors <= 40, f"Too many colors: {n_colors}"
 
-    def test_color_masks(self):
-        """测试颜色 mask 生成。"""
-        owner_cell = np.array([0, 0, 1, 1, 2, 2], dtype=np.int64)
-        neighbor_cell = np.full(6, -1, dtype=np.int64)
-        is_boundary = np.ones(6, dtype=np.bool_)
-        colors = greedy_face_coloring(owner_cell, 3, neighbor_cell, is_boundary)
-        n_colors = int(np.max(colors)) + 1
-        masks = get_color_masks(colors, n_colors)
+    def test_matches_reference_greedy_order(self):
+        """与逐面取"冲突面未用的最小颜色"的直接实现逐面相同（面序贪心，确定性；I-88 换成 numba 核后核对）。"""
+        rng = np.random.default_rng(7)
+        n_cells, n_faces = 300, 900
+        owner_cell = rng.integers(0, n_cells, n_faces)
+        neighbor_cell = rng.integers(0, n_cells, n_faces)
+        is_boundary = rng.random(n_faces) < 0.15
+        touched = [{int(owner_cell[f])} | (set() if is_boundary[f] else {int(neighbor_cell[f])})
+                   for f in range(n_faces)]
+        expected = np.full(n_faces, -1)
+        for f in range(n_faces):
+            used = {int(expected[g]) for g in range(f) if touched[g] & touched[f]}
+            expected[f] = min(c for c in range(n_faces) if c not in used)
+        np.testing.assert_array_equal(greedy_face_coloring(owner_cell, neighbor_cell, is_boundary), expected)
 
-        assert len(masks) == n_colors
-        for c in range(n_colors):
-            assert masks[c].dtype == bool
-            assert np.sum(masks[c]) == np.sum(colors == c)
+    def test_cell_touched_only_as_neighbor(self):
+        """只作为 neighbor 出现的最大单元编号也计入（此前调用方用 max(owner)+1 估单元数）。"""
+        colors = greedy_face_coloring(np.array([0, 0]), np.array([5, 5]), np.array([False, False]))
+        assert colors[0] != colors[1]
 
 
 class TestFlatFaceColoringCache:
