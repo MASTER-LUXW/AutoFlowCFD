@@ -3,6 +3,8 @@
 从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。
 """
 
+from typing import Any
+
 import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
@@ -10,6 +12,10 @@ from autoflowcfd.core.gpu import get_cupy
 
 class _MultiGPUResidualMixin:
     """halo 交换、压缩索引空间换序、残差组装、正性限制器与全局残差范数。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    dist_flat_face: Any
+    mesh_data: Any
 
     def _halo_exchange_gpu(self):
         """GPU 直接 halo 交换（优化版）。
@@ -53,19 +59,44 @@ class _MultiGPUResidualMixin:
         local cells 结果。
         """
         U_compact = self._permute_to_compact(self.U_extended_gpu)
-        from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
-        residual_compact = compute_inviscid_residual_fr_gpu(
-            U_compact, self.mesh, self.ops,
-            boundary_ghost_provider=self.boundary_ghost_provider,
-            mesh_data=self.mesh_data,
-            ops_data=self.mesh_data,
-            flat_face_gpu=self.flat_face_gpu,
-            flat_face_cpu=self.dist_flat_face.base_flat,
-            device_id=self.device_id,
-            mach_ref=self.freestream["mach_ref"],
-        )
+        if self.mesh.n_points_1d == 1:
+            # P0：有限体积核，在本 rank 面表上求值（与单 GPU、CPU 单机 / 分布式同一个离散）。2026-10-21（I-187）
+            # 以前走 FR 路径：P0 没有过积分算子，FR 无粘残差直接抛异常——Order Continuation 起步的 P0 阶段跑不了
+            from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import compute_inviscid_residual_p0_gpu
+
+            residual_compact = compute_inviscid_residual_p0_gpu(
+                U_compact, self.dist_flat_face.base_flat, self._p0_face_arrays_gpu(),
+                self.boundary_ghost_provider, self.freestream["mach_ref"])
+        else:
+            from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
+            residual_compact = compute_inviscid_residual_fr_gpu(
+                U_compact, self.mesh, self.ops,
+                boundary_ghost_provider=self.boundary_ghost_provider,
+                mesh_data=self.mesh_data,
+                ops_data=self.mesh_data,
+                flat_face_gpu=self.flat_face_gpu,
+                flat_face_cpu=self.dist_flat_face.base_flat,
+                device_id=self.device_id,
+                mach_ref=self.freestream["mach_ref"],
+            )
         residual_native = self._unpermute_from_compact(residual_compact)
         return residual_native[: self.partition.n_local_cells]
+
+    def _p0_face_arrays_gpu(self) -> dict:
+        """本 rank 面表上 P0 有限体积核的设备端面几何，按分布式面几何对象缓存（换阶时面几何整体重建）。"""
+        dist_fc = self.dist_flat_face
+        cache = getattr(self, "_p0_face_cache", None)
+        if cache is not None and cache["dist_fc"] is dist_fc:
+            return cache
+        if dist_fc.p0_unit_normals is None or dist_fc.p0_area_weights is None:
+            raise RuntimeError("分布式面几何没有 P0 面几何（构造时网格不是 P0 阶）")
+        from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import p0_face_arrays_gpu
+
+        cache = p0_face_arrays_gpu(dist_fc.base_flat, dist_fc.p0_unit_normals, dist_fc.p0_area_weights,
+                                   self.mesh_data["cell_volumes"])
+        cache["dist_fc"] = dist_fc
+        self._p0_face_cache = cache
+        return cache
 
     def compute_viscous_residual_gpu(self, mu_t_field=None, nu_av_compact=None):
         """GPU 计算分布式粘性残差。

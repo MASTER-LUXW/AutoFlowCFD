@@ -1,5 +1,5 @@
 """
-AutoFlowCFD V2.0 - P0 无粘残差的 CuPy CUDA 实现（`GPUFRSolver` 的 P0 阶段，数据常驻 GPU）
+AutoFlowCFD V2.0 - P0 无粘残差的 CuPy CUDA 实现（单 GPU 与多 GPU 分布式的 P0 阶段，数据常驻 GPU）
 
 经典分片常数有限体积格式，每个面独立取真实几何法向/面积，调用 AUSM+up 黎曼求解器，原子累加到
 owner/neighbor 单元残差（与 CPU 版 `_compute_inviscid_residual_fv_p0` 同一算法）。
@@ -266,3 +266,48 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
     cp.cuda.Stream.null.synchronize()
 
     return d_residual[:, None, :]
+
+
+def p0_face_arrays_gpu(flat, unit_normals: np.ndarray, area_weights: np.ndarray, cell_volumes) -> dict:
+    """P0 有限体积核的设备端面几何（单 GPU 的全局面表与多 GPU 的本 rank 面表共用）。
+
+    Args:
+        flat: 面几何（`owner_cell` / `neighbor_cell` / `is_boundary`，单元编号与残差的状态数组同一个排列）
+        unit_normals, area_weights: 同一面表的 P0 法向 / 面积（`fr_residual/inviscid_p0.py::p0_face_arrays`）
+        cell_volumes: 单元体积（与状态数组同一排列）
+
+    内核的单元编号参数是 `int*`：这里统一转成 int32（分区面表的压缩单元编号不一定是 int32）。
+    """
+    cp = get_cupy()
+    is_bnd = np.asarray(flat.is_boundary, dtype=bool)
+    normal_host = np.ascontiguousarray(unit_normals, dtype=np.float64)
+    return {
+        "owner": cp.asarray(np.asarray(flat.owner_cell, dtype=np.int32)),
+        "neighbor": cp.asarray(np.where(is_bnd, 0, flat.neighbor_cell).astype(np.int32)),
+        "is_bnd": cp.asarray(is_bnd),
+        "normal_host": normal_host,
+        "normal": cp.asarray(normal_host),
+        "area_w": cp.asarray(np.ascontiguousarray(area_weights, dtype=np.float64)),
+        "volumes": cp.asarray(cell_volumes, dtype=np.float64),
+    }
+
+
+def compute_inviscid_residual_p0_gpu(U, flat, geo: dict, boundary_ghost_provider, mach_ref: float):
+    """P0 有限体积无粘残差（设备端），`(n_cells, 1, 5)`。
+
+    原始变量取自传入的状态 `U`（隐式 Jacobian-向量积与 RK 各级传试探态）；边界幽灵态按面在主机上组装
+    （`_precompute_ghost_states`，与 CPU 同一份），`geo` 为 `p0_face_arrays_gpu` 的结果（与 `flat` 同一面表）。
+    """
+    from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
+    from autoflowcfd.core.fr_residual.inviscid_p0 import _precompute_ghost_states
+    from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+
+    cp = get_cupy()
+    n_cells = int(U.shape[0])
+    Q_flat = conserved_to_primitive_gpu(U[:, 0, :5])
+    provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_p0_gpu")
+    Q_ghost = cp.asarray(_precompute_ghost_states(flat, flat, provider, cp.asnumpy(Q_flat), flat.n_faces,
+                                                  geo["normal_host"]))
+    return compute_inviscid_residual_p0_cupy_gpu_resident(
+        Q_flat, geo["owner"], geo["neighbor"], geo["is_bnd"], geo["normal"], geo["area_w"], geo["volumes"],
+        Q_ghost, n_cells, flat.n_faces, mach_ref=mach_ref)

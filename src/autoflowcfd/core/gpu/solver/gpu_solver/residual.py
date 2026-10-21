@@ -8,7 +8,6 @@
 
 from typing import Any
 
-import numpy as np
 from autoflowcfd.core.gpu import get_cupy
 
 
@@ -18,6 +17,7 @@ class _GPUSolverResidualMixin:
     # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
     mesh: Any
     mesh_data: Any
+    ops: Any
 
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""
@@ -37,25 +37,13 @@ class _GPUSolverResidualMixin:
         U = U_trial if U_trial is not None else self.U_gpu
 
         if self.mesh.n_points_1d == 1:
-            # P0：有限体积 RawKernel。原始变量取自试探态 U（隐式 Jacobian-向量积与 RK 各级都传试探态）
-            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
-            from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import (
-                compute_inviscid_residual_p0_cupy_gpu_resident,
-            )
-            from autoflowcfd.core.fr_residual.inviscid_p0 import _precompute_ghost_states
+            # P0：有限体积 RawKernel（与多 GPU 分布式、CPU 同一个离散）
+            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+            from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import compute_inviscid_residual_p0_gpu
 
-            geo = self._p0_face_arrays_gpu()
-            Q_flat = conserved_to_primitive_gpu(U[:, 0, :5])
-            fc = self.mesh.face_connectivity
-            Q_ghost = cp.asarray(_precompute_ghost_states(
-                self.mesh.face_flux_points, fc, self.boundary_ghost_provider,
-                cp.asnumpy(Q_flat), fc.n_faces, geo["normal_host"]))
-            res = compute_inviscid_residual_p0_cupy_gpu_resident(
-                Q_flat, geo["owner"], geo["neighbor"], geo["is_bnd"],
-                geo["normal"], geo["area_w"], geo["volumes"],
-                Q_ghost, self.mesh.n_cells, fc.n_faces,
-                mach_ref=self.freestream["mach_ref"],
-            )
+            res = compute_inviscid_residual_p0_gpu(
+                U, get_flat_face_geometry(self.mesh, self.ops), self._p0_face_arrays_gpu(),
+                self.boundary_ghost_provider, self.freestream["mach_ref"])
             return cp.broadcast_to(res, (self.mesh.n_cells, self.mesh.n_sps_per_cell, 5)).copy()
         else:
             # P>=1 高阶 FR GPU 路径
@@ -75,23 +63,15 @@ class _GPUSolverResidualMixin:
         cache = getattr(self, "_p0_face_cache", None)
         if cache is not None and cache["mesh"] is self.mesh:
             return cache
-        cp = get_cupy()
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_residual.inviscid_p0 import p0_face_geometry
+        from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import p0_face_arrays_gpu
 
-        fc = self.mesh.face_connectivity
-        ffp = self.mesh.face_flux_points
-        normal, area_w = p0_face_geometry(ffp)
+        normal, area_w = p0_face_geometry(self.mesh.face_flux_points)
         volumes = self.mesh_data.get("cell_volumes")
-        cache = {
-            "mesh": self.mesh,
-            "owner": cp.asarray(fc.owner_cell),
-            "neighbor": cp.asarray(np.where(fc.is_boundary, 0, fc.neighbor_cell)),
-            "is_bnd": cp.asarray(fc.is_boundary),
-            "normal_host": normal,
-            "normal": cp.asarray(normal),
-            "area_w": cp.asarray(area_w),
-            "volumes": volumes if volumes is not None else cp.asarray(self.mesh.get_all_cell_volumes()),
-        }
+        cache = p0_face_arrays_gpu(get_flat_face_geometry(self.mesh, self.ops), normal, area_w,
+                                   volumes if volumes is not None else self.mesh.get_all_cell_volumes())
+        cache["mesh"] = self.mesh
         self._p0_face_cache = cache
         return cache
 
