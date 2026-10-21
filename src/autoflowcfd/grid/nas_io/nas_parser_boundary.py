@@ -120,7 +120,6 @@ def parse_boundary_properties(
             bc_types=bc_types,
             property_ids=property_ids,
             property_names=property_names,
-            detection_mode="auto",
             parameters={}
         )
         
