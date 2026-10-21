@@ -5,20 +5,10 @@
 split_sharp_corners 内部任何状态，只被它调用，独立成文件是最干净的
 拆分点。纯代码搬移，不改变任何行为。
 
-注意：`_face_normals` 与 mesh_tetgen_seam.py 里的同名私有函数、
-mesh_utils.py::compute_face_normals 是三份独立实现（拆分前就已如此，
-不是本次拆分引入的重复），本次只搬移 mesh_corner_split.py 自己这一份，
-不合并/不改动其它两处。
+面法向用 `mesh_utils.py::compute_face_normals`（唯一实现）。
 """
 
 import numpy as np
-
-
-def _face_normals(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    tri = nodes[faces]
-    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
-    cross_norm = np.linalg.norm(cross, axis=1)
-    return cross / np.maximum(cross_norm, 1e-300)[:, np.newaxis]
 
 
 def _implied_edge_radius(edge_length: float, dihedral_angle: float) -> float:

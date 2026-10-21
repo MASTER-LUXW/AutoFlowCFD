@@ -10,6 +10,8 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from loguru import logger
 
+from ..utils.mesh_utils import compute_face_normals
+
 
 def build_seam_taper_scale(
     n_nodes: int,
@@ -168,7 +170,7 @@ def compute_local_thickness_limit(
     if len(extrude_node_idx) == 0:
         return limit
 
-    face_normals = _face_normals(nodes, extrude_faces)
+    face_normals = compute_face_normals(nodes, extrude_faces)
     avg_normal = _average_node_normals(n_nodes, extrude_faces, face_normals)
 
     gap, _ = facing_gap(nodes, np.asarray(surface_faces, dtype=np.int64), extrude_node_idx,
@@ -235,13 +237,6 @@ def _smooth_thickness_limit(
         limit = updated
 
     return limit
-
-
-def _face_normals(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
-    v0, v1, v2 = nodes[faces[:, 0]], nodes[faces[:, 1]], nodes[faces[:, 2]]
-    normals = np.cross(v1 - v0, v2 - v0)
-    norms = np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-10)
-    return normals / norms
 
 
 def _average_node_normals(n_nodes: int, faces: np.ndarray, face_normals: np.ndarray) -> np.ndarray:

@@ -48,7 +48,8 @@ import numpy as np
 from typing import Tuple
 from loguru import logger
 
-from .mesh_corner_split_geometry import _face_normals, _implied_edge_radius, _unique_edges
+from .mesh_corner_split_geometry import _implied_edge_radius, _unique_edges
+from .mesh_utils import compute_face_normals
 
 FEATURE_ANGLE_THRESHOLD_RAD = np.deg2rad(20.0)
 
@@ -108,7 +109,7 @@ def split_sharp_corners(
             np.arange(n_nodes),
         )
 
-    face_normals = _face_normals(nodes, faces)
+    face_normals = compute_face_normals(nodes, faces)
 
     parent = np.arange(n_faces)
 

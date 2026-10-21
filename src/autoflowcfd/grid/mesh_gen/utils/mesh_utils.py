@@ -7,6 +7,9 @@ import numpy as np
 from typing import Dict
 from loguru import logger
 
+#: 退化三角形面的相对判据：叉积模长（= 2 x 面积）不超过最长边平方的这个倍数（`compute_face_normals`）
+DEGENERATE_FACE_RELATIVE_AREA = 1e-12
+
 
 def validate_surface_mesh(
     nodes: np.ndarray,
@@ -63,50 +66,28 @@ def compute_face_normals(
     nodes: np.ndarray,
     faces: np.ndarray
 ) -> np.ndarray:
-    """计算表面面的单位法向量。
+    """三角形面的单位法向（右手定则），`(n_faces, 3)`；网格生成各处的唯一实现。
 
-    使用边向量的叉乘（右手定则）。
-    向量化实现以提升性能。
+    退化面（叉积模长不超过最长边平方的 `DEGENERATE_FACE_RELATIVE_AREA` 倍，即相对自身尺度面积为零）给零向量：
+    零向量在逐节点平均法向里不贡献方向，任何固定方向都会把平均带偏。2026-10-21（I-206）以前这里给 `[0, 0, 1]`、
+    按绝对阈值（叉积模长 1e-9 m^2，边长约 0.03 mm 的正常面就会被判为退化）判定，另有两份私有实现各自处理退化面。
 
     Args:
         nodes: 节点坐标, shape=(n_nodes, 3)
         faces: 面连接关系, shape=(n_faces, 3)
-
-    Returns:
-        单位法向量, shape=(n_faces, 3)
     """
-    logger.info("Computing face normals (vectorized)...")
-    n_faces = len(faces)
-
-    # 向量化计算——比循环快得多
-    v0 = nodes[faces[:, 0]]  # shape=(n_faces, 3)
-    v1 = nodes[faces[:, 1]]
-    v2 = nodes[faces[:, 2]]
-
-    # 边向量
-    e1 = v1 - v0  # shape=(n_faces, 3)
-    e2 = v2 - v0
-
-    # 所有面的叉乘
-    normals = np.cross(e1, e2)  # shape=(n_faces, 3)
-
-    # 计算模长
-    norms = np.linalg.norm(normals, axis=1, keepdims=True)  # shape=(n_faces, 1)
-
-    # 避免除以零
-    norms = np.maximum(norms, 1e-10)
-
-    # 归一化所有法向量
-    normals = normals / norms
-
-    # 检查退化面
-    degenerate_count = np.sum(norms.flatten() < 1e-9)
-    if degenerate_count > 0:
-        logger.warning(f"Found {degenerate_count} degenerate faces with near-zero area")
-        # 为退化面设置默认法向量
-        normals[norms.flatten() < 1e-9] = [0, 0, 1]
-
-    logger.info(f"Computed {n_faces} face normals")
+    tri = nodes[faces]
+    edges = (tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 1], tri[:, 0] - tri[:, 2])
+    cross = np.cross(edges[0], -edges[2])
+    norm = np.linalg.norm(cross, axis=1)
+    longest_sq = np.max([np.einsum("ij,ij->i", e, e) for e in edges], axis=0)
+    degenerate = norm <= DEGENERATE_FACE_RELATIVE_AREA * longest_sq
+    normals = np.zeros_like(cross)
+    ok = ~degenerate
+    normals[ok] = cross[ok] / norm[ok, None]
+    n_degenerate = int(np.count_nonzero(degenerate))
+    if n_degenerate:
+        logger.warning(f"{n_degenerate} 个退化三角形面（面积相对自身尺度为零），法向记为零向量")
     return normals
 
 
