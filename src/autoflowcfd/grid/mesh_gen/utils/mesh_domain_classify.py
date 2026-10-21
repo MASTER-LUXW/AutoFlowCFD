@@ -30,15 +30,13 @@ from .mesh_domain_classify_geometry import (
 if TYPE_CHECKING:
     from ...schema.grid_boundaries import BoundaryMap
 
-# 这些边界类型永远是开放流动边界或无摩擦（滑移）壁面，因此无论几何形状
-# 如何，它们的面都不会被挤出边界层：自由滑移/对称面上不存在需要解析的
-# 近壁速度梯度，真正的开放边界上更是完全没有壁面。SLIP_WALL 覆盖例如
-# "tunnel" 命名的边界（关键词表见 grid/nas_io/boundary_types.py）——横跨整个计算域的洞壁若被挤出边界层，
-# 1-2 层内就会撞到对面的壁面 / 车身。
-# PERIODIC 同理——周期面是一个数学配对构造（见
-# grid/connectivity/ 的 pair_periodic_boundary_faces），不是物理壁面，
-# 那里没有边界层可挤出。
-NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL', 'PERIODIC'}
+# 只有无滑移壁面挤出边界层：近壁速度梯度只在那里需要解析。其余类型无论几何形状都只作核心区 PLC 输入——
+# 滑移壁 / 对称面上没有需要解析的近壁梯度；进出口与远场是开放边界，根本没有壁面；周期面是数学配对构造
+# （`grid/connectivity/face_connectivity_periodic.py`）。SLIP_WALL 覆盖例如 "tunnel" 命名的边界（关键词表见
+# `grid/nas_io/boundary_types.py`）——横跨整个计算域的洞壁若被挤出边界层，1-2 层内就会撞到对面的壁面 / 车身。
+# 2026-10-21（I-207）以前这里是"不挤出"类型清单，漏了 FARFIELD：远场被挤出边界层，整个外框单独成组时还被当成
+# 封闭的内嵌实体打 tetgen 孔洞种子，计算域被整体挖空、生成失败。
+BL_EXTRUDE_BC_TYPES = frozenset({'WALL'})
 
 # 自身开放边比例低于此值的子壳体，在判定朝向时按闭合（嵌入）实体处理，
 # 即使存在一个很小的真实开口（例如车身在与地面小接触面处焊接）。
@@ -88,7 +86,7 @@ def classify_boundary_groups(
             封闭内部空间。
 
     Raises:
-        ValueError: 需要挤出边界层的分量（bc 类型不在 NEVER_EXTRUDE_BC_TYPES）既不闭合、也不贴合包围盒单一面
+        ValueError: 需要挤出边界层的分量（bc 类型在 BL_EXTRUDE_BC_TYPES 中）既不闭合、也不贴合包围盒单一面
             （例如与地面焊接、接触口较大的车身，或零厚度板）——此前被静默归入核心 PLC、不挤出边界层，无滑移壁面
             上没有边界层只在日志的"已挤出组名单"里间接体现；或闭合实体找不到可靠的内部点——此前只警告并跳过
             tetgen 孔洞标记，tetgen 会在实体内部填四面体、与该实体的 BL 棱柱重叠。
@@ -105,7 +103,7 @@ def classify_boundary_groups(
         bc_type = boundaries.bc_types.get(name)
         group_faces = surface_faces[cell_idx].copy()
 
-        if bc_type in NEVER_EXTRUDE_BC_TYPES:
+        if bc_type not in BL_EXTRUDE_BC_TYPES:
             core_face_rows.append(group_faces)
             continue
 

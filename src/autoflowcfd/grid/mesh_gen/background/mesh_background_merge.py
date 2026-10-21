@@ -98,8 +98,8 @@ def _build_merged_mesh(
             # 输入上没有意义，必须显式报错，不能静默忽略。
             raise ValueError(
                 "--bl-only was requested, but no boundary group in this surface mesh "
-                "was classified as extrudable (all groups fell into "
-                "NEVER_EXTRUDE_BC_TYPES or similar) - there is no BL prism layer to "
+                "was classified as extrudable (no group has a type in "
+                "BL_EXTRUDE_BC_TYPES) - there is no BL prism layer to "
                 "export. Check the surface mesh's boundary group classification "
                 "(see mesh_domain_classify.py) before retrying."
             )
