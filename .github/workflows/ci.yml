@@ -23,8 +23,9 @@ jobs:
           pip install poetry
           poetry config virtualenvs.create false
 
+      # 装上本包（src 布局，测试与 mypy 都按已安装的包导入 autoflowcfd）
       - name: Install dependencies
-        run: poetry install --no-root
+        run: poetry install
 
       - name: Run flake8
         run: poetry run flake8 src/ tests/
@@ -33,7 +34,7 @@ jobs:
         run: poetry run mypy src/
 
   test:
-    name: Unit Tests
+    name: Unit and Integration Tests
     runs-on: ubuntu-latest
     needs: lint
     steps:
@@ -49,13 +50,14 @@ jobs:
           pip install poetry
           poetry config virtualenvs.create false
 
+      # 装上本包（src 布局，测试与 mypy 都按已安装的包导入 autoflowcfd）
       - name: Install dependencies
-        run: poetry install --no-root
+        run: poetry install
 
       - name: Run pytest with coverage
         run: |
-          poetry run pytest tests/unit -v --cov=autoflowcfd --cov-report=xml
-          
+          poetry run pytest tests/unit tests/integration -v --cov=autoflowcfd --cov-report=xml
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:

@@ -135,8 +135,8 @@ pre-commit install
 ### 验证安装
 
 ```bash
-# 运行单元测试（-o addopts= 去掉缺省的覆盖率统计）
-poetry run pytest tests/unit -q -o addopts=
+# 运行单元与集成测试
+poetry run pytest tests/unit tests/integration -q
 poetry run autoflowcfd utils doctor
 ```
 

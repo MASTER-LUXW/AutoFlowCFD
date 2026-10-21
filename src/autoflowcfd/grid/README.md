@@ -45,5 +45,5 @@ autoflowcfd grid validate volume.nas --units m
 ## 测试
 
 ```bash
-python -m pytest tests/unit -q -o addopts= -k "grid or nas or mesh"
+python -m pytest tests/unit -q -k "grid or nas or mesh"
 ```

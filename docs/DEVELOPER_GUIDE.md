@@ -11,7 +11,7 @@
 git clone https://github.com/AutoFlowCFD/AutoFlowCFD.git && cd AutoFlowCFD
 poetry install -E gpu -E mpi -E perf      # 按需选可选组
 poetry run autoflowcfd utils doctor
-poetry run pytest tests/unit -q -o addopts=
+poetry run pytest tests/unit tests/integration -q
 ```
 
 没有 GPU 的机器也能跑 GPU 后端的单元测试：`tests/unit/_numpy_as_cupy.py` 用 numpy 充当 cupy（`_gpu_cupy_shim.py`
@@ -71,12 +71,13 @@ src/autoflowcfd/
 | 目录 | 内容 |
 |------|------|
 | `tests/unit/` | 单元测试（约 4000 项）；GPU 用 numpy 替身，分布式用单进程替身或 `n_ranks=1` |
+| `tests/integration/` | 网格解析 → 校验的端到端流程（与单元测试一起在 CI 上运行） |
 | `tests/validation/` | 有精确解 / 关联式 / 守恒量可定量核对的算例（Blasius、Couette、湍流平板、等熵涡、TGV……），较慢 |
 
 ```bash
-poetry run pytest tests/unit -q -o addopts=                    # 全量单元测试（-o addopts= 去掉缺省的覆盖率统计）
-poetry run pytest tests/unit/test_solver_probes.py -q -o addopts=
-poetry run pytest tests/validation -q -o addopts=
+poetry run pytest tests/unit tests/integration -q            # 单元 + 集成测试（CI 同此范围，另加覆盖率统计）
+poetry run pytest tests/unit/test_solver_probes.py -q
+poetry run pytest tests/validation -q
 ```
 
 修缺陷的测试要先在修改前的代码上失败（fail-before），修改后通过；行为测试优先于"源码里出现某字符串"式的文本检查。

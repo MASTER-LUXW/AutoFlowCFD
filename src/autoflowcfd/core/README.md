@@ -40,7 +40,7 @@ print(result.converged, result.iterations, result.final_residual)
 ## 测试
 
 ```bash
-python -m pytest tests/unit -q -o addopts=
+python -m pytest tests/unit -q
 ```
 
 ## 参考文献

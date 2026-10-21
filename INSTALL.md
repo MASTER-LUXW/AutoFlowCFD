@@ -67,10 +67,8 @@ Python 版本：3.10 或 3.11（scipy 的声明只覆盖 Python < 3.12）。
 ```bash
 poetry run autoflowcfd --version     # AutoFlowCFD, version 0.1.0
 poetry run autoflowcfd utils doctor  # 必需依赖缺失或版本不符为问题，可选组缺失为警告；另报告 GPU / MPI 是否可用
-poetry run pytest tests/unit -q
+poetry run pytest tests/unit tests/integration -q
 ```
-
-`pyproject.toml` 的 pytest 缺省选项带覆盖率统计（`--cov`）；只想快速跑测试时可加 `-o addopts=` 覆盖掉。
 
 GPU 是否可用：
 

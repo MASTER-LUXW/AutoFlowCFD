@@ -97,16 +97,14 @@ CTRIA3,6,1,7,8,4
         )
 
     def test_boundary_mapping(self, sample_nas_file: Path) -> None:
-        """边界条件映射。"""
-        parser = NASParser(str(sample_nas_file))
-        grid = parser.parse()
+        """边界条件映射：示例网格没有 PSHELL / $ANSA_NAME_COMMENT 名称，全部单元进 UNCLASSIFIED 组，类型未指定
+        （须由 --bc-type 给出）；类型只能取求解器支持的类型或 UNSPECIFIED（`boundary_types.py` 唯一定义）。"""
+        from autoflowcfd.grid.nas_io.boundary_types import SOLVER_BC_TYPES, UNSPECIFIED
 
-        # Check boundaries exist
-        assert len(grid.boundaries.groups) > 0
-
-        # Check BC types are valid
-        for bc_type in grid.boundaries.bc_types.values():
-            assert bc_type in {"INLET", "OUTLET", "WALL", "SYMMETRY", "FARFIELD"}
+        grid = NASParser(str(sample_nas_file)).parse()
+        assert set(grid.boundaries.bc_types.values()) <= set(SOLVER_BC_TYPES) | {UNSPECIFIED}
+        assert grid.boundaries.bc_types == {"UNCLASSIFIED": UNSPECIFIED}
+        np.testing.assert_array_equal(grid.boundaries.groups["UNCLASSIFIED"], np.arange(6))
 
     def test_coordinate_range(self, sample_nas_file: Path) -> None:
         """坐标落在预期范围内。"""

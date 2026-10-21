@@ -169,7 +169,7 @@ poetry run autoflowcfd solve steady ahmed/ahmed_volume.nas --surface-mesh exampl
 
 ## 验证算例
 
-`tests/validation/` 下的算例有精确解、关联式或守恒量可以定量核对（`poetry run pytest tests/validation -q -o addopts=`）：
+`tests/validation/` 下的算例有精确解、关联式或守恒量可以定量核对（`poetry run pytest tests/validation -q`）：
 
 | 算例 | 核对的量 | 实测 |
 |------|---------|------|
