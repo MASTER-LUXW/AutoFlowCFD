@@ -107,7 +107,7 @@ def test_gpu_wall_boundary_uses_real_ghost_state():
     U_inf = primitive_to_conserved(Q_inf)
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-    wall_provider = BoundaryGhostStateProvider(group_code, {0: wall}, wall)
+    wall_provider = BoundaryGhostStateProvider(group_code, {0: wall})
     cpu_residual = compute_viscous_residual_fr(
         U, mesh, mesh.operators, MU, PR, boundary_ghost_provider=wall_provider,
     )

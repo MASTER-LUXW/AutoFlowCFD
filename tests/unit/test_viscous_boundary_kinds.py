@@ -14,7 +14,7 @@
 1. **算子层（精确恒等式）**：`mirror_normal_component` 与
    `mirror_velocity_gradient` 的代数性质（面平均后法向热通量/切向牵引
    精确为零、对合、与法向朝向和缩放无关）。
-2. **分类**：每种 BC 配置落到正确的种类，逐面、按 `default_config`、缓存。
+2. **分类**：每种 BC 配置落到正确的种类，逐面、未配置的组报错、缓存。
 3. **几何层**：镜像用的逆变行 `adj_row` 与物理面法向平行。
 4. **端到端（精确守恒恒等式）**：边界法向粘性通量为零的种类（绝热类的
    能量、镜像类的切向动量、Neumann 的全部分量）下，全域积分的粘性残差
@@ -164,7 +164,7 @@ def _provider_all(bc_type, flat, **cfg):
     group_code[flat.is_boundary] = 0
     conf = {"type": bc_type}
     conf.update(cfg)
-    return BoundaryGhostStateProvider(group_code, {0: conf}, {"type": "FARFIELD", "Q_free": Q_FREE})
+    return BoundaryGhostStateProvider(group_code, {0: conf})
 
 
 class TestViscousBoundaryKind:
@@ -194,16 +194,18 @@ class TestViscousBoundaryKind:
         group_code[bnd] = np.arange(bnd.size) % 2
         p = BoundaryGhostStateProvider(
             group_code,
-            {0: {"type": "WALL", "is_no_slip": True}, 1: {"type": "OUTLET", "p_outlet": 1e5}},
-            {"type": "FARFIELD", "Q_free": Q_FREE})
+            {0: {"type": "WALL", "is_no_slip": True}, 1: {"type": "OUTLET", "p_outlet": 1e5}})
         kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, p)
         np.testing.assert_array_equal(
             kind[bnd], np.where(np.arange(bnd.size) % 2 == 0, VBC_NOSLIP_WALL, VBC_NEUMANN))
 
-    def test_unmatched_faces_follow_default_config(self, flat):
-        p = BoundaryGhostStateProvider(np.full(flat.n_faces, -1, dtype=np.int64), {}, {"type": "SYMMETRY"})
-        kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, p)
-        assert (kind[flat.is_boundary] == VBC_MIRROR).all()
+    def test_unconfigured_boundary_group_is_rejected(self, flat):
+        """边界面的组没有配置时报错（I-73：此前另有 default_config 兜底，未分组边界面早在构造期就报错，兜底是死的）。"""
+        p = BoundaryGhostStateProvider(np.full(flat.n_faces, -1, dtype=np.int64), {})
+        with pytest.raises(ValueError, match="code_to_config"):
+            build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, p)
+        with pytest.raises(KeyError):
+            p.config_of_code(-1)
 
     def test_default_provider_is_neumann(self, flat):
         """DefaultGhostProvider 的幽灵态是本侧延拓 —— 按延拓分量的规则取零法向
@@ -223,7 +225,6 @@ class TestViscousBoundaryKind:
                 self._p = p
                 self.group_code = p.group_code
                 self.code_to_config = p.code_to_config
-                self.default_config = p.default_config
 
             def __call__(self, face_idx, Q_owner_fp, true_normal):
                 return self._p(face_idx, Q_owner_fp, true_normal)

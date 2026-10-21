@@ -80,8 +80,7 @@ def build_ghost_provider_by_classifier(mesh, classify, bc_by_name):
             code_to_config[name_to_code[name]] = bc_by_name[name]
         group_code[f] = name_to_code[name]
 
-    default_config = {"type": "FARFIELD", "Q_free": [1.225, 0.0, 0.0, 0.0, 101325.0]}
-    return BoundaryGhostStateProvider(group_code, code_to_config, default_config,
+    return BoundaryGhostStateProvider(group_code, code_to_config,
                                       code_to_name={c: n for n, c in name_to_code.items()})
 
 
@@ -139,7 +138,6 @@ class ProfileInletGhostProvider(GhostStateProvider):
         # 类型直接读它们（`fr_ghost_state.build_viscous_boundary_kind`）。
         self.group_code = inner.group_code
         self.code_to_config = inner.code_to_config
-        self.default_config = inner.default_config
 
     def __call__(self, face_idx, Q_owner_fp, true_normal):
         from autoflowcfd.boundary.fr_ghost_state import inlet_ghost_state

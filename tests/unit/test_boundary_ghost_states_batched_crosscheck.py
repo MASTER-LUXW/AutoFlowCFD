@@ -33,7 +33,7 @@ def _build_multi_bc_provider(flat, rng=None):
         3: {"type": "INLET", "Q_inlet": Q_FREE},
         4: {"type": "OUTLET", "p_outlet": 101000.0},
     }
-    return BoundaryGhostStateProvider(group_code, code_to_config, {"type": "SYMMETRY"})
+    return BoundaryGhostStateProvider(group_code, code_to_config)
 
 
 def _random_primitives(mesh, seed):
@@ -69,8 +69,7 @@ def test_batched_matches_per_face_reference(order):
 
     # 判据有区分度：全部当 FARFIELD 给出不同结果
     farfield_only = BoundaryGhostStateProvider(
-        np.zeros(flat.n_faces, dtype=np.int64), {0: {"type": "FARFIELD", "Q_free": Q_FREE}},
-        {"type": "FARFIELD", "Q_free": Q_FREE})
+        np.zeros(flat.n_faces, dtype=np.int64), {0: {"type": "FARFIELD", "Q_free": Q_FREE}})
     assert not np.array_equal(batched, farfield_only.ghost_states(faces, Q_o, normals))
 
 

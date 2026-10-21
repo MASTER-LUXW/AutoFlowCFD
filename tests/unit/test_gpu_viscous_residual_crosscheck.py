@@ -141,7 +141,7 @@ def _all_kinds_provider(mesh, ops):
         4: {"type": "INLET", "Q_inlet": q_free},
         5: {"type": "OUTLET", "p_outlet": 100800.0},
     }
-    return BoundaryGhostStateProvider(group_code, configs, configs[3])
+    return BoundaryGhostStateProvider(group_code, configs)
 
 
 class TestGpuViscousResidualMatchesCpu:

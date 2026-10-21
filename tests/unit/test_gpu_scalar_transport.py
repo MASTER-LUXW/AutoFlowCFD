@@ -394,19 +394,18 @@ class TestComputeWallDirichletMaskGpu:
         mask, open_mask = gst.compute_turbulence_face_masks_gpu(mesh, provider)
 
         np.testing.assert_array_equal(mask, [True, False, False, False])
-        # 开放边界：只有 OUTLET 组；-1（内部面/未匹配）在没有 default_config
-        # 时不算（真边界条件由 GPU 对流里的面邻居源判定再求与）
+        # 开放边界：只有 OUTLET 组；-1（内部面）不属于任何组、不算（真边界点由 GPU 对流里的面邻居源判定再求与）
         np.testing.assert_array_equal(open_mask, [False, False, True, False])
 
-    def test_unmatched_faces_follow_default_config(self):
+    def test_interior_faces_are_not_open(self):
+        """内部面（编码 -1）不属于任何组、不标开放边界（I-73：此前按 default_config 远场兜底被标成开放）。"""
         mesh = types.SimpleNamespace(face_connectivity=types.SimpleNamespace(n_faces=3))
         provider = types.SimpleNamespace(
-            group_code=np.array([0, -1, -1]),
-            code_to_config={0: {"type": "SYMMETRY"}},
-            default_config={"type": "FARFIELD"},
+            group_code=np.array([0, -1, 1]),
+            code_to_config={0: {"type": "SYMMETRY"}, 1: {"type": "FARFIELD"}},
         )
         _, open_mask = gst.compute_turbulence_face_masks_gpu(mesh, provider)
-        np.testing.assert_array_equal(open_mask, [False, True, True])
+        np.testing.assert_array_equal(open_mask, [False, False, True])
 
 
 if __name__ == "__main__":

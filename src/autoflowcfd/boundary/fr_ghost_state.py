@@ -297,23 +297,26 @@ class BoundaryGhostStateProvider(GhostStateProvider):
 
     Attributes:
         group_code: (n_faces,) 每个边界面所属边界组的整数编码
-            （grid/face_connectivity.tag_boundary_groups 的输出），内部面/
-            未匹配任何组的边界面为 -1
+            （grid/face_connectivity.tag_boundary_groups 的输出），内部面为 -1；每个边界面都必须属于一个组
+            （`core/fr_solver/boundary/ghost.py::build_boundary_ghost_provider` 构造期检查）
         code_to_config: Dict[int, dict]，组编码 -> {'type': 'WALL'/'FARFIELD'/
             'INLET'/'OUTLET'/'SYMMETRY', 以及该类型需要的参数}
-        default_config: 未匹配到任何边界组的边界面使用的配置（必须显式提供）
         code_to_name: Dict[int, str]，组编码 -> 组名（后处理按组给出分量用；可缺省）
+
+    2026-10-21（I-73）以前另有 `default_config`（未匹配任何组的面取远场）：未分组边界面早在构造期就报错，它只剩
+    死兜底，却仍让读 BC 语义的地方（粘性边界种类、湍流开放边界）把内部面也按远场分类。
     """
 
-    def __init__(self, group_code: np.ndarray, code_to_config: dict, default_config: dict,
-                 code_to_name: Optional[dict] = None):
+    def __init__(self, group_code: np.ndarray, code_to_config: dict, code_to_name: Optional[dict] = None):
         self.group_code = group_code
         self.code_to_config = code_to_config
-        self.default_config = default_config
         self.code_to_name = dict(code_to_name or {})
 
     def config_of_code(self, code: int) -> dict:
-        return self.code_to_config.get(int(code), self.default_config)
+        cfg = self.code_to_config.get(int(code))
+        if cfg is None:
+            raise KeyError(f"边界组编码 {int(code)} 没有配置：边界面都必须属于一个已配置的边界组")
+        return cfg
 
     def restricted_to_faces(self, face_ids: np.ndarray) -> "BoundaryGhostStateProvider":
         """只含 `face_ids` 这些面、面号换成其下标的 provider（分布式：全局 provider -> 本 rank 面序）。
@@ -327,7 +330,7 @@ class BoundaryGhostStateProvider(GhostStateProvider):
             if cfg.get("sem") is not None:
                 cfg = dict(cfg, sem=cfg["sem"].restricted_to_faces(face_ids))
             configs[code] = cfg
-        return BoundaryGhostStateProvider(np.asarray(self.group_code)[face_ids], configs, self.default_config,
+        return BoundaryGhostStateProvider(np.asarray(self.group_code)[face_ids], configs,
                                           code_to_name=self.code_to_name)
 
     def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
@@ -403,7 +406,7 @@ def build_viscous_boundary_kind(n_faces: int, is_boundary: np.ndarray, ghost_pro
 
     BC 语义按**鸭子类型**读取：provider 只要带 ``group_code``/``code_to_config``
     （``BoundaryGhostStateProvider`` 以及委托给它的包装层，如验证算例的逐点剖面
-    入口）就逐组分类，未匹配任何组的面取 ``default_config``。
+    入口）就逐组分类，边界面的组没有配置时报错。
     ``DefaultGhostProvider`` 的幽灵态是本侧延拓，按延拓分量的规则取
     ``VBC_NEUMANN``（零法向粘性通量）。其余 provider 没有可读的 BC 语义，
     **直接报错**。
@@ -429,14 +432,11 @@ def build_viscous_boundary_kind(n_faces: int, is_boundary: np.ndarray, ghost_pro
     group_code = getattr(ghost_provider, "group_code", None)
     code_to_config = getattr(ghost_provider, "code_to_config", None)
     if group_code is not None and code_to_config is not None:
-        default_config = getattr(ghost_provider, "default_config", None)
         codes = np.asarray(group_code)[bnd]
         for code in np.unique(codes):
-            cfg = code_to_config.get(int(code), default_config)
+            cfg = code_to_config.get(int(code))
             if cfg is None:
-                raise ValueError(
-                    f"边界组 {int(code)} 既不在 code_to_config 里、provider 也没有 "
-                    f"default_config —— 无法确定该组面的粘性边界条件")
+                raise ValueError(f"边界组 {int(code)} 不在 code_to_config 里 —— 无法确定该组面的粘性边界条件")
             kind[bnd[codes == code]] = viscous_boundary_kind_for_config(cfg)
     elif isinstance(ghost_provider, DefaultGhostProvider):
         kind[bnd] = VBC_NEUMANN

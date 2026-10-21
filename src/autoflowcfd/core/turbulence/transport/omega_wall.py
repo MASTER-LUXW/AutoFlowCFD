@@ -19,7 +19,7 @@ from autoflowcfd.core.turbulence.sst.bounds import (
 
 
 def boundary_groups(provider):
-    """边界幽灵态提供者的逐面边界组编码与组配置 `(group_code, code_to_config, default_config)`。
+    """边界幽灵态提供者的逐面边界组编码与组配置 `(group_code, code_to_config)`（内部面编码 -1，不在配置里）。
 
     湍流量的壁面条件（k 的 Dirichlet 0、omega 壁面目标值）与来流条件都按边界组类型施加，所以提供者必须带分组
     信息：生产求解器的 `BoundaryGhostStateProvider`（`core/fr_solver/boundary/ghost.py::build_boundary_ghost_provider`）
@@ -30,14 +30,14 @@ def boundary_groups(provider):
     from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 
     if isinstance(provider, DefaultGhostProvider):
-        return None, {}, None
+        return None, {}
     group_code = getattr(provider, "group_code", None)
     code_to_config = getattr(provider, "code_to_config", None)
     if group_code is None or code_to_config is None:
         raise ValueError(
             f"湍流量的边界条件需要按边界组给定条件的幽灵态提供者（带 group_code / code_to_config），"
             f"收到 {type(provider).__name__}；零梯度外插须显式传 DefaultGhostProvider()")
-    return np.asarray(group_code), code_to_config, getattr(provider, "default_config", None)
+    return np.asarray(group_code), code_to_config
 
 
 def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
@@ -52,7 +52,7 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
 
 def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
     """`_compute_wall_dirichlet_face_mask` 的纯函数形式（CPU 与 GPU 共用）。"""
-    group_code, code_to_config, _ = boundary_groups(provider)
+    group_code, code_to_config = boundary_groups(provider)
     if group_code is None:
         return np.zeros(n_faces, dtype=np.bool_)
 
@@ -73,7 +73,7 @@ def _compute_open_boundary_face_mask(solver) -> np.ndarray:
 
 
 def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
-    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按 `default_config`）。
+    """按边界组类型逐面标记"开放边界"（内部面的编码 -1 不属于任何组，不标记）。
 
     分类读平均流热边界条件那一份唯一来源 `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/SYMMETRY）
     的补集，不另建 BC 类型表；分组要求见 `boundary_groups`。**不含**"是否边界点"这一条（内部面的 `group_code`
@@ -83,19 +83,11 @@ def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
     from autoflowcfd.boundary.fr_ghost_state import ADIABATIC_THERMAL_BC_TYPES
 
     mask = np.zeros(n_faces, dtype=np.bool_)
-    group_code, code_to_config, default_config = boundary_groups(provider)
+    group_code, code_to_config = boundary_groups(provider)
     if group_code is None:
         return mask
-    for code in np.unique(group_code):
-        cfg = code_to_config.get(int(code), default_config)
-        if cfg is not None and cfg.get("type") not in ADIABATIC_THERMAL_BC_TYPES:
-            mask[group_code == code] = True
-    return mask
-    default_config = getattr(provider, "default_config", None)
-    group_code = np.asarray(group_code)
-    for code in np.unique(group_code):
-        cfg = code_to_config.get(int(code), default_config)
-        if cfg is not None and cfg.get("type") not in ADIABATIC_THERMAL_BC_TYPES:
+    for code, cfg in code_to_config.items():
+        if cfg.get("type") not in ADIABATIC_THERMAL_BC_TYPES:
             mask[group_code == code] = True
     return mask
 
