@@ -4,6 +4,8 @@
 单元体积和网格尺度等几何辅助方法。
 """
 
+from typing import Any
+
 import numpy as np
 
 
@@ -14,6 +16,10 @@ class _SolverGeometryMixin:
         mesh  - HighOrderMesh 对象
         state - 求解器状态（含 U 数组）
     """
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    mesh: Any
+    state: Any
 
     def _get_metric_flux_scale(self) -> np.ndarray:
         """逐 SP 的度量"通量面积"标度 sum_m ||adj(J)[:,m,:]||，只依赖网格

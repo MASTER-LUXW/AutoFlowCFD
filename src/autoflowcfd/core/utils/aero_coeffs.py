@@ -6,6 +6,8 @@
 独立的一步，拆成单独文件只是为了控制单文件行数，不改变任何计算逻辑。
 """
 
+from typing import Any, Optional
+
 import numpy as np
 from loguru import logger
 
@@ -17,6 +19,12 @@ class ReferenceAreaMixin:
     `self.grid_data`/`self.face_extractor`/`self._cached_ref_area`/
     `self._ref_area_computed` 属性，不独立维护状态。
     """
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    face_extractor: Any
+    grid_data: Any
+    _ref_area_computed: bool
+    _cached_ref_area: Optional[float]
 
     def _compute_reference_area(self, body_face_indices: np.ndarray) -> float:
         """用包围盒估计计算参考迎风面积。
@@ -97,16 +105,12 @@ class ReferenceAreaMixin:
                 return 0.0
 
             # 收集面网格里所有车身面索引
-            body_face_indices = []
-            for boundary_name in body_boundary_names:
-                face_indices = surface_boundaries.get_cell_indices(boundary_name)
-                body_face_indices.extend(face_indices)
+            body_face_indices = np.concatenate(
+                [np.asarray(surface_boundaries.get_cell_indices(name), dtype=np.int64) for name in body_boundary_names])
 
             if len(body_face_indices) == 0:
                 logger.warning("No body faces found in surface mesh")
                 return 0.0
-
-            body_face_indices = np.array(body_face_indices, dtype=np.int64)
 
             logger.info("Surface mesh body analysis:")
             logger.info(f"  Body faces: {len(body_face_indices)}")

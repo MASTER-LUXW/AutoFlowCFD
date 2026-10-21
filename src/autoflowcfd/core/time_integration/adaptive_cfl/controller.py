@@ -6,13 +6,12 @@
 
 from __future__ import annotations
 from collections import deque
-from typing import Deque, List, Tuple
+from typing import List, Tuple
 from loguru import logger
-from .gates import _CFLGatesMixin
 from .update import _CFLUpdateMixin
 
 
-class AdaptiveCFLController(_CFLGatesMixin, _CFLUpdateMixin):
+class AdaptiveCFLController(_CFLUpdateMixin):
     """稳态求解器自适应 CFL 控制器。
 
     根据连续两步残差范数的变化率，动态调节 CFL 数。
@@ -202,26 +201,26 @@ class AdaptiveCFLController(_CFLGatesMixin, _CFLUpdateMixin):
         # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 11 条的
         # 协调逻辑改的是 self.cfl_start，若这里仍读形参，初值就会绕过协调
         # （cfl_start=0.5 / cfl_max=0.08 时第一步就跑在 0.5 上）。
-        self.cfl_number: float = self.cfl_start
-        self._prev_residual: float = 0.0
-        self._step_count: int = 0
-        self._consecutive_good: int = 0      # 连续"快速下降"步数计数
-        self._consecutive_crawl: int = 0     # 连续"缓慢收敛"步数计数
-        self._consecutive_mild_bad: int = 0  # 连续"轻度恶化"步数计数
+        self.cfl_number = self.cfl_start
+        self._prev_residual = 0.0
+        self._step_count = 0
+        self._consecutive_good = 0           # 连续"快速下降"步数计数
+        self._consecutive_crawl = 0          # 连续"缓慢收敛"步数计数
+        self._consecutive_mild_bad = 0       # 连续"轻度恶化"步数计数
         # 软上限：放大不得越过它。None 表示尚未发生过收缩、只受 cfl_max
         # 约束。见模块文档第 8 条。
         self._cfl_ceiling = None
-        self._steps_since_shrink: int = 0
+        self._steps_since_shrink = 0
         # 绝对基准（见模块文档第 9 条）：自构造/reset 以来见过的最小
         # **有限**残差，以及"软上限设定当时"的残差（用于给时间性释放
         # 加条件）。None 表示尚无有限残差样本。
         self._res_best = None
-        self._res_at_ceiling: float = float("inf")
-        self._steps_since_last_change: int = 0  # 距上次 CFL 调节的步数
-        self._history: List[Tuple[int, float, float]] = []  # (step, cfl, residual)
+        self._res_at_ceiling = float("inf")
+        self._steps_since_last_change = 0       # 距上次 CFL 调节的步数
+        self._history = []  # (step, cfl, residual)
         # 窗口趋势判据的残差滑动窗口。长度 trend_window+1，使 [0] 与 [-1]
         # 正好相隔 trend_window 步。任何恶化或一次放大都会清空它。
-        self._res_window: Deque[float] = deque(maxlen=max(2, trend_window + 1))
+        self._res_window = deque(maxlen=max(2, trend_window + 1))
 
     def reset(self):
         """重置控制器状态。

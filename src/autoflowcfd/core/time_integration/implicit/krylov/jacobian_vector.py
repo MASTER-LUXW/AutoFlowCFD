@@ -64,7 +64,7 @@ inexact-Newton 的容差下限（`forcing.py` 的 `_ETA_MIN = 1e-4`），**都�
 求解期间只算一次并缓存，所以一次 GMRES 迭代 = 一次残差求值。
 """
 
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -91,7 +91,7 @@ class MatrixFreeJacobian:
                  "_u0_rms_scaled", "_red", "n_matvec", "_trial_buf", "_out_buf")
 
     def __init__(self, residual: Callable, u0_flat, r0_flat, scales: np.ndarray,
-                 red: LocalReductions = None):
+                 red: Optional[LocalReductions] = None):
         """
         Args:
             residual: `R(U_flat) -> (N, n_var)`，与 `step.py` 里

@@ -3,6 +3,8 @@
 从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。
 """
 
+from typing import Any
+
 import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
@@ -11,6 +13,16 @@ from autoflowcfd.core.gpu.gpu_time_integration import compute_local_cfl_step_gpu
 
 class _MultiGPUTimeStepMixin:
     """局部时间步长、当前 CFL 与自适应控制器的全局更新。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    U_gpu: Any
+    _inv_perm_gpu: Any
+    dist_flat_face: Any
+    freestream: Any
+    mesh: Any
+    mesh_data: Any
+    order: Any
+    partition: Any
 
     def _compute_local_time_step_gpu(self, return_physical_too: bool = False, nu_av_compact=None):
         """逐单元局部 CFL 步长（2026-09-14 重写）。
@@ -116,7 +128,7 @@ class _MultiGPUTimeStepMixin:
                 mach_ref=(self.freestream["mach_ref"] if precond else None),
                 return_physical_too=precond,
             )
-            if precond:
+            if dt_phys_all is not None:
                 dt_all[:, sp], dt_phys_all[:, sp] = out_sp
             else:
                 dt_all[:, sp] = out_sp

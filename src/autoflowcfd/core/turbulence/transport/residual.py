@@ -5,7 +5,7 @@
 对 `w` 做对流与扩散（边界取 `ln` 值），再加变换带出的 `Gamma_w |grad w|^2`。
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -37,8 +37,8 @@ def turbulence_diffusivities(turb, rho_nu_t, mu):
 
 def compute_turbulence_transport_residual(
     solver,
-    grad_k: np.ndarray = None,
-    grad_log_omega: np.ndarray = None,
+    grad_k: Optional[np.ndarray] = None,
+    grad_log_omega: Optional[np.ndarray] = None,
     flat_face_override=None,
     conv_geom=None,
 ) -> Tuple[np.ndarray, np.ndarray]:

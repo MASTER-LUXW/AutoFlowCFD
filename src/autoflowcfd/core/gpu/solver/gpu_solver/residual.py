@@ -6,12 +6,18 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any
+
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
 
 
 class _GPUSolverResidualMixin:
     """单机 GPU 的无粘/粘性残差与原始量更新"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    mesh: Any
+    mesh_data: Any
 
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""

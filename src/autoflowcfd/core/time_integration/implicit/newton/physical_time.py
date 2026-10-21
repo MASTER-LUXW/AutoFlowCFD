@@ -34,7 +34,7 @@
 """
 
 import time
-from typing import Callable, Optional
+from typing import Callable
 
 from loguru import logger
 
@@ -143,8 +143,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
     # forcing 记的是上一步的残差量级：新物理步的 `G` 与上一步收敛时的不可比
     solver._newton_forcing = None
 
-    initial: Optional[float] = None
-    final = float("nan")
+    initial = final = float("nan")
     iterations = 0
     converged = False
     linear_failures = 0
@@ -152,7 +151,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
         t_start = time.perf_counter()
         info = newton_step(term, k == 0)
         iterations = k + 1
-        if initial is None:
+        if k == 0:
             initial = float(info["res_norm"])
         final = float(info["res_norm_new"])
         step_ok = newton_step_ok(info)

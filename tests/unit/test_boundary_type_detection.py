@@ -72,14 +72,14 @@ def test_parser_applies_explicit_types_and_volume_generation_requires_them(tmp_p
 
     nas = tmp_path / "s.nas"
     _write_surface_nas(nas, ["inlet", "fuselage"])
-    grid = NASParser(str(nas)).parse(skip_validation=True)
+    grid = NASParser(str(nas)).parse()
     assert grid.boundaries.bc_types["fuselage"] == UNSPECIFIED
     with pytest.raises(BoundaryTypeError, match="fuselage"):
         generate_volume_mesh_from_surface(grid)                      # 在任何生成工作之前就拒绝
-    grid = NASParser(str(nas), bc_types={"fuselage": "WALL"}).parse(skip_validation=True)
+    grid = NASParser(str(nas), bc_types={"fuselage": "WALL"}).parse()
     assert grid.boundaries.bc_types == {"inlet": "VELOCITY_INLET", "fuselage": "WALL"}
     with pytest.raises(Exception, match="不在网格的边界组"):
-        NASParser(str(nas), bc_types={"wing": "WALL"}).parse(skip_validation=True)
+        NASParser(str(nas), bc_types={"wing": "WALL"}).parse()
 
 
 def test_import_reads_the_surface_mesh_in_the_same_units(monkeypatch, tmp_path):

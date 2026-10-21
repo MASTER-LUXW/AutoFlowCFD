@@ -14,7 +14,7 @@ MeshQualityValidator.validate_mixed 是该文件中最长的单个方法（原�
 """
 
 import numpy as np
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 from loguru import logger
 
 from . import quality_metrics as _qm
@@ -43,7 +43,7 @@ def _compute_prism_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray
 def validate_mixed_mesh(
     validator: 'MeshQualityValidator',
     volume_mesh: 'VolumeMeshData',
-    faces: 'FaceData' = None,
+    faces: 'Optional[FaceData]' = None,
     log_summary: bool = True,
     check_overlap: bool = True,
 ) -> 'MeshQualityReport':
@@ -70,6 +70,8 @@ def validate_mixed_mesh(
     from .quality_report import MeshQualityReport
 
     nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
+    if volume_mesh.prism_cells is None:
+        raise ValueError("validate_mixed_mesh 只用于含棱柱的混合网格（纯四面体网格走 validate）")
     prism_conn = volume_mesh.prism_cells.connectivity
     tet_conn = volume_mesh.cells.connectivity
     n_prism = len(prism_conn)

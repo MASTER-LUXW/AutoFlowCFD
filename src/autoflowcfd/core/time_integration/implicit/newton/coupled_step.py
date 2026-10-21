@@ -247,7 +247,8 @@ class CoupledBlockPreconditioner:
         if not stale:
             return None
         # 没装配过的块（预处理被禁用）没有松弛，不参与
-        return int(min(c.baseline_iters for c in stale)
+        # 有松弛预算的块都装配过，基线迭代数已记下
+        return int(min(c.baseline_iters for c in stale if c.baseline_iters is not None)
                    + (self.mean.refresh_slack or 0) + (self.turb.refresh_slack or 0))
 
     def record(self, gmres_iters: int, accepted: bool) -> None:

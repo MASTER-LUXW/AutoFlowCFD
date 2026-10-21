@@ -6,7 +6,7 @@
 
 from contextlib import contextmanager
 
-from typing import Optional
+from typing import Any, Optional
 from loguru import logger
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
@@ -42,6 +42,10 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         U_gpu: 当前守恒变量（CuPy 数组，常驻 GPU）
         Q_gpu: 当前原始变量（CuPy 数组，常驻 GPU）
     """
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _cfl_controller: Any
+    fixed_cfl_number: Any
 
     def __init__(
         self,

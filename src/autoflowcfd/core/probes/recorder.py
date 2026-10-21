@@ -17,7 +17,7 @@
 import csv
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -96,7 +96,9 @@ class ProbeRecorder:
             located, error = self._comm.bcast((located, error), root=0)
         if error is not None:
             raise ValueError(error)
-        self.locations = located
+        if located is None:
+            raise RuntimeError("探针定位结果缺失（root 未广播 locate_probes 的结果）")
+        self.locations: ProbeLocations = located
 
         owned = _owned_global_cells(solver)
         if owned is None:
@@ -109,7 +111,7 @@ class ProbeRecorder:
             hit = owned[order[pos]] == located.cells
             self._mine = np.flatnonzero(hit)
             self._rows = order[pos[hit]]
-        self._weights = {}            # 阶数 -> 本 rank 探针的插值权重
+        self._weights: Dict[int, np.ndarray] = {}   # 阶数 -> 本 rank 探针的插值权重
 
         self.path = Path(output_dir) / PROBE_FILE
         if self._root:
@@ -165,7 +167,7 @@ class ProbeRecorder:
     def record(self, solver) -> None:
         """求解循环每步调用一次（集体操作）：root 追加一行。"""
         Q = self.sample(solver)
-        if not self._root:
+        if Q is None:                                # 非 root
             return
         history = solver.convergence_history
         iteration = history.iterations[-1] if history.iterations else 0

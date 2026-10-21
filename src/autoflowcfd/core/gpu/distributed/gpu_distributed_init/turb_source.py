@@ -17,6 +17,8 @@ halo 交换写进一个 compact 大小的临时模型（`TransportedTurbulence.l
 真正的模型——与 CPU 分布式 `core/mpi/distributed_turbulence.py` 同一个设计。
 """
 
+from typing import Any
+
 import types
 
 from autoflowcfd.core.gpu import get_cupy
@@ -24,6 +26,13 @@ from autoflowcfd.core.gpu import get_cupy
 
 class _GPUDistributedTurbSourceMixin:
     """多 GPU 分布式湍流源项（SST/DDES/IDDES/SA-neg/LES/WMLES）"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _permute_to_compact: Any
+    _unpermute_from_compact: Any
+    gpu_halo: Any
+    partition: Any
+    turb_model_gpu: Any
 
     def _compute_turbulence_source_distributed(self, dt):
         """分布式湍流源项+输运的显式更新，返回 compact 排列的动力涡粘

@@ -246,6 +246,8 @@ def remesh_core_cavity(
             new_nodes, new_cells, keep,
             bad_cell_mask=new_bad_cell_mask,
         )
+        if new_bad_cell_mask is None:          # 传入了掩码，patch_nonmanifold_cavity 按同样的行变换返回它
+            raise RuntimeError("patch_nonmanifold_cavity 没有返回坏单元掩码")
         keep = repair_nonmanifold_cells(new_nodes, new_cells)
         if not keep.all():
             n_removed = int(np.size(keep) - np.count_nonzero(keep))

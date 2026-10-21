@@ -4,6 +4,8 @@
 """
 
 import re
+from typing import Dict, List
+
 import numpy as np
 from loguru import logger
 
@@ -52,10 +54,10 @@ def parse_nodes_from_nas(
     Raises:
         NASParseError: 节点解析失败
     """
-    x_coords = []
-    y_coords = []
-    z_coords = []
-    node_id_to_index = {}
+    x_coords: List[float] = []
+    y_coords: List[float] = []
+    z_coords: List[float] = []
+    node_id_to_index: Dict[int, int] = {}
 
     grid_pattern_comma = re.compile(
         r'^\s*GRID\s*,\s*\d+\s*,\s*\S*\s*,\s*(.+)$',
@@ -96,7 +98,7 @@ def parse_nodes_from_nas(
         if node_count % 10000 == 0:
             logger.debug(f"Parsed {node_count:,} nodes...")
 
-    problems = []                      # 前若干条被丢弃的行（行号, 原文），报错时给出
+    problems: list = []                # 前若干条被丢弃的行（行号, 原文），报错时给出
 
     def _note(line_no: int, text: str) -> None:
         if len(problems) < 10:

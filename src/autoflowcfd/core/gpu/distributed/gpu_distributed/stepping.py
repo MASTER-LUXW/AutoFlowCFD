@@ -4,6 +4,8 @@
 `fr_solver/solver/solve_loop.py::SolveLoopMixin`（2026-10-05 起）。
 """
 
+from typing import Any
+
 from functools import partial
 
 from autoflowcfd.core.gpu import get_cupy
@@ -12,6 +14,29 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 class _MultiGPUSteppingMixin:
     """完全分布式加载入口、阶数切换与单步推进。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _compute_local_time_step_gpu: Any
+    _compute_turbulence_source_distributed: Any
+    _get_positivity_limiter_gpu: Any
+    _inv_perm_gpu: Any
+    _monitor_residuals: Any
+    _perm_gpu: Any
+    _update_cfl_controller: Any
+    boundary_ghost_provider: Any
+    compute_artificial_diffusivity_compact_gpu: Any
+    device_id: Any
+    dist_flat_face: Any
+    freestream: Any
+    gpu_halo: Any
+    iteration: Any
+    mesh: Any
+    order: Any
+    partition: Any
+    time_integrator: Any
+    turb_model_gpu: Any
+    turb_model_name: Any
+    U_gpu: Any
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int,

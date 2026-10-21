@@ -80,7 +80,10 @@ def export_highorder_vtk(
     npr, nte = real_sps_per_cell(order)
     nodes = np.asarray(mesh._node_coords)
 
-    points, cells, types, data = [], [], [], {n: [] for n in names}
+    points: list = []
+    cells: list = []
+    types: list = []
+    data: Dict[str, list] = {n: [] for n in names}
     offset = 0
     for count, lo, n_real, conn, build, vtk_type in (
             (n_prism, 0, npr, mesh._fixed_prism_conn, native_prism_export_data, _VTK_LAGRANGE_WEDGE),

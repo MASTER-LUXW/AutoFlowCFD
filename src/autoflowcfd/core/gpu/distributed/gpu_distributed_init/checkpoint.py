@@ -6,11 +6,18 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any, Optional
+
 from autoflowcfd.core.gpu import get_cupy
 
 
 class _GPUDistributedCheckpointMixin:
     """多 GPU 分布式 checkpoint 的保存与加载、状态回传"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    device_id: Any
+    partition: Any
+    state: Any
 
     def get_state_cpu(self):
         """下载 GPU 状态到 CPU。"""
@@ -20,8 +27,8 @@ class _GPUDistributedCheckpointMixin:
     def save_checkpoint_distributed(
         self, output_dir: str, iteration: int, input_file: str,
         order: int, turbulence_model: str,
-        target_order: int = None,
-        surface_mesh: str = None,
+        target_order: Optional[int] = None,
+        surface_mesh: Optional[str] = None,
     ):
         """分布式 checkpoint 保存（#4，V2.0 专家组盲审第4轮，2026-08-28）。
 

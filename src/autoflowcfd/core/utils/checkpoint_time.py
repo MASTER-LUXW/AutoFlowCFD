@@ -20,7 +20,7 @@
 （`(n_cells, n_sps, n_transported)`，模型的未知量空间：SST 为 k 与 ln omega）一并写出与恢复。
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -47,7 +47,7 @@ def time_metadata(solver) -> dict:
     """时间推进的 checkpoint 元数据：`time_accurate`；本次 `solve()` 的时间步长 `dt`（尚未求解过时没有）；
     时间精确推进时的物理时间；dual-time 另记内迭代次数上限。"""
     dt = getattr(solver, "_physical_dt", None)
-    out = {TIME_ACCURATE_KEY: bool(getattr(solver, "time_accurate", False))}
+    out: Dict[str, Any] = {TIME_ACCURATE_KEY: bool(getattr(solver, "time_accurate", False))}
     if dt is not None:
         out[DT_KEY] = float(dt)
     if is_time_accurate(solver):

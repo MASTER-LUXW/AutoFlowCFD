@@ -65,7 +65,7 @@ def compute_vertex_corner_thickness_limit(
         np.linalg.norm(face_normals, axis=1, keepdims=True), 1e-300
     )
 
-    edge_map = {}
+    edge_map: dict = {}
     for i, face in enumerate(extrude_faces):
         for j in range(3):
             a, b = int(face[j]), int(face[(j + 1) % 3])

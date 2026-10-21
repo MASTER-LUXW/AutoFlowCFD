@@ -12,6 +12,7 @@ rank 的 `MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全�
 """
 
 from functools import partial
+from typing import Any
 
 import numpy as np
 
@@ -43,7 +44,7 @@ class MultiGpuTurbulenceBackend:
         self.shape = tuple(self.model.transported_fields()[0].shape)
         self.cell_is_prism = cell_is_prism
         self.order = int(order)
-        self._ctx = None
+        self._ctx: Any = None              # 湍流紧凑视图上下文（`_prepare_turbulence_view_distributed`）
         self.mu_t_compact = None
 
     def _to_local(self, a_compact):

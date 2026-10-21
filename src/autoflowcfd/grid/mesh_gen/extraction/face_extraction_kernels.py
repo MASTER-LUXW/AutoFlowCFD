@@ -118,7 +118,7 @@ def _scan_sorted_faces_numba(
     sorted_max: np.ndarray,
     sorted_cells: np.ndarray,
     n_faces_raw: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """去重面并通过一次扫描已按字典序排序的 (key1, max) 对构建连接。
 
     排序本身（按 (face_key1, face_max)，face_key1 为主）在调用方用普通

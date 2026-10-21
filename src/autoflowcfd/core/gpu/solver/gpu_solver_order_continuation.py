@@ -104,7 +104,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # ——GPUTurbulenceSST/DDESModel/IDDESModel/WALEModel 实例
     # ——不含任何阶数相关内部状态，不需要重新构造，与 GPU 分布式版本
     # 同一处理）---
-    if solver.turb_model_gpu is not None:
+    if new_fields_np is not None:                 # 有湍流模型时上面两条分支都已给出
         with cp.cuda.Device(solver.device_id):
             solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
             if new_nu_t_np is not None:

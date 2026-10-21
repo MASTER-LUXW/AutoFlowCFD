@@ -209,12 +209,10 @@ def _bbox_touch_fraction(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     tol: float,
-) -> Tuple[Optional[int], Optional[np.ndarray]]:
+) -> Optional[np.ndarray]:
     """查找这批节点主要贴在包围盒的哪一个面上。
 
-    如果 6 个包围盒面中的某一个占到了给定节点的
-    >= _BBOX_TOUCH_MAJORITY，则返回 (axis, inward_direction)，
-    否则返回 (None, None)。
+    恰好一个包围盒面占到给定节点的 >= _BBOX_TOUCH_MAJORITY 时返回该面的向内单位方向 `(3,)`，否则返回 None。
     """
     coords = nodes[node_idx]
     n = len(node_idx)

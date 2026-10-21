@@ -39,7 +39,7 @@ def run_stage_b_repair(
     from ..extraction.face_extractor import FaceExtractor
     from ...schema.grid_nodes import NodeArray
 
-    repair_actions = []
+    repair_actions: list = []
 
     if not np.any(bad_mask):
         return merged_nodes, merged_cells, bad_mask, repair_actions

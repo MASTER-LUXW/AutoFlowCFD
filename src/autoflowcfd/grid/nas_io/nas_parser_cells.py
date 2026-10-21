@@ -47,9 +47,9 @@ def parse_cells_from_nas(
     Raises:
         NASParseError: 单元解析失败
     """
-    connectivity_list = []
+    connectivity_list: list = []
     cell_types = []
-    cell_pids = []
+    cell_pids: list = []
     cell_count = 0
     parse_errors = 0
     skipped_cells = 0
@@ -119,7 +119,7 @@ def parse_cells_from_nas(
         re.IGNORECASE
     )
 
-    problems = []                      # 前若干条被丢弃的行（行号, 原文），报错时给出
+    problems: list = []                # 前若干条被丢弃的行（行号, 原文），报错时给出
 
     def _note(line_no: int, text: str) -> None:
         if len(problems) < 10:

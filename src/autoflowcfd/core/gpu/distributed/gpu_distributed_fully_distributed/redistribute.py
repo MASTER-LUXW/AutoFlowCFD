@@ -142,7 +142,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     solver.gpu_halo = GPUHaloExchange(solver.partition, n_sps=new_n_sps, n_vars=5, device_id=solver.device_id)
     solver.state = DistributedFRState(solver.partition, new_n_sps)
 
-    if solver.turb_model_gpu is not None:
+    if new_fields_np is not None:                 # 有湍流模型时上面两条分支都已给出
         with cp.cuda.Device(solver.device_id):
             solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
             if new_nu_t_np is not None:

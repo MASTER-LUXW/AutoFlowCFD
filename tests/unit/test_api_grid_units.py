@@ -8,6 +8,9 @@ import numpy as np
 import pytest
 
 from autoflowcfd import AutoFlowCFDAPI
+from autoflowcfd.grid.structures import (
+    BoundaryMap, GridMetadata, NodeArray, PrismCells, TetrahedralCells, VolumeMeshData,
+)
 from autoflowcfd.grid.mesh_gen.extrusion.first_layer import first_layer_height_for_yplus
 
 _CUBE = Path(__file__).resolve().parents[2] / "examples" / "cube_demo" / "cube_demo.nas"
@@ -44,3 +47,24 @@ def test_generate_volume_mesh_resolves_the_first_layer_like_the_cli():
                                  ref_length=1.0)
     with pytest.raises(ValueError, match="参考速度"):
         api.generate_volume_mesh("surface", target_yplus=1.0)
+
+
+def test_get_grid_info_reports_the_boundary_groups():
+    """此前对 BoundaryMap 取 len()（没有 __len__）直接 TypeError，组名读的是 GridData 上不存在的属性。"""
+    api = AutoFlowCFDAPI()
+    info = api.get_grid_info(api.load_grid(_CUBE, validate=False))
+    assert info["boundary_count"] == 4 and sorted(info["boundary_groups"]) == ["body", "inlet", "outlet", "tunnel"]
+    assert info["node_count"] > 0 and info["cell_count"] > 0
+
+
+def test_get_volume_mesh_info_counts_tets_and_prisms():
+    """此前读 VolumeMeshData 上不存在的 cell_type，调用即 AttributeError。"""
+    vm = VolumeMeshData(
+        nodes=NodeArray(x=np.arange(7.0), y=np.zeros(7), z=np.zeros(7)),
+        cells=TetrahedralCells(connectivity=np.array([[0, 1, 2, 6]], dtype=np.int32), volumes=np.array([1.0])),
+        boundaries=BoundaryMap(groups={}, bc_types={}),
+        metadata=GridMetadata(node_count=7, cell_count=2, boundary_groups=[], file_format="test"),
+        prism_cells=PrismCells(connectivity=np.array([[0, 1, 2, 3, 4, 5]], dtype=np.int32), volumes=np.array([1.0])),
+    )
+    assert AutoFlowCFDAPI().get_volume_mesh_info(vm) == {"node_count": 7, "cell_count": 2, "tet_count": 1,
+                                                         "prism_count": 1}

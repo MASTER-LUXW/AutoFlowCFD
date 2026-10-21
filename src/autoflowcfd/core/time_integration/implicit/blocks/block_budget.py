@@ -83,6 +83,10 @@ def estimate_ilu_bytes(n_prism: int, n_tet: int, n_real_prism: int,
     return estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var) + coupling
 
 
+#: `(n_prism, n_tet, n_real_prism, n_real_tet)`：两类单元数与各自每单元真实解点数
+BlockSizes = Tuple[int, int, int, int]
+
+
 def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
                      n_var: int) -> int:
     """某一档（`BLOCK_MODES`）的字节数。"""
@@ -92,14 +96,14 @@ def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_r
     return two if mode == "two" else two // 2
 
 
-def _best_mode(budget: int, sizes, n_var: int) -> Optional[str]:
+def _best_mode(budget: int, sizes: BlockSizes, n_var: int) -> Optional[str]:
     for mode in BLOCK_MODES:
         if block_mode_bytes(mode, *sizes, n_var) <= budget:
             return mode
     return None
 
 
-def plan_block_modes(sizes, n_mean: int, n_turb: int, budget: int) -> Tuple[Optional[str], Optional[str]]:
+def plan_block_modes(sizes: BlockSizes, n_mean: int, n_turb: int, budget: int) -> Tuple[Optional[str], Optional[str]]:
     """在合计预算 `budget` 内为平均流（`n_mean` 个未知量）与湍流（`n_turb` 个，0 为没有湍流缓存）选档，
     返回 `(平均流档, 湍流档)`；None 表示一档也放不下（对角预处理）。`sizes = (n_prism, n_tet, n_real_prism,
     n_real_tet)`。"""

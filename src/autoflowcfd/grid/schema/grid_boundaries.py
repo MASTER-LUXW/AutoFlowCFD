@@ -18,8 +18,6 @@ class BoundaryMap:
                  支持的类型: VELOCITY_INLET, PRESSURE_OUTLET, WALL, SYMMETRY, SLIP_WALL
         property_ids: Property ID映射 {boundary_name: PID}
                      记录每个边界对应的Property ID
-        property_names: Property名称映射 {PID: property_name}
-                       反向映射，用于调试和日志输出
         parameters: 边界参数 {boundary_name: param_dict}
                    存储每个边界的详细参数配置
 
@@ -28,7 +26,6 @@ class BoundaryMap:
         ...     groups={"inlet": np.array([0, 1, 2], dtype=np.int32)},
         ...     bc_types={"inlet": "VELOCITY_INLET"},
         ...     property_ids={"inlet": 10},
-        ...     property_names={10: "INLET"},
         ...     parameters={"inlet": {"velocity": [33.33, 0.0, 0.0]}}
         ... )
         >>> print(bmap.get_boundary_type("inlet"))  # VELOCITY_INLET
@@ -38,7 +35,6 @@ class BoundaryMap:
     groups: Dict[str, np.ndarray]
     bc_types: Dict[str, str]
     property_ids: Dict[str, int] = field(default_factory=dict)
-    property_names: Dict[int, str] = field(default_factory=dict)
     parameters: Dict[str, Dict] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -98,20 +94,6 @@ class BoundaryMap:
             Optional[int]: Property ID，若未记录则返回None
         """
         return self.property_ids.get(boundary_name)
-
-    def get_property_name(self, boundary_name: str) -> Optional[str]:
-        """获取边界对应的Property 名称
-
-        Args:
-            boundary_name: 边界名称
-
-        Returns:
-            Optional[str]: Property Name，若未记录则返回None
-        """
-        pid = self.get_property_id(boundary_name)
-        if pid is not None:
-            return self.property_names.get(pid)
-        return None
 
     def get_parameters(self, boundary_name: str) -> Dict:
         """获取边界参数配置
@@ -249,7 +231,6 @@ class BoundaryMap:
         groups = {}
         bc_types = {}
         property_ids = {}
-        property_names = {}
         parameters = {}
 
         for i, name in enumerate(names):
@@ -275,6 +256,5 @@ class BoundaryMap:
             groups=groups,
             bc_types=bc_types,
             property_ids=property_ids,
-            property_names=property_names,
             parameters=parameters
         )

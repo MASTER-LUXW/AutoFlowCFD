@@ -147,5 +147,19 @@ class TestViscousPhysicalFluxBatchShapeInvariance:
         np.testing.assert_allclose(G_3d, G_2d, rtol=1e-12, atol=1e-12)
 
 
+def test_scalar_eddy_viscosity_uses_turbulent_prandtl():
+    """已换算的涡粘以 Python 标量传入（`mu_t_is_effective=True`）时，热导率的湍流部分必须用 Pr_t：结果与同值
+    数组逐位相同。此前按 mu_total 是否标量分支，标量分支对 mu + mu_t 整体用分子 Pr。"""
+    from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu
+
+    rng = np.random.default_rng(7)
+    Q, grad_vel, grad_T = _make_batch((6,), rng)
+    mu, Pr, mu_t = 1.8e-5, 0.72, 3.0e-4
+    G_scalar = viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=mu_t, Pr_t=0.9, mu_t_is_effective=True)
+    G_array = viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=np.full(6, mu_t), Pr_t=0.9,
+                                        mu_t_is_effective=True)
+    np.testing.assert_array_equal(G_scalar, G_array)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

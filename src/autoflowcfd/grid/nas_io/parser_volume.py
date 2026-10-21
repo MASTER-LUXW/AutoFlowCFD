@@ -67,6 +67,8 @@ def generate_volume_mesh_from_surface(
     nodes = surface_grid.nodes
     surface_nodes_np = np.column_stack([nodes.x, nodes.y, nodes.z])
     bounding_box = surface_grid.metadata.bounding_box
+    if bounding_box is None:
+        raise ValueError("面网格元数据缺少包围盒（NASParser.parse 会给出）")
 
     volume_mesh = generator.generate_from_surface(
         surface_nodes=surface_nodes_np,

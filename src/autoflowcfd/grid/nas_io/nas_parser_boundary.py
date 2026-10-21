@@ -55,11 +55,6 @@ def parse_boundary_properties(
     Raises:
         NASParseError: 边界解析失败
     """
-    groups: Dict[str, np.ndarray] = {}
-    bc_types: Dict[str, str] = {}
-    property_ids: Dict[str, int] = {}
-    property_names: Dict[int, str] = {}
-
     logger.info("Parsing boundary conditions from Properties...")
 
     try:
@@ -80,7 +75,7 @@ def parse_boundary_properties(
         pid_to_cells = _group_cells_by_pid(cell_to_pid)
 
         # 第 4 步：把属性名称映射到边界分组
-        groups, bc_types, property_ids = _map_properties_to_boundaries(
+        cell_groups, bc_types, property_ids = _map_properties_to_boundaries(
             pid_to_name, pid_to_cells
         )
 
@@ -88,14 +83,14 @@ def parse_boundary_properties(
         # 的单元会从每个边界组消失。收集到 UNCLASSIFIED 分组
         # 而不是静默丢弃它们，并大声警告——后续求解器找不到某些
         # 单元的 BC 时需要知道原因。
-        classified_cells = set()
-        for indices in groups.values():
+        classified_cells: set = set()
+        for indices in cell_groups.values():
             classified_cells.update(indices)
         unclassified = sorted(
             idx for idx in cell_to_pid if idx not in classified_cells
         )
         if unclassified:
-            groups[_UNCLASSIFIED_GROUP] = unclassified
+            cell_groups[_UNCLASSIFIED_GROUP] = unclassified
             bc_types[_UNCLASSIFIED_GROUP] = UNSPECIFIED
             logger.warning(
                 f"{len(unclassified)} cells could not be mapped to a named "
@@ -109,9 +104,7 @@ def parse_boundary_properties(
                 f"no boundary group at all"
             )
 
-        # 转换为 numpy 数组
-        for name in groups:
-            groups[name] = np.array(groups[name], dtype=np.int32)
+        groups = {name: np.array(idx, dtype=np.int32) for name, idx in cell_groups.items()}
 
         logger.info(f"Parsed {len(groups)} boundary groups")
 
@@ -119,7 +112,6 @@ def parse_boundary_properties(
             groups=groups,
             bc_types=bc_types,
             property_ids=property_ids,
-            property_names=property_names,
             parameters={}
         )
 
@@ -217,7 +209,7 @@ def _parse_cell_to_pid_mapping(cells_data: list) -> Dict[int, int]:
 
 def _group_cells_by_pid(cell_to_pid: Dict[int, int]) -> Dict[int, List[int]]:
     """按属性 ID 分组单元。"""
-    pid_to_cells = {}
+    pid_to_cells: dict = {}
 
     for cell_idx, pid in cell_to_pid.items():
         if pid not in pid_to_cells:
@@ -232,9 +224,9 @@ def _map_properties_to_boundaries(
     pid_to_cells: Dict[int, List[int]]
 ) -> Tuple[Dict[str, List[int]], Dict[str, str], Dict[str, int]]:
     """将属性名称映射到边界组，类型按名字识别（`boundary_types.detect_boundary_type`，识别不了记为 UNSPECIFIED）。"""
-    groups = {}
+    groups: dict = {}
     bc_types = {}
-    property_ids = {}
+    property_ids: dict = {}
 
     for pid, name in pid_to_name.items():
         if pid not in pid_to_cells:

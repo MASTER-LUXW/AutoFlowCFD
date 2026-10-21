@@ -75,24 +75,14 @@ class NASParser:
 
         logger.info(f"NAS parser initialized: {file_path}")
 
-    def parse(
-        self,
-        skip_validation: bool = False,
-        generate_volume_mesh: bool = False,
-        volume_mesh_params: Optional[Dict] = None
-    ) -> GridData:
-        """解析 NAS 文件。
+    def parse(self) -> GridData:
+        """解析 NAS 面网格文件。
 
-        解析的主入口点。协调版本检测、节点/单元/边界解析
-        和元数据构建。
-
-        Args:
-            skip_validation: 是否跳过网格质量校验
-            generate_volume_mesh: 是否从表面网格生成体网格
-            volume_mesh_params: 体网格生成参数
+        解析的主入口点。协调版本检测、节点/单元/边界解析和元数据构建。只解析、不做质量校验（质量校验是
+        `GridValidator`）；生成体网格走 `generate_volume_mesh_from_surface`。
 
         Returns:
-            GridData: 网格数据对象（表面或体网格）
+            GridData: 面网格数据
 
         Raises:
             NASFormatError: 文件格式不支持或损坏
@@ -185,43 +175,21 @@ class NASParser:
             # Step 5: Compute bounding box
             bounding_box = self._compute_bounding_box(nodes)
 
-            # 第 6 步：需要时生成体网格
-            if generate_volume_mesh:
-                metadata = GridMetadata(
-                    node_count=nodes.count,
-                    cell_count=surface_cells.count,
-                    boundary_groups=list(boundaries.groups.keys()),
-                    file_format=self.version,
-                    bounding_box=bounding_box
-                )
-                surface_grid = GridData(
-                    nodes=nodes, cells=surface_cells, boundaries=boundaries, metadata=metadata
-                )
-                return self.generate_volume_mesh_from_surface(surface_grid, volume_mesh_params)
-            else:
-                # 使用 表面 网格
-                metadata = GridMetadata(
-                    node_count=nodes.count,
-                    cell_count=surface_cells.count,
-                    boundary_groups=list(boundaries.groups.keys()),
-                    file_format=self.version,
-                    bounding_box=bounding_box
-                )
+            metadata = GridMetadata(
+                node_count=nodes.count,
+                cell_count=surface_cells.count,
+                boundary_groups=list(boundaries.groups.keys()),
+                file_format=self.version,
+                bounding_box=bounding_box
+            )
+            grid_data = GridData(nodes=nodes, cells=surface_cells, boundaries=boundaries, metadata=metadata)
 
-                grid_data = GridData(
-                    nodes=nodes,
-                    cells=surface_cells,
-                    boundaries=boundaries,
-                    metadata=metadata
-                )
-
-                logger.success(
-                    f"NAS file parsed successfully: "
-                    f"{nodes.count:,} nodes, {surface_cells.count:,} cells, "
-                    f"{len(boundaries.groups)} boundary groups"
-                )
-
-                return grid_data
+            logger.success(
+                f"NAS file parsed successfully: "
+                f"{nodes.count:,} nodes, {surface_cells.count:,} cells, "
+                f"{len(boundaries.groups)} boundary groups"
+            )
+            return grid_data
 
         except NASParserError:
             raise

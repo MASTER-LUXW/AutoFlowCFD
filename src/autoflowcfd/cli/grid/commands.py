@@ -22,9 +22,17 @@ Example:
 import click
 import json
 from pathlib import Path
+from typing import Any, Dict
+
 from loguru import logger
 
 from autoflowcfd.cli.grid.options import units_option
+
+
+def _boundary_group_cell_counts(grid_data) -> Dict[str, int]:
+    """各边界组的面单元数（`BoundaryMap.groups` 存单元索引）。"""
+    boundaries = grid_data.boundaries
+    return {name: len(boundaries.get_cell_indices(name)) for name in boundaries.boundary_names}
 
 
 @click.group()
@@ -102,20 +110,11 @@ def parse(
         grid_data = parser.parse()
 
         # 获取网格统计信息
-        result = {
+        result: Dict[str, Any] = {
             "node_count": grid_data.node_count,
             "cell_count": grid_data.cell_count,
-            "boundary_groups": {},
+            "boundary_groups": _boundary_group_cell_counts(grid_data),
         }
-
-        # 获取边界信息
-        if hasattr(grid_data, 'boundaries'):
-            for name in grid_data.boundaries.boundary_names:
-                # 这里统计的是该边界组的**单元**数（BoundaryMap.groups 按
-                # 契约存单元索引）。原变量名 `nodes` 是错的，且用的是已删除
-                # 的错名别名 get_node_indices，见 grid_boundaries.py 那处说明。
-                cells = grid_data.boundaries.get_cell_indices(name)
-                result["boundary_groups"][name] = len(cells)
 
         # 质量报告（若未跳过）
         quality_passed = True
@@ -298,21 +297,12 @@ def info(input_file: str, units: str, json_output: bool) -> None:
         node_count = grid_data.node_count
         cell_count = grid_data.cell_count
 
-        result = {
+        result: Dict[str, Any] = {
             "file": input_file,
             "node_count": node_count,
             "cell_count": cell_count,
-            "boundary_groups": {},
+            "boundary_groups": _boundary_group_cell_counts(grid_data),
         }
-
-        # 边界信息
-        if hasattr(grid_data, 'boundaries'):
-            for name in grid_data.boundaries.boundary_names:
-                # 这里统计的是该边界组的**单元**数（BoundaryMap.groups 按
-                # 契约存单元索引）。原变量名 `nodes` 是错的，且用的是已删除
-                # 的错名别名 get_node_indices，见 grid_boundaries.py 那处说明。
-                cells = grid_data.boundaries.get_cell_indices(name)
-                result["boundary_groups"][name] = len(cells)
 
         nodes = grid_data.nodes
         result["bounding_box_m"] = {
@@ -351,7 +341,8 @@ def info(input_file: str, units: str, json_output: bool) -> None:
 
 # 体网格命令与格式转换命令定义在同目录的另外两个文件里，在此注册到 grid 组。
 from autoflowcfd.cli.grid.volume_commands import generate_volume, import_volume  # noqa: E402
-from autoflowcfd.cli.grid.convert_command import convert  # noqa: E402,F401
+from autoflowcfd.cli.grid.convert_command import convert  # noqa: E402
 
 grid.add_command(generate_volume)
 grid.add_command(import_volume)
+grid.add_command(convert)

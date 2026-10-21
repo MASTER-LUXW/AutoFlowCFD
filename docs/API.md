@@ -52,10 +52,10 @@ api.export_vtk("result.vtu", high_order=True)               # ParaView 打开
 |---|---|
 | `load_grid(grid_file, units="mm", bc_types=None, encoding="UTF-8", validate=True)` | 解析 NAS 面网格，返回 `GridData`。`units`：mm / m / auto（同 `--units`，内部一律米）；`bc_types`：`{组名: 类型}` 覆盖按组名识别的结果（同 `--bc-type`）；`validate` 时跑 `GridValidator`（与 `grid validate` 同一实现），不通过只记警告 |
 | `validate_grid(grid_data)` | 面网格质量校验结果字典：`passed`、`summary`、长宽比/扭曲度/Jacobian 统计 |
-| `get_grid_info(grid_data)` | 节点数、单元数、边界组 |
+| `get_grid_info(grid_data)` | 节点数、单元数、边界组数（`boundary_count`）与组名（`boundary_groups`） |
 | `generate_volume_mesh(grid_data, *, first_layer_height=None, target_yplus=None, ref_velocity=None, ref_length=None, rho_inf=1.225, mu_molecular=1.8e-5, **kwargs)` | 由面网格生成体网格，返回 `VolumeMeshData`，与 `grid generate-volume` 同一入口（见下） |
 | `validate_volume_mesh(volume_mesh)` | 体网格质量报告（`MeshQualityReport`，即求解前质量门的判据）：`.passed`、`.summary()` |
-| `get_volume_mesh_info(volume_mesh)` | 节点数、单元数、单元类型 |
+| `get_volume_mesh_info(volume_mesh)` | 节点数、单元数（`cell_count`）及其中四面体数（`tet_count`）与棱柱数（`prism_count`） |
 
 `generate_volume_mesh` 的参数：
 - 第一层高度直接给出（`first_layer_height`，米）或由目标 y+ 推出（`target_yplus` + `ref_velocity` + `ref_length`），二选一，与 CLI 同一个函数。

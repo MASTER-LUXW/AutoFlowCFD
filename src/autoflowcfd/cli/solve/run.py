@@ -10,10 +10,13 @@
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import click
 from loguru import logger
+
+if TYPE_CHECKING:
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
 @dataclass(frozen=True)
@@ -35,7 +38,7 @@ class SolveRun:
     threads: int
     order: int
     turbulence_model: str
-    time_scheme: object                     # TimeIntegrationScheme
+    time_scheme: "TimeIntegrationScheme"
     time_accurate: bool
     dual_time_inner_iter: int
     cfl_start: Optional[float]

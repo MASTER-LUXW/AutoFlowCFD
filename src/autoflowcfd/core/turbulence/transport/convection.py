@@ -24,6 +24,7 @@
 不可微，JFNK 湍流 GMRES 每步跑满 200 次。全场 99 分位也有 1.7e4 1/s。
 """
 
+from typing import Optional
 import numpy as np
 
 
@@ -136,13 +137,13 @@ def compute_scalar_convection_residual(
     velocity: np.ndarray,
     mesh,
     ops,
-    wall_dirichlet_zero_face: np.ndarray = None,
-    wall_dirichlet_value_face: np.ndarray = None,
-    has_wall_dirichlet_value: np.ndarray = None,
+    wall_dirichlet_zero_face: Optional[np.ndarray] = None,
+    wall_dirichlet_value_face: Optional[np.ndarray] = None,
+    has_wall_dirichlet_value: Optional[np.ndarray] = None,
     flat_face_override=None,
-    conv_geom: "ScalarConvectionGeometry" = None,
-    open_boundary_face: np.ndarray = None,
-    freestream_value: float = None,
+    conv_geom: "Optional[ScalarConvectionGeometry]" = None,
+    open_boundary_face: Optional[np.ndarray] = None,
+    freestream_value: Optional[float] = None,
 ) -> np.ndarray:
     """标量对流 FR 残差 `-rho U . grad(phi)`（对流形式体积项 + 界面上风校正，见模块
     文档），返回 `rho dphi/dt` 的对流部分（调用方再除以 rho）。
@@ -197,6 +198,8 @@ def compute_scalar_convection_residual(
     phi_o, phi_o_other = _extrapolate_scalar_to_faces(scalar_field, flat, ops, mesh, *masks)
     m_o = conv_geom.mass_flux
     if open_boundary_face is not None:
+        if freestream_value is None:
+            raise ValueError("给出开放边界面（open_boundary_face）时必须同时给出来流值 freestream_value")
         phi_o_other = np.where(inflow_points(np, flat, "owner", open_boundary_face, m_o), freestream_value, phi_o_other)
     # 与 face_frames.convection_jump_point 同一规则（湍流解析 Jacobian 用那个点函数）
     jump_o = m_o * (np.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
@@ -204,7 +207,7 @@ def compute_scalar_convection_residual(
 
     phi_n, phi_n_other = _extrapolate_scalar_to_faces_neighbor_frame(scalar_field, flat, *masks)
     m_n = conv_geom.mass_flux_neighbor
-    if open_boundary_face is not None:
+    if open_boundary_face is not None and freestream_value is not None:   # 两者同时给出（上面已检查）
         phi_n_other = np.where(inflow_points(np, flat, "neighbor", open_boundary_face, m_n), freestream_value,
                                phi_n_other)
     jump_n = m_n * (np.where(m_n >= 0, phi_n, phi_n_other) - phi_n)

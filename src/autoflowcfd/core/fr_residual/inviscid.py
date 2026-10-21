@@ -239,7 +239,7 @@ def compute_inviscid_residual_fr(
         # 线性剪切场，P2 算出的残差是真值的 43~62 倍。改为：① 把 Q
         # 精确插值到更细的 FINE 参考点集（Q 本身次数 <= order，插值不
         # 引入误差）；② 用解析精确的 FINE 点度量（mesh.jacobians_fine，
-        # 与 coarse 版同源，见 HighOrderMesh._build_order_geometry）和
+        # 与 coarse 版同源，见 high_order_mesh_order.py::build_order_geometry）和
         # 在 FINE 点上重新算的物理通量算出逆变通量；③ 用 FINE 网格自己
         # 的微分矩阵求散度（差分的是更接近真实非线性次数的插值多项式）；
         # ④ 把结果插值限制回 coarse SPs。细点阶数见 `fr/overintegration_order.py`。

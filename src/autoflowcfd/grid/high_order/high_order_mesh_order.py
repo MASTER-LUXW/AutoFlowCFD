@@ -6,7 +6,7 @@ AutoFlowCFD V2.0 - HighOrderMesh 的阶数相关几何构建 (G-01/G-03, CL-02)
 `mesh: HighOrderMesh` 为第一参数，HighOrderMesh 上保留同名薄委托
 方法，调用方式不变。
 """
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, NamedTuple, Optional
 
 import numpy as np
 from loguru import logger
@@ -25,7 +25,15 @@ from .order_jacobians import (
 )
 
 
-def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndarray]:
+class OrderGeometry(NamedTuple):
+    """一个阶数下的全部几何量（`build_order_geometry` 的返回值）。"""
+    sps_coords: np.ndarray                              # (n_cells, n_sps_per_cell, 3)
+    jacobians: Dict[str, np.ndarray]                    # "det_jacs"/"inv_jacs"/"scaled_quality"
+    jacobians_fine: Optional[Dict[str, np.ndarray]]     # 过积分细点度量；order==0 时为 None
+    n_sps_per_cell_fine: int                            # 棱柱段细点度量的每单元宽度；order==0 时为 0
+
+
+def build_order_geometry(mesh: "HighOrderMesh", order: int) -> OrderGeometry:
     """在给定阶数下，从已修正朝向的 connectivity/节点坐标重新推导
     SPs 物理坐标与 Jacobian（不依赖 mesh.order/mesh.n_points_1d 的当前值，
     可在切换阶数*之前*安全调用）。
@@ -36,40 +44,37 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     Jacobian（真实网格已复现：reshape 到 27 SPs/单元 的 Jacobian 硬套
     1 SP/单元 的状态场，直接崩溃）。
 
-    四面体（native 单纯形基，路径C，Part6/7/8 文档）部分走
-    `compute_native_tet_jacobians`/`map_native_tet_to_physical`（直边
-    常数 Jacobian + 零填充，见该函数与 Part8 文档），棱柱部分仍走原有
-    坍缩坐标路径——两者按 prism-在前/tet-在后拼接
-    （`_combine_prism_and_tet_jacobians`）。
-
-    Returns:
-        {"sps_coords", "jacobians", "jacobians_fine", "n_sps_per_cell_fine"}
+    四面体走 `compute_native_tet_jacobians`/`map_native_tet_to_physical`（直边常数 Jacobian 广播到全部槽位），
+    棱柱走 `compute_native_prism_jacobians`/`map_native_prism_to_physical`（原生节点上逐点求值）；两段按
+    棱柱在前、四面体在后拼接（`_combine_prism_and_tet_jacobians`）。
     """
     n_sps_per_cell = generate_fr_operators(order).n_sps
     sps_coords = np.zeros((mesh.n_cells, n_sps_per_cell, 3))
     n_prisms = mesh.n_prism_cells
-    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
+    node_coords = mesh.loaded_node_coords()
+    prism_conn, tet_conn = mesh._fixed_prism_conn, mesh._fixed_tet_conn
+    n_tets = len(tet_conn) if tet_conn is not None else 0
 
     # 棱柱的解点位置与度量用原生基（见 `fr/native_prism/__init__.py`）：原生微分算子必须配原生节点上采样的场
     from autoflowcfd.fr.native_prism.basis import build_native_prism_nodes, map_native_prism_to_physical
 
     ref_native_prism = build_native_prism_nodes(order)
-    if mesh._fixed_prism_conn is not None and n_prisms > 0:
+    if prism_conn is not None and n_prisms > 0:
         n_native_prism = ref_native_prism.shape[0]
         for i in range(n_prisms):
-            cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
+            cell_nodes = node_coords[prism_conn[i]]
             phys = map_native_prism_to_physical(ref_native_prism, cell_nodes)
             sps_coords[i, :n_native_prism] = phys
             # 填充行复制真实 SP #0（有限、物理上合法的占位值，不能留 np.zeros——那对应原点）
             sps_coords[i, n_native_prism:] = phys[0]
 
-    if n_tets > 0:
+    if tet_conn is not None and n_tets > 0:
         from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, map_native_tet_to_physical
 
         ref_native, _ = build_native_tet_operators(order)
         n_native = ref_native.shape[0]
         for i in range(n_tets):
-            cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
+            cell_nodes = node_coords[tet_conn[i]]
             phys_native = map_native_tet_to_physical(ref_native, cell_nodes)
             sps_coords[n_prisms + i, :n_native] = phys_native
             # 填充行：复制真实 SP #0 的物理坐标（有限、物理上合法的占位值，
@@ -87,23 +92,15 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # compute_inviscid_residual_fr` 的 n_points_1d==1 分支），跳过以节省
     # 内存/构建时间。
     #
-    # **过积分阶数与细点数一律走 `fr/overintegration_order.py`**
-    # （2026-09-19）：此前这里和 `fr/operators/build.py::generate_fr_operators`
-    # 各写一遍同一个 `min(rule*order, cap)`，两处注释都在提醒"必须逐字
-    # 一致，否则三个算子的形状与这里的 jacobians_fine 对不上"。靠注释维持
-    # 一致在本项目已经出过真实缺陷（滤波档双解析器、CFL 三处硬编码兜底），
-    # 而原生/坍缩分档又要再叠一层，所以合并成唯一入口。
+    # 过积分阶数与细点数只取自 `fr/overintegration_order.py`（与 `fr/operators/build.py::generate_fr_operators`
+    # 同一个来源，三个过积分算子的形状才与这里的 jacobians_fine 对得上）。
     #
-    # `n_sps_per_cell_fine` 是**棱柱**段细点度量的每单元宽度（坍缩档 `(oo+1)^3`、
-    # 原生档 `(oo+1)^2(oo+2)/2`）。四面体段逐单元只存一份（直边四面体的 Jacobian
-    # 逐单元常数），过积分按各自的 n_fine 广播（见 `order_jacobians.build_fine_metrics`
-    # 与 `core/fr_operators/volume_contract.get_overintegration_context`），所以
-    # 四面体可以用更高的 over_order、也不占按棱柱细点数展开的内存。
+    # `n_sps_per_cell_fine` 是**棱柱**段细点度量的每单元宽度 `(oo+1)^2(oo+2)/2`。四面体段逐单元只存一份（直边
+    # 四面体的 Jacobian 逐单元常数），过积分按各自的 n_fine 广播（见 `order_jacobians.build_fine_metrics` 与
+    # `core/fr_operators/volume_contract.get_overintegration_context`），不占按棱柱细点数展开的内存。
     #
-    # 棱柱的细点度量**必须逐点求值**（两档都是）：棱柱即便直边也一般随点
-    # 变化，只有顶面是底面纯平移的右棱柱才恒定，不能像四面体那样广播。
-    # 原生档下要在**原生**细点上求（原生微分算子配坍缩点采样的场不会报错、
-    # 只会给出错的导数），所以两档各自生成自己的参考点集。
+    # 棱柱的细点度量**必须逐点求值**：棱柱即便直边也一般随点变化，只有顶面是底面纯平移的右棱柱才恒定，不能像
+    # 四面体那样广播；而且必须在原生棱柱细点上求（原生微分算子配别的点集采样的场不会报错、只会给出错的导数）。
     jacobians_fine = None
     n_sps_per_cell_fine = 0
     if order >= 1:
@@ -130,19 +127,14 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
 
         # 直边四面体的 Jacobian 逐单元常数：每单元只算一份（见 `build_fine_metrics`）
         tet_jacobians_fine = compute_native_tet_jacobians(mesh, order, 1, want_scaled_quality=False)
-        n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
         from autoflowcfd.fr.triangle_apex import cell_triangle_slots
 
         jacobians_fine = build_fine_metrics(
             prism_jacobians_fine, tet_jacobians_fine, n_sps_per_cell_fine, n_prisms, n_tets,
-            cell_triangle_slots(mesh._fixed_tet_conn, mesh._fixed_prism_conn))
+            cell_triangle_slots(tet_conn, prism_conn))
 
-    return {
-        "sps_coords": sps_coords,
-        "jacobians": jacobians,
-        "jacobians_fine": jacobians_fine,
-        "n_sps_per_cell_fine": n_sps_per_cell_fine,
-    }
+    return OrderGeometry(sps_coords=sps_coords, jacobians=jacobians, jacobians_fine=jacobians_fine,
+                         n_sps_per_cell_fine=n_sps_per_cell_fine)
 
 
 _ORDER_FIELDS = ("n_points_1d", "n_sps_per_cell", "sps_coords", "jacobians", "operators", "face_flux_points",
@@ -179,10 +171,10 @@ def set_order(mesh: "HighOrderMesh", order: int) -> None:
         mesh.n_points_1d = order + 1
         mesh.operators = generate_fr_operators(order)
         mesh.n_sps_per_cell = mesh.operators.n_sps
-        mesh.sps_coords = geom["sps_coords"]
-        mesh.jacobians = geom["jacobians"]
-        mesh.jacobians_fine = geom["jacobians_fine"]
-        mesh.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
+        mesh.sps_coords = geom.sps_coords
+        mesh.jacobians = geom.jacobians
+        mesh.jacobians_fine = geom.jacobians_fine
+        mesh.n_sps_per_cell_fine = geom.n_sps_per_cell_fine
 
         mesh.face_flux_points = None
         if mesh.face_connectivity is not None:

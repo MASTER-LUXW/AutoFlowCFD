@@ -41,7 +41,7 @@ def apply_wall_distance_to_model(solver) -> None:
     """把当前壁距交给输运湍流模型（`TransportedTurbulence.apply_wall_distance`：SST 设 omega
     上界、SA-neg 识别壁面解点）；没有输运模型或没有壁距时不做事。壁距每次设定/重算后调用。"""
     model = getattr(solver, "turb_model", None)
-    if not hasattr(model, "apply_wall_distance") or solver.wall_distance is None:
+    if model is None or not hasattr(model, "apply_wall_distance") or solver.wall_distance is None:
         return
     model.apply_wall_distance(solver.wall_distance, solver.mu_molecular / solver.freestream["rho_inf"])
 

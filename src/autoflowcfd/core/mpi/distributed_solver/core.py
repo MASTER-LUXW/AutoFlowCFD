@@ -4,7 +4,7 @@
 这里只留构造与对外接口。
 """
 
-from typing import Optional
+from typing import Any, Optional
 from loguru import logger
 from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
 from autoflowcfd.core.mpi import get_rank, is_root
@@ -85,6 +85,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         n_ranks: 总 rank 数
     """
 
+    # DDES/IDDES 的逐单元网格尺度（全局单元序），`fr_solver/turbulence/init.py::init_turbulence_models` 设置
+    _iddes_h_max: Any
+    _iddes_h_wn: Any
+
     def __init__(
         self,
         mesh,
@@ -161,6 +165,8 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         if n_ranks > 1:
             from autoflowcfd.core.mpi.comm import bcast_from_root
             cell_partition = bcast_from_root(cell_partition)
+        if cell_partition is None:
+            raise RuntimeError("root 没有广播单元分区（partition_mesh 的结果）")
 
         # 换阶时用同一个 cell_partition 重建 partition/dist_flat_face（`mesh.face_connectivity` 是阶数无关的
         # 拓扑信息，见 `high_order_mesh_order.py::set_order`）

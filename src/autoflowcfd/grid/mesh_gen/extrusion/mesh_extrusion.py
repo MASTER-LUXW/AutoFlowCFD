@@ -98,9 +98,9 @@ def extrude_layers(
         layer_connectivity: 每层的面索引列表
     """
     # 计算特征长度和初始厚度
-    domain_size = np.linalg.norm(
+    domain_size = float(np.linalg.norm(
         bounding_box['max'] - bounding_box['min']
-    )
+    ))
     normal_faces = surface_faces if normal_faces is None else normal_faces
 
     # 第一层高度：用户给定（或由目标 y+ 推出）时原样使用；否则取 min(min_cell_size, 0.2% 域尺寸)。

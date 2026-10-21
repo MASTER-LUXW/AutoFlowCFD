@@ -221,9 +221,9 @@ def distributed_mesh_load_v2(
         import pickle
         buf_size = np.empty(1, dtype=np.int64)
         comm.Recv(buf_size, source=0, tag=310)
-        buf = np.empty(int(buf_size[0]), dtype=np.uint8)
-        comm.Recv(buf, source=0, tag=311)
-        my_package = pickle.loads(buf.tobytes())
+        recv_buf = np.empty(int(buf_size[0]), dtype=np.uint8)
+        comm.Recv(recv_buf, source=0, tag=311)
+        my_package = pickle.loads(recv_buf.tobytes())
         root_context = None
 
     return my_package, root_context
@@ -471,6 +471,6 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
 
     buf_size = np.empty(1, dtype=np.int64)
     comm.Recv(buf_size, source=0, tag=tags[0])
-    buf = np.empty(int(buf_size[0]), dtype=np.uint8)
-    comm.Recv(buf, source=0, tag=tags[1])
-    return pickle.loads(buf.tobytes())
+    recv_buf = np.empty(int(buf_size[0]), dtype=np.uint8)
+    comm.Recv(recv_buf, source=0, tag=tags[1])
+    return pickle.loads(recv_buf.tobytes())

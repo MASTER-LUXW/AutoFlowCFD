@@ -86,7 +86,8 @@ def locate_native_tet_face_point(
     """
     from ...grid.curved_mapping.curved_mapping import tet_barycentric
 
-    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
+    a, b, c = (v for v in range(4) if v != excluded_vertex)
+    face_vertex_idx = (a, b, c)
     L = _tet_solve_barycentric_on_face(cell_nodes, face_vertex_idx, targets_phys)
 
     r = 2.0 * L[:, 1] - 1.0

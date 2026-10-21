@@ -14,7 +14,7 @@
 
 import math
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -91,6 +91,13 @@ def report_pseudo_time_summary(solver, n_steps: int) -> None:
 
 class SolveLoopMixin:
     """与后端无关的求解循环（见模块文档）。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    convergence_history: Any
+    mesh: Any
+    order: Any
+    time_integrator: Any
+    turb_model_name: Any
 
     @property
     def residual_history(self) -> list:
@@ -342,6 +349,11 @@ class DistributedSolveLoopMixin(SolveLoopMixin):
     """CPU MPI 与多 GPU 分布式：`step()` 返回全域 allreduce 残差（各 rank 一致，收敛/发散判定同步发生；
     checkpoint 回调是集体操作，全部 rank 都调用）。"""
 
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    dist_flat_face: Any
+    n_ranks: Any
+    partition: Any
+
     def _divergence_hint(self) -> str:
         return f"分布式路径：{self.n_ranks} 个 rank，残差是全域 allreduce 值（各 rank 一致，同时抛出）"
 
@@ -363,6 +375,12 @@ class DistributedSolveLoopMixin(SolveLoopMixin):
 
 class _SolverSolveMixin(SolveLoopMixin):
     """CPU `FRSolver`：主机视图、Order Continuation 委托、阶数切换与单步推进。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _build_boundary_ghost_provider: Any
+    bc_overrides: Any
+    mesh: Any
+    state: Any
 
     def host_view(self):
         """主机视图：CPU 求解器的状态本来就在主机上，返回自身（单 GPU 的见 `core/gpu/solver/host_view.py`）。"""

@@ -104,7 +104,7 @@ class SyntheticEddyMethod:
         self.eddy_centers = self._rng.uniform(self.box_min, self.box_max, size=(self.num_eddies, 3))
         self.eddy_signs = self._random_signs(self.num_eddies)
         self.version = 0                      # 每次 advance 加一；求值缓存按它失效
-        self._tree = None
+        self._tree: Optional[cKDTree] = None  # 涡核中心的 k-d 树，涡核移动后重建
 
     def to_local(self, points: np.ndarray) -> np.ndarray:
         return (np.asarray(points, dtype=np.float64) - self.origin) @ self.frame.T
@@ -132,9 +132,10 @@ class SyntheticEddyMethod:
         xi = self.to_local(points)
         sigma = np.asarray(sigma, dtype=np.float64)
         n = xi.shape[0]
-        if self._tree is None:
-            self._tree = cKDTree(self.eddy_centers)
-        hits = self._tree.query_ball_point(xi, r=sigma, p=np.inf)
+        tree = self._tree
+        if tree is None:
+            tree = self._tree = cKDTree(self.eddy_centers)
+        hits = tree.query_ball_point(xi, r=sigma, p=np.inf)
         counts = np.fromiter((len(h) for h in hits), dtype=np.int64, count=n)
         out = np.zeros((n, 3))
         if counts.sum() == 0:

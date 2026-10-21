@@ -54,7 +54,7 @@ class EquilibriumWallModel:
         # 重建，换阶数后自动重算。主机版本构造一次，各数组模块的版本由它搬运（GPU 求解器的残差用设备版本、
         # 壁面力积分用主机版本，两者不互相驱逐）
         self._cache_flat = None
-        self._cache = {}
+        self._cache: dict = {}
 
     def matching(self, xp, mesh, flat, provider) -> Optional[WallMatching]:
         """匹配点几何（只依赖网格几何）；没有物理无滑移壁面时为 None。"""

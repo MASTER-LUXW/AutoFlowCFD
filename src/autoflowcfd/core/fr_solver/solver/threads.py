@@ -122,7 +122,7 @@ class blas_threads_limited:
 
     def __init__(self, n: int = 1):
         self._n = int(n)
-        self._saved = []
+        self._saved: list = []          # (设定函数, 原线程数)
 
     @property
     def n_applied(self) -> int:

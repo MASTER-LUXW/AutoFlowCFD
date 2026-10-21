@@ -8,6 +8,7 @@ cube_demo 体网格因此多出 86 个外部面，修补却报告成功）。本
 - 重剖分结果的外表面必须与交给 tetgen 的边界逐面相同（`mesh_repair_cavity_shared.retile_is_conformal`）。
 """
 
+from typing import Optional
 import numpy as np
 
 from .mesh_repair_cavity_shared import _repeated_node_rows
@@ -66,7 +67,7 @@ class GlobalWeldState:
         hit = np.concatenate([hit_p, hit_t])
         return hit[~in_cavity[hit]]
 
-    def _rows(self, cell_ids: np.ndarray, step: np.ndarray = None):
+    def _rows(self, cell_ids: np.ndarray, step: Optional[np.ndarray] = None):
         cell_ids = np.asarray(cell_ids, dtype=np.int64)
         prisms = self._cur_prism[cell_ids[cell_ids < self.n_prism]]
         tets = self._cur_tet[cell_ids[cell_ids >= self.n_prism] - self.n_prism]
@@ -87,17 +88,19 @@ class GlobalWeldState:
         """换点前后每个单元（棱柱按槽位分解）的有向体积同号且换点后非零。"""
         before_p, before_t = self._rows(cell_ids)
         after_p, after_t = self._rows(cell_ids, step)
-        for before, after in ((before_p[:, _PRISM_SLOT_TETS] if len(before_p) else None,
-                               after_p[:, _PRISM_SLOT_TETS] if len(after_p) else None),
-                              (before_t if len(before_t) else None, after_t if len(after_t) else None)):
-            if before is None:
-                continue
+        # 同一组单元：换点前后的棱柱 / 四面体行数相同
+        pairs = []
+        if len(before_p):
+            pairs.append((before_p[:, _PRISM_SLOT_TETS], after_p[:, _PRISM_SLOT_TETS]))
+        if len(before_t):
+            pairs.append((before_t, after_t))
+        for before, after in pairs:
             d0, d1 = _signed_dets(nodes, before), _signed_dets(nodes, after)
             if np.any(d1 == 0.0) or np.any(np.sign(d0) != np.sign(d1)):
                 return False
         return True
 
-    def as_tets_after(self, cell_ids: np.ndarray, step: np.ndarray) -> np.ndarray:
+    def as_tets_after(self, cell_ids: np.ndarray, step: Optional[np.ndarray]) -> np.ndarray:
         prisms, tets = self._rows(cell_ids, step)
         parts = [_split_prisms_to_tets(prisms)] if len(prisms) else []
         if len(tets):

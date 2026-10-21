@@ -43,8 +43,8 @@ def deduplicate_face_matrices(mats: np.ndarray, quantum: float = FACE_MATRIX_QUA
     peak = float(np.abs(mats).max())
     if peak >= _MAX_ABS_ENTRY:
         raise ValueError(f"插值矩阵元素 {peak:.3e} 超出取整键的范围（< {_MAX_ABS_ENTRY:.0e}）")
-    index = {}
-    reps = []
+    index: dict = {}
+    reps: list = []
     for a in range(0, n, _CHUNK_FACES):
         keys = np.round(mats[a:a + _CHUNK_FACES] / quantum).astype(np.int64)
         for i in range(keys.shape[0]):

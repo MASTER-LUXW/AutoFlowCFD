@@ -18,6 +18,10 @@ from autoflowcfd.grid.structures import GridData, VolumeMeshData
 class _APIGridMixin:
     """网格加载、校验、体网格生成"""
 
+    # 最近一次加载 / 生成的网格（`AutoFlowCFDAPI.__init__` 置 None）
+    grid_data: Optional[GridData]
+    volume_mesh: Optional[VolumeMeshData]
+
     def load_grid(self, grid_file: Union[str, Path], units: str = "mm", bc_types: Optional[Dict[str, str]] = None,
                   encoding: str = "UTF-8", validate: bool = True) -> GridData:
         """解析 NAS 面网格；`validate` 时跑 `GridValidator`，不通过只记警告（与 `grid generate-volume` 一致）。
@@ -41,14 +45,12 @@ class _APIGridMixin:
 
     def get_grid_info(self, grid_data: GridData) -> Dict[str, Any]:
         """面网格规模与边界组。"""
-        info = {
+        return {
             "node_count": grid_data.node_count,
             "cell_count": grid_data.cell_count,
-            "boundary_count": len(grid_data.boundaries) if hasattr(grid_data, "boundaries") else 0,
+            "boundary_count": grid_data.boundaries.boundary_count,
+            "boundary_groups": grid_data.boundaries.boundary_names,
         }
-        if hasattr(grid_data, "boundary_groups"):
-            info["boundary_groups"] = grid_data.boundary_groups
-        return info
 
     def validate_grid(self, grid_data: GridData) -> Dict[str, Any]:
         """面网格质量校验（`GridValidator`，与 CLI `grid validate` 同一实现）。"""
@@ -89,7 +91,8 @@ class _APIGridMixin:
         return {
             "node_count": volume_mesh.node_count,
             "cell_count": volume_mesh.cell_count,
-            "cell_type": volume_mesh.cell_type,
+            "tet_count": volume_mesh.cells.count,
+            "prism_count": volume_mesh.prism_cells.count if volume_mesh.prism_cells is not None else 0,
         }
 
     def validate_volume_mesh(self, volume_mesh: VolumeMeshData):

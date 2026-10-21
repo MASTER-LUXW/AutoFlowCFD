@@ -63,7 +63,8 @@ def _wall_faces_by_surface(volume_data, surface, face_nodes, wall_names) -> np.n
 def _wall_faces_by_cells(volume_data, bm, owner, wall_names) -> np.ndarray:
     """按单元：owner 单元属于壁面组的边界面；壁面单元同时属于别的组时无法判定每个面属于哪个组，报错。"""
     n_cells = volume_data.cell_count
-    wall_cells, other_cells = set(), set()
+    wall_cells: set = set()
+    other_cells: set = set()
     for bc_name in bm.bc_types:
         if not bm.has_boundary(bc_name):
             continue

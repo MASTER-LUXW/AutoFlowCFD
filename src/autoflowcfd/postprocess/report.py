@@ -17,7 +17,7 @@
 import json
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from datetime import datetime
 from loguru import logger
 from dataclasses import dataclass, field, asdict
@@ -90,7 +90,7 @@ class ConvergenceAnalyzer:
         >>> analyzer.export_csv("convergence.csv")
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化收敛分析器。"""
         self.history: List[IterationData] = []
         self.start_time: Optional[datetime] = None
@@ -136,7 +136,7 @@ class ConvergenceAnalyzer:
             res_str = ", ".join([f"{k}={v:.2e}" for k, v in residuals.items()])
             logger.info(f"Iteration {iteration}: residuals=[{res_str}], CFL={cfl:.2f}")
 
-    def export_csv(self, output_path: str) -> Path:
+    def export_csv(self, output_path: Union[str, Path]) -> Path:
         """把收敛历史导出为 CSV 文件。
 
         Args:
@@ -245,7 +245,7 @@ class SimulationReport:
 
     def generate(
         self,
-        output_path: str,
+        output_path: Union[str, Path],
         computation_time: float = 0.0,
         metadata: Optional[Dict] = None
     ) -> Path:

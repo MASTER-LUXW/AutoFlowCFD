@@ -72,7 +72,7 @@ Krylov 基（约 4.8 GiB）共存于 31.5 GB 开发机只能是一份。
 79 万单元就要上百 GB）。
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 from loguru import logger
@@ -84,6 +84,9 @@ from .precond_shift import block_diagonal_scale, shifted_dtau
 from .preconditioner import PseudoTransientDiagonal
 from ..reductions import LocalReductions
 from .refresh_cost import assembly_cost_iters, block_kind
+
+if TYPE_CHECKING:
+    from .block_ilu import BlockCouplingStructure
 
 
 #: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配；
@@ -123,7 +126,7 @@ class BlockJacobiCache:
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int, plan: BlockPlan,
-                 red: LocalReductions = None, coupling_graph=None, with_turbulence: bool = False,
+                 red: Optional[LocalReductions] = None, coupling_graph=None, with_turbulence: bool = False,
                  global_coarse=None):
         """`colors`：块装配用的单元着色（单机 `coloring.greedy_cell_coloring`；分布式
         是全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。
@@ -146,24 +149,24 @@ class BlockJacobiCache:
         self.red = red if red is not None else LocalReductions()
         self.n_var = int(n_var)
         self.assembler = None
-        self.coupling = None
+        self.coupling: Optional["BlockCouplingStructure"] = None   # 块 ILU 档的面邻居耦合结构
         self._coupling_graph_fn = coupling_graph
         self._coupling_graph = None
         self.kind = block_kind(self.n_var, with_turbulence)
-        self.refresh_slack = None        # 一次装配折合的 GMRES 迭代数，每次装配后按 refresh_cost.py 给出
+        self.refresh_slack: Optional[int] = None   # 一次装配折合的 GMRES 迭代数，每次装配后按 refresh_cost.py 给出
         self.single_copy = False
         self._inverted_dtau = None
         self._factored = None            # 块 ILU 档：当前 J_cc 下按 `_factored_dtau` 构造的预处理子
         self._factored_dtau = None
         self._ptc_diag = None            # 逐（单元, 解点）的 max_v |J_cc 对角|（PTC 项可忽略判据、对角位移用）
         self.shifted = False             # 预处理的伪时间项是否带下限（`precond_shift.py`，`recover` 启用）
-        self.cross = None
+        self.cross: Any = None           # 跨 rank 耦合（`coarse.CrossRankCoupling`，分布式块 ILU 档）
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
         self.age = 0
-        self.baseline_iters = None
-        self.last_iters = None
+        self.baseline_iters: Optional[int] = None
+        self.last_iters: Optional[int] = None
         self.last_accepted = True
         self.n_builds = 0
         sizes = (int(self.cell_is_prism.sum()), int((~self.cell_is_prism).sum()), n_real_prism, n_real_tet)
@@ -182,13 +185,14 @@ class BlockJacobiCache:
                 f"{block_mode_bytes('single', *sizes, self.n_var) / 2 ** 30:.1f} GiB，超出{plan.describe()}，"
                 f"改用逐 SP 对角预处理——大 CFL 下 GMRES 迭代数会显著上升")
             logger.warning("[NK] " + self.disabled_reason)
-            self.colors = None
         else:
             logger.info(f"[NK] 单元块预处理（n_var={self.n_var}）：{mode}，"
                         f"{block_mode_bytes(mode, *sizes, self.n_var) / 2 ** 30:.2f} GiB"
                         f"（{plan.describe()}）")
 
     def _refresh_threshold(self, baseline: int) -> int:
+        if self.refresh_slack is None:
+            raise RuntimeError("refresh_slack 在第一次装配之后才有值")
         return int(baseline + self.refresh_slack)
 
     def _needs_rebuild(self, dtau_flat) -> bool:
@@ -374,6 +378,8 @@ class BlockJacobiCache:
         """
         if self.disabled_reason is not None:
             return PseudoTransientDiagonal(dtau_flat, n_var)
+        if self.jac is None:
+            raise RuntimeError("取预处理子之前须先装配单元块 Jacobian")
         dtau_flat = self._preconditioner_dtau(dtau_flat)
         if self.coupling is None:
             return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)

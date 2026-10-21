@@ -11,8 +11,7 @@ import numpy as np
 
 def wall_flux_points(flat, group_code: np.ndarray, codes: Sequence[int]):
     """选出属于 `codes` 的边界面通量点：返回 (取本侧数据的面记录, 取幽灵态的面记录, 通量点下标, 组编码)。"""
-    codes = np.asarray(list(codes), dtype=np.int64)
-    in_group = np.isin(group_code, codes)
+    in_group = np.isin(group_code, np.asarray(list(codes), dtype=np.int64))
     n_fp = flat.n_fp
     rec, ghost, fp, code = [], [], [], []
     primary = np.flatnonzero(flat.is_boundary & flat.owner_is_primary & in_group)

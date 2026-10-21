@@ -91,7 +91,7 @@ class GridValidator:
         """
         logger.info("Starting grid quality validation...")
 
-        results = {
+        results: Dict[str, Any] = {
             'aspect_ratio': self._check_aspect_ratio(),
             'skewness': self._check_skewness(),
             'jacobian': self._check_jacobian(),

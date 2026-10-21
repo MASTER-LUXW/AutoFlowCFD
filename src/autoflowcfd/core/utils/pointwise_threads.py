@@ -18,7 +18,7 @@ GIL，线程之间真正并行；每个元素经历的运算与整场调用完�
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -40,7 +40,7 @@ def _executor(n_threads: int) -> ThreadPoolExecutor:
     return _pool
 
 
-def _call(func: Callable, err: dict, chunks, args):
+def _call(func: Callable, err: Any, chunks, args):
     with np.errstate(**err):
         return func(*chunks, *args)
 

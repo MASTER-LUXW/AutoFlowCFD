@@ -6,7 +6,7 @@ AutoFlowCFD - 边界面组标签打标 (从 face_connectivity.py 拆出，控制
 幽灵态构建等调用点统一复用（WMLES 与气动力积分经幽灵态提供者的组编码取壁面）。
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -90,7 +90,7 @@ def tag_boundary_groups(
 
 def tag_boundary_groups_by_geometry(
     face_conn: FRFaceConnectivity,
-    surface_mesh: Dict[str, object],
+    surface_mesh: Dict[str, Any],
     distance_tolerance_factor: float = 0.75,
 ) -> Tuple[np.ndarray, Dict[str, int]]:
     """按真实几何最近邻，逐**面**（不经过任何单元级别聚合）匹配边界组标签。

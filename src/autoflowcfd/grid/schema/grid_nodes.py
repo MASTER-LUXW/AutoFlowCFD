@@ -75,11 +75,11 @@ class NodeArray:
         return len(self.x)
 
     @property
-    def shape(self) -> Tuple[int]:
+    def shape(self) -> Tuple[int, ...]:
         """获取节点数组形状
 
         Returns:
-            Tuple[int]: 形状元组 (N_nodes,)
+            形状元组 (N_nodes,)
         """
         return self.x.shape
 

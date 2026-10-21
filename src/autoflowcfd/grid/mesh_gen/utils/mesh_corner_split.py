@@ -58,7 +58,7 @@ def split_sharp_corners(
     faces: np.ndarray,
     threshold: float = FEATURE_ANGLE_THRESHOLD_RAD,
     min_feature_radius: float = 0.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """将 `faces` 的每个尖锐拐角/硬边顶点拆分为每个平滑补丁一个节点副本，
     添加倒角/帽盖三角形以保持结果水密。
 
@@ -202,13 +202,13 @@ def split_sharp_corners(
         patches_set = set(patches_here)
         adj = vertex_patch_adj.get(v)
         regular = adj is not None
-        if regular:
+        if adj is not None:
             for p in patches_here:
                 neigh = adj.get(p, set())
                 if len(neigh) != 2 or not neigh.issubset(patches_set):
                     regular = False
                     break
-        if regular:
+        if regular and adj is not None:
             cyclic = [patches_here[0]]
             prev, cur = None, patches_here[0]
             ok = True

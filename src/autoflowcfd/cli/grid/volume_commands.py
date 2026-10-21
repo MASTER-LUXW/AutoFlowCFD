@@ -11,7 +11,7 @@ from pathlib import Path
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
 from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import DEFAULT_GROWTH_RATE, DEFAULT_MIN_CELL_SIZE
 from autoflowcfd.cli.grid.options import bc_type_option, units_option
-from typing import Optional
+from typing import Any, Dict, Optional
 from loguru import logger
 
 
@@ -124,6 +124,8 @@ def generate_volume(
 
         logger.info("Step 1/4: Parsing surface mesh...")
         surface_grid = parser.parse()
+        if parser.resolved_units is None:
+            raise RuntimeError("NASParser.parse 之后坐标单位仍未确定")
         export_scale = 1.0 / SCALE_TO_METERS[parser.resolved_units]
 
         logger.info("Step 2/4: Validating surface mesh quality...")
@@ -135,9 +137,7 @@ def generate_volume(
             )
 
         logger.info("Step 3/4: Generating volume mesh (BL extrusion + background)...")
-        # 直接复用 surface_grid（上面 Step 2 质量检查时已经解析过）——
-        # parser.parse(generate_volume_mesh=True) 会把同一个 NAS 文件
-        # 从头再解析一遍。
+        # 直接复用上面 Step 1 解析出的 surface_grid
         volume_mesh = parser.generate_volume_mesh_from_surface(
             surface_grid,
             volume_mesh_params={
@@ -312,6 +312,8 @@ def import_volume(
             units=units,
             bc_types=parse_bc_type_options(bc_type),
         )
+        if report is None:
+            raise RuntimeError("import_external_volume_mesh 在 validate=True 时没有返回质量报告")
 
         output_path = Path(output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +321,7 @@ def import_volume(
         with open(output_path, 'wb') as f:
             pickle.dump(volume_mesh, f)
 
-        result = {
+        result: Dict[str, Any] = {
             "command": "grid.import-volume",
             "status": "success",
             "node_count": volume_mesh.node_count,

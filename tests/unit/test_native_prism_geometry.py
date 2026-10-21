@@ -196,7 +196,7 @@ class TestNativePrismGeometry:
         这就是"自由流保持性"的结构性依据。
         """
         _mesh, geom = self._geometry(2, monkeypatch)
-        det = np.abs(geom["jacobians"]["det_jacs"])
+        det = np.abs(geom.jacobians["det_jacs"])
         assert det.min() > 0.0
         spread = det.max() / det.min()
         assert spread < 1.0 + 1e-12, f"度量不恒定，极值比 {spread:.6f}"
@@ -218,8 +218,8 @@ class TestNativePrismGeometry:
         n_sps = mesh.n_sps_per_cell
         n_prism = mesh.n_prism_cells
         assert n_sps == native_prism_n_sps(2)
-        det = geom["jacobians"]["det_jacs"].reshape(-1, n_sps)[:n_prism]
-        coords = geom["sps_coords"][:n_prism]
+        det = geom.jacobians["det_jacs"].reshape(-1, n_sps)[:n_prism]
+        coords = geom.sps_coords[:n_prism]
         assert all(len(np.unique(c.round(14), axis=0)) == n_sps for c in coords)
         assert np.all(np.isfinite(det)) and np.all(np.abs(det) > 0.0)
 

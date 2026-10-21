@@ -28,6 +28,7 @@
 约 20~30 色 x 5 次）用；P>=1 的耦合块由解析装配给出（`fr_residual/jacobian`）。
 """
 
+from typing import Any, Optional
 import numpy as np
 
 from ..reductions import LocalReductions
@@ -51,7 +52,7 @@ class CellBlockJacobian:
 
     def __init__(self, residual, u0_flat, r0_flat, scales: np.ndarray, *, n_sps: int,
                  cell_is_prism: np.ndarray, n_real_prism: int, n_real_tet: int,
-                 colors: np.ndarray, red: LocalReductions = None, coupling_graph=None):
+                 colors: np.ndarray, red: Optional[LocalReductions] = None, coupling_graph=None):
         """`coupling_graph`（`coloring.CouplingGraph`）给出时按它的**距离 2 着色**
         扰动，同一批残差差分同时截取面邻居耦合块 `J_cy`（`self.coupling`，块 ILU 用）：
         同色单元互不相邻、也不共享面邻居，未被扰动的单元 `c` 至多有一个被扰动的
@@ -119,7 +120,11 @@ class CellBlockJacobian:
                     if cross is not None:
                         cross.store(dr, s, col)
         self.n_residual_evals = n_eval
-        self.coupling, self.cross_coupling = (None, None) if cross is None else cross.result()
+        # rank 内 / 跨 rank 耦合块（`CouplingBlocks`，只在要求耦合时给出）
+        self.coupling: Any = None
+        self.cross_coupling: Any = None
+        if cross is not None:
+            self.coupling, self.cross_coupling = cross.result()
 
     @classmethod
     def from_blocks(cls, blocks_prism, blocks_tet, *, n_sps: int, n_var: int, cell_is_prism,

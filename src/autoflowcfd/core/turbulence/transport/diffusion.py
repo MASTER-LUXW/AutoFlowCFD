@@ -8,6 +8,7 @@
 "符号约定"一节记录的那次修复。
 """
 
+from typing import Optional
 import numpy as np
 
 
@@ -120,13 +121,13 @@ def compute_scalar_diffusion_residual(
     gamma_field: np.ndarray,
     mesh,
     ops,
-    wall_dirichlet_zero_face: np.ndarray = None,
-    wall_dirichlet_value_face: np.ndarray = None,
-    has_wall_dirichlet_value: np.ndarray = None,
+    wall_dirichlet_zero_face: Optional[np.ndarray] = None,
+    wall_dirichlet_value_face: Optional[np.ndarray] = None,
+    has_wall_dirichlet_value: Optional[np.ndarray] = None,
     flat_face_override=None,
     *,
     gamma_band: float,
-    grad_phi: np.ndarray = None,
+    grad_phi: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """标量扩散 FR 残差 `+div(Gamma*grad(phi))/det(J)`（体积项 + IIPG 内罚界面项），
     返回 `d(rho*phi)/dt` 的扩散部分（调用方再除以 rho）。

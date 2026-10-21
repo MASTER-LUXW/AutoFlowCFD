@@ -98,6 +98,12 @@ def compute_distributed_wall_distance(dist_fc, global_mesh, source) -> np.ndarra
     return source.query(np.asarray(sps)[dist_fc.compact_global_ids])
 
 
+def _ramp_owner_property(name: str) -> property:
+    """读写都转发到 `self._ramp_owner` 同名属性的类属性（`DistributedTurbulenceSolverAdapter` 的渐变计数器）。"""
+    return property(lambda self: getattr(self._ramp_owner, name),
+                    lambda self, value: setattr(self._ramp_owner, name, value))
+
+
 class DistributedTurbulenceSolverAdapter:
     """满足 `compute_turbulence_source`/`compute_turbulence_transport_
     residual` 鸭子类型接口的最小适配器（compact 索引空间）。
@@ -153,14 +159,9 @@ class DistributedTurbulenceSolverAdapter:
     # 2026-10-05 以前适配器持有计数器的副本：计数靠返回值写回，完成标记却留在每步重建的适配器上，
     # 于是 CPU MPI 显式路径上 `_turb_production_ramp_complete` 永远是 False（Order Continuation 的
     # 渐变完成基准重置从不触发、PhaseGate 的湍流判据读不到完成）。
-    def _ramp_attr(name):
-        return property(lambda self: getattr(self._ramp_owner, name),
-                        lambda self, value: setattr(self._ramp_owner, name, value))
-
-    _turb_ramp_step = _ramp_attr("_turb_ramp_step")
-    _turb_production_ramp_steps = _ramp_attr("_turb_production_ramp_steps")
-    _turb_production_ramp_complete = _ramp_attr("_turb_production_ramp_complete")
-    del _ramp_attr
+    _turb_ramp_step = _ramp_owner_property("_turb_ramp_step")
+    _turb_production_ramp_steps = _ramp_owner_property("_turb_production_ramp_steps")
+    _turb_production_ramp_complete = _ramp_owner_property("_turb_production_ramp_complete")
 
     def set_state(self, U_compact: np.ndarray):
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive

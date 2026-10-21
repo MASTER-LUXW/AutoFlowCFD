@@ -3,15 +3,17 @@
 `AdaptiveCFLController` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `AdaptiveCFLController` 的 `__init__` 建立，
-这里通过 `self` 访问。
+这里通过 `self` 访问（字段类型声明在 `state.py`）。
 """
 
 from __future__ import annotations
 import math
 from loguru import logger
 
+from .state import _CFLState
 
-class _CFLGatesMixin:
+
+class _CFLGatesMixin(_CFLState):
     """自适应 CFL 的闸门：放大/温和收缩的绝对基准闸门、增长上限、趋势放大"""
 
     def _growth_blocked(self, current_residual: float) -> bool:

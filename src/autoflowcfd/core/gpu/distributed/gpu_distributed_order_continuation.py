@@ -128,7 +128,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # --- 3. 湍流场对象（k_field/omega_field/nu_t 数组替换 + halo 交换器
     # 重建；模型本身——GPUTurbulenceSST/DDESModel/IDDESModel/WALEModel
     # 实例——不含任何阶数相关内部状态，不需要重新构造）---
-    if solver.turb_model_gpu is not None:
+    if new_fields_np is not None:                 # 有湍流模型时上面两条分支都已给出
         with cp.cuda.Device(solver.device_id):
             solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
             if new_nu_t_np is not None:

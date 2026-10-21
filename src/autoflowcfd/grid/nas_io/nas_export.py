@@ -14,6 +14,7 @@ nas_export_boundary.py，本文件只保留节点/体单元几何的写入与编
 
 import numpy as np
 from pathlib import Path
+from typing import Union
 from loguru import logger
 
 from .nas_export_boundary import write_boundaries as _write_boundaries
@@ -21,7 +22,7 @@ from .nas_export_boundary import write_boundaries as _write_boundaries
 
 def export_volume_mesh_to_nas(
     volume_mesh,
-    output_path: str,
+    output_path: Union[str, Path],
     include_boundaries: bool = True,
     scale_factor: float = 1000.0
 ) -> str:
@@ -49,7 +50,7 @@ def export_volume_mesh_to_nas(
     Example:
         >>> from autoflowcfd.grid import NASParser
         >>> parser = NASParser('surface.nas')
-        >>> volume_mesh = parser.parse(generate_volume_mesh=True)
+        >>> volume_mesh = parser.generate_volume_mesh_from_surface(parser.parse())
         >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')
     """
     output_path = Path(output_path)
@@ -92,7 +93,7 @@ def export_volume_mesh_to_nas(
             # PrismCells/face_extractor.extract_faces_mixed），所以
             # 下面的边界组单元索引直接与元素 ID 对齐，无需额外重映射。
             n_prism = 0
-            if has_prisms:
+            if has_prisms and prism_cells is not None:
                 logger.info("Writing pentahedral (BL prism) elements...")
                 n_prism = _write_pentahedra(f, prism_cells.connectivity, solid_pid)
 

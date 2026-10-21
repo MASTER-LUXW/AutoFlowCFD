@@ -176,11 +176,7 @@ class FRFaceConnectivity:
     center: np.ndarray
     face_node_ids: np.ndarray
     is_boundary: np.ndarray
-    face_translation: np.ndarray = None
-
-    def __post_init__(self):
-        if self.face_translation is None:
-            self.face_translation = np.zeros((self.n_faces, 3), dtype=np.float64)
+    face_translation: np.ndarray
 
     @property
     def n_faces(self) -> int:
@@ -237,7 +233,10 @@ def build_face_connectivity(
     n_faces = face_data.count
     owner_ids = face_data.connectivity[:, 0]
     neighbor_ids = face_data.connectivity[:, 1]
-    face_nodes = np.asarray(face_data.node_connectivity, dtype=np.int64)
+    face_node_ids = face_data.node_connectivity
+    if face_node_ids is None:
+        raise RuntimeError("extract_faces_mixed 没有给出面角点（node_connectivity）")
+    face_nodes = np.asarray(face_node_ids, dtype=np.int64)
     tables = _native_face_tables()
 
     def side_codes(cells: np.ndarray, side: str) -> np.ndarray:
@@ -279,6 +278,7 @@ def build_face_connectivity(
         normal=face_data.normal,
         area=face_data.area,
         center=face_data.center,
-        face_node_ids=face_data.node_connectivity,
+        face_node_ids=face_node_ids,
         is_boundary=is_boundary,
+        face_translation=np.zeros((n_faces, 3), dtype=np.float64),   # 周期配对之后才有非零平移
     )

@@ -4,7 +4,7 @@ import numpy as np
 
 from dataclasses import dataclass
 
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass
@@ -31,8 +31,8 @@ class FaceClassification:
     interior_indices: np.ndarray
     partition_boundary_indices: np.ndarray
     physical_boundary_indices: np.ndarray
-    halo_owner_mask: np.ndarray = None
-    halo_owner_indices: np.ndarray = None
+    halo_owner_mask: Optional[np.ndarray] = None
+    halo_owner_indices: Optional[np.ndarray] = None
 
 
 @dataclass

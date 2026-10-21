@@ -11,8 +11,11 @@ nodes_obj/mesh_changed_by_repair），因此作为
 """
 
 import numpy as np
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 from loguru import logger
+
+if TYPE_CHECKING:
+    from autoflowcfd.grid.structures import NodeArray
 
 
 def _repair_mixed_mesh_post_stage_c(
@@ -22,7 +25,7 @@ def _repair_mixed_mesh_post_stage_c(
     nodes_obj,
     mesh_changed_by_repair: bool,
     min_cell_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, object, bool]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, "NodeArray", bool]:
     """跨棱柱 + 四面体的非流形面修补、BL 棱柱长细比修补、collapsed-corner
     棱柱降级为四面体——见本模块文档字符串。逐字对应
     mesh_background.generate_hybrid_mesh 原来这一段代码，未改动任何数值

@@ -57,7 +57,7 @@ def gather_global_view(solver) -> Optional[GlobalSolverView]:
     local_cells = solver.partition.local_cells
     n_global = int(solver.partition.n_global_cells)
     U_dev = getattr(solver, "U_gpu", None)
-    U_local = np.asarray(U_dev.get() if hasattr(U_dev, "get") else solver.state.U)[:n_local]
+    U_local = np.asarray(U_dev.get() if U_dev is not None and hasattr(U_dev, "get") else solver.state.U)[:n_local]
     U_global = gather_global_state(np.ascontiguousarray(U_local[..., :5]), local_cells, n_global)
     mu_t_local = solver._local_dynamic_eddy_viscosity()
     mu_t_global = None

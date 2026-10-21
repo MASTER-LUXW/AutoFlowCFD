@@ -149,7 +149,7 @@ def compute_face_diagnostics(
     validator: 'MeshQualityValidator',
     nodes: np.ndarray,
     cells: np.ndarray,
-    faces: 'FaceData' = None,
+    faces: 'Optional[FaceData]' = None,
     cell_centroids: Optional[np.ndarray] = None,
     cell_volumes: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:

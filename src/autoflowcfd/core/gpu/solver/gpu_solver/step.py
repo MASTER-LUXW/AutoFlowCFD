@@ -6,6 +6,8 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any
+
 from functools import partial
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
@@ -23,6 +25,28 @@ from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_
 
 class _GPUSolverStepMixin:
     """单机 GPU 的单步推进（求解循环与 CPU 共用 `SolveLoopMixin`）"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _apply_turbulence_corrections_gpu: Any
+    _cfl_controller: Any
+    _compute_local_time_step_gpu: Any
+    _turbulent_mu_t_gpu: Any
+    _update_primitives_gpu: Any
+    boundary_ghost_provider: Any
+    compute_artificial_diffusivity_field_gpu: Any
+    compute_turbulence_source_gpu: Any
+    current_order: Any
+    flat_face_gpu: Any
+    freestream: Any
+    iteration: Any
+    low_mach_precond_enabled: Any
+    mesh: Any
+    n_vars: Any
+    order: Any
+    time_integrator: Any
+    turb_model_gpu: Any
+    turb_model_name: Any
+    U_gpu: Any
 
     def step(self, dt: float = 0.0) -> float:
         """执行一个时间步。

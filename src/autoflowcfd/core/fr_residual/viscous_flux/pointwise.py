@@ -45,8 +45,7 @@ def viscous_physical_flux(
         G: (...,3,5)，G[...,i,:] 是方向 i 的粘性通量向量
            （质量分量恒为0；动量分量 G[...,i,1+j]=tau_ij；能量分量 tau.u - q，q=-k grad T）
     """
-    mu_total = mu + mu_t
-    mu_total = mu_total * np.ones(Q.shape[:-1]) if np.isscalar(mu_total) else mu_total
+    mu_total = np.broadcast_to(mu + mu_t, Q.shape[:-1])
 
     S = 0.5 * (grad_vel + np.swapaxes(grad_vel, -1, -2))  # (...,3,3)
     div_u = grad_vel[..., 0, 0] + grad_vel[..., 1, 1] + grad_vel[..., 2, 2]
@@ -57,7 +56,7 @@ def viscous_physical_flux(
 
     cp = GAMMA * R_AIR / (GAMMA - 1.0)
     k_cond = mu * cp / Pr + mu_t * cp / Pr_t
-    q = -k_cond * grad_T if np.isscalar(k_cond) else -k_cond[..., None] * grad_T  # (...,3)
+    q = -np.asarray(k_cond)[..., None] * grad_T  # (...,3)
 
     vel = Q[..., 1:4]  # (...,3)
     work = np.einsum("...i,...ij->...j", vel, tau)  # work[...,j] = sum_i u_i*tau_ij

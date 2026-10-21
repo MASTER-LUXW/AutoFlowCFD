@@ -43,6 +43,7 @@ V(1,1) 发散（ILU 的 Richardson 迭代谱半径大于 1），W 循环 145 次
 预处理随右端项变化，外层 GMRES 走灵活模式（`gmres.py`，`flexible = True`）。
 """
 
+from typing import Optional
 import numpy as np
 
 from ..blocks.block_ilu import BlockCouplingStructure, BlockILUPreconditioner, factor_block_ilu, solve_block_ilu
@@ -58,7 +59,7 @@ COARSEST_DOF = 8000
 K_CYCLE_INNER = 3
 
 
-def preconditioner_hierarchy(struct: BlockCouplingStructure, high_order: bool, coarsest_nodes: int = None):
+def preconditioner_hierarchy(struct: BlockCouplingStructure, high_order: bool, coarsest_nodes: Optional[int] = None):
     """块预处理的聚合层次（拓扑量，缓存在 `BlockJacobiCache` 里跨步复用）。
 
     P>=1（`high_order`）先做一层 p 粗化：每单元一个节点（单元内全部真实解点上取同一值，
@@ -126,7 +127,10 @@ class MultilevelPreconditioner(PseudoTransientDiagonal):
 
     __slots__ = ("_fine", "_smoother", "_levels", "_hierarchy", "_lu", "_n_var", "_xp")
 
-    flexible = True             # K 循环的粗层内层 Krylov 让作用随右端项变化
+    @property
+    def flexible(self) -> bool:
+        """K 循环的粗层内层 Krylov 让作用随右端项变化。"""
+        return True
 
     def __init__(self, diag, off, struct: BlockCouplingStructure, hierarchy, dtau_flat, n_sps: int):
         """`diag/off`：细层对角块（`block_ilu.flatten_cell_blocks`）；`hierarchy`：

@@ -65,11 +65,14 @@ def _cli_value(param: click.Parameter, field: str, value: Any) -> Any:
         from autoflowcfd.core.time_integration.base import scheme_from_name
 
         scheme = scheme_from_name(value)
-        for choice in param.type.choices:
+        if not isinstance(param.type, click.Choice):
+            raise TypeError(f"--{param.name} 应为 click.Choice 参数，实际是 {type(param.type).__name__}")
+        choices = [str(c) for c in param.type.choices]
+        for choice in choices:
             if scheme_from_name(choice) == scheme:
                 return choice
         raise click.BadParameter(
-            f"配置文件的 time_scheme={scheme.value} 不是本命令支持的时间格式（{', '.join(param.type.choices)}）",
+            f"配置文件的 time_scheme={scheme.value} 不是本命令支持的时间格式（{', '.join(choices)}）",
             param_hint="--config")
     return value
 

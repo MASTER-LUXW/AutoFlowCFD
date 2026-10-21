@@ -1,8 +1,10 @@
 """AutoFlowCFD V2.0 - 分布式扁平面几何的数据类与紧凑 src1 展开"""
 
+from typing import Any, Optional
+
 import numpy as np
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry
@@ -74,14 +76,16 @@ class DistributedFlatFaceGeometry:
     interior_mask: np.ndarray
     partition_boundary_mask: np.ndarray
     physical_boundary_mask: np.ndarray
-    compact_cell_type: np.ndarray = None
+    compact_cell_type: np.ndarray
+    perm: np.ndarray
+    inv_perm: np.ndarray
+    compact_global_ids: np.ndarray
     # P0 网格上构造时附带：本 rank 面表上的 P0 法向 / 面积（全局 P0 面几何按 local_faces 切出，
     # `fr_residual/inviscid_p0.py::p0_face_arrays`）；其余阶数为 None
-    p0_unit_normals: np.ndarray = None
-    p0_area_weights: np.ndarray = None
-    perm: np.ndarray = None
-    inv_perm: np.ndarray = None
-    compact_global_ids: np.ndarray = None
+    p0_unit_normals: Optional[np.ndarray] = None
+    p0_area_weights: Optional[np.ndarray] = None
+    # `distributed_compute.distributed_mesh_adapter` 的缓存（键, DistributedMeshAdapter）；不参与比较与打印
+    _mesh_adapter_cache: Any = field(default=None, repr=False, compare=False)
 
     @property
     def n_faces(self) -> int:
@@ -119,14 +123,6 @@ class DistributedFlatFaceGeometry:
     @property
     def true_area_weight(self) -> np.ndarray:
         return self.base_flat.true_area_weight
-
-    @property
-    def face_area(self) -> np.ndarray:
-        return self.base_flat.face_area
-
-    @property
-    def cell_volume(self) -> np.ndarray:
-        return self.base_flat.cell_volume
 
     @property
     def is_boundary(self) -> np.ndarray:

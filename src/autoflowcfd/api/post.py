@@ -7,13 +7,17 @@
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from loguru import logger
 
 
 class _APIPostMixin:
     """后处理：气动系数、VTK 导出、收敛历史（都作用于 `self.solver` 的当前状态；`SolverResult` 不携带解场，
     2026-10-19 以前各方法保留的未使用 `result` 形参已删除）"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    solver: Any
+    volume_mesh: Any
 
     def calculate_coefficients(
         self,

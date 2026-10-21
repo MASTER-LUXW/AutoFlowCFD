@@ -5,6 +5,8 @@
 共用本混入类。
 """
 
+from typing import Any
+
 import numpy as np
 
 from autoflowcfd.core.turbulence.transported import TransportedTurbulence
@@ -16,6 +18,9 @@ from .log_omega import admissible_omega, log_omega, omega_from_log
 
 class _SSTTransportedMixin(TransportedTurbulence):
     """SST 的 `TransportedTurbulence` 实现。"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    omega_inf: Any
 
     TRANSPORTED_FIELDS = ("k_field", "omega_field")
     NEWTON_LOG_COLUMNS = (1,)

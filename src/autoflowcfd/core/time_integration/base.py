@@ -19,7 +19,7 @@ import math
 import numpy as np
 from loguru import logger
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional, Tuple
 
 from autoflowcfd.core.time_integration.positivity import assert_admissible
 
@@ -163,23 +163,26 @@ def require_distributed_scheme(name):
     return scheme
 
 
-# SSP-RK Shu-Osher 系数：各阶段形如
-#   u^(i) = sum_k alpha[i,k] u^(k) + beta[i] dt L(u^(i-1))
-# 其中 L(u) = -R(u)。这里按格式分别存储各自的阶段系数表。
-_SSP_RK2 = {
-    "stages": 2,
-    # u1 = u0 + dt L0 ;  u2 = 1/2 u0 + 1/2 (u1 + dt L1)
-    "alpha": [[1.0], [0.5, 0.5]],
-    "beta": [1.0, 0.5],
-}
-_SSP_RK3 = {
-    "stages": 3,
-    "alpha": [[1.0],
-              [0.75, 0.25],
-              [1.0/3.0, 0.0, 2.0/3.0]],
-    "beta": [1.0, 0.25, 2.0/3.0],
-}
-_EULER = {"stages": 1, "alpha": [[1.0]], "beta": [1.0]}
+class _ShuOsherTable(NamedTuple):
+    """SSP-RK Shu-Osher 系数：各阶段形如
+
+        u^(i) = sum_k alpha[i][k] u^(k) + beta[i] dt L(u^(i-1))
+
+    其中 L(u) = -R(u)。
+    """
+    stages: int
+    alpha: Tuple[Tuple[float, ...], ...]
+    beta: Tuple[float, ...]
+
+
+# u1 = u0 + dt L0 ;  u2 = 1/2 u0 + 1/2 (u1 + dt L1)
+_SSP_RK2 = _ShuOsherTable(stages=2, alpha=((1.0,), (0.5, 0.5)), beta=(1.0, 0.5))
+_SSP_RK3 = _ShuOsherTable(stages=3,
+                          alpha=((1.0,),
+                                 (0.75, 0.25),
+                                 (1.0/3.0, 0.0, 2.0/3.0)),
+                          beta=(1.0, 0.25, 2.0/3.0))
+_EULER = _ShuOsherTable(stages=1, alpha=((1.0,),), beta=(1.0,))
 
 _SCHEME_TABLE = {
     TimeIntegrationScheme.FORWARD_EULER: _EULER,
@@ -258,7 +261,8 @@ class TimeIntegrator:
         # 物理时间（秒）：时间精确推进（dual-time、瞬态 rk3）每个物理步由 `time_accurate.advance` 累加 dt，
         # 随 checkpoint 持久化（`core/utils/checkpoint_time.py`）；伪时间（稳态）推进不动它
         self.current_time = 0.0
-        self._table = _SCHEME_TABLE.get(self.scheme, _EULER)
+        # 显式格式的系数表；隐式格式（NEWTON_KRYLOV / DUAL_TIME）没有，为 None
+        self._table: Optional[_ShuOsherTable] = _SCHEME_TABLE.get(self.scheme)
 
     # ------------------------------------------------------------------
     def step(
@@ -319,23 +323,15 @@ class TimeIntegrator:
         residual_func: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
         residual0: Optional[np.ndarray] = None,
-        table: Optional[dict] = None,
         positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
-        """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步。
-
-        Args:
-            table: 显式指定要用的 Shu-Osher 系数表；None 时用 self._table（即 self.scheme 对应的表）。
-                （即 self.scheme 对应的表）。step_dual_time 调用时必须显式
-                传入 _SSP_RK3——self.scheme 此时是 DUAL_TIME 本身，
-                self._table 会回退成 1-stage 的 _EULER 表（_SCHEME_TABLE
-                里没有 DUAL_TIME 这个键），伪时间迭代想用的是 RK3，不是
-                self.scheme 这个外层枚举。
-        """
-        tbl = table if table is not None else self._table
-        alpha = tbl["alpha"]
-        beta = tbl["beta"]
-        n_stages = tbl["stages"]
+        """前向 Euler / SSP-RK2 / SSP-RK3 的 Shu-Osher stage 推进本体（系数表按 `self.scheme` 取），不含计步。"""
+        tbl = self._table
+        if tbl is None:
+            raise ValueError(f"{self.scheme.value} 不是显式格式，没有 Shu-Osher 系数表")
+        alpha = tbl.alpha
+        beta = tbl.beta
+        n_stages = tbl.stages
         dt = dt_local[:, None]
 
         # Stage 0: 初始状态

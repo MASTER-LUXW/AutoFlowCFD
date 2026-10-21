@@ -46,11 +46,13 @@ def compute_native_tet_jacobians(
     """
     from autoflowcfd.fr.native_tet.basis import compute_native_tet_jacobian
 
-    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
-    if n_tets == 0:
+    tet_conn = mesh._fixed_tet_conn
+    if tet_conn is None or len(tet_conn) == 0:
         return None
+    n_tets = len(tet_conn)
+    node_coords = mesh.loaded_node_coords()
 
-    nodes = mesh._node_coords[mesh._fixed_tet_conn]                       # (n_tets,4,3)
+    nodes = node_coords[tet_conn]                                          # (n_tets,4,3)
     J_all = 0.5 * np.stack([nodes[:, 1] - nodes[:, 0], nodes[:, 2] - nodes[:, 0],
                             nodes[:, 3] - nodes[:, 0]], axis=2)            # 列 = dphys/d(r,s,t)
     _require_positive_det(np.linalg.det(J_all)[:, None], mesh.n_prism_cells, "四面体")
@@ -60,13 +62,13 @@ def compute_native_tet_jacobians(
     all_scaled_quality = np.empty(n_tets * n_sps_per_cell) if want_scaled_quality else None
 
     for i in range(n_tets):
-        cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
+        cell_nodes = node_coords[tet_conn[i]]
         det_j, adj_j = compute_native_tet_jacobian(cell_nodes)
         inv_j = adj_j / det_j
         lo, hi = i * n_sps_per_cell, (i + 1) * n_sps_per_cell
         all_dets[lo:hi] = det_j
         all_inv_jacs[lo:hi] = inv_j
-        if want_scaled_quality:
+        if all_scaled_quality is not None:
             p0, p1, p2, p3 = cell_nodes
             J = 0.5 * np.column_stack([p1 - p0, p2 - p0, p3 - p0])
             col_norms = np.linalg.norm(J, axis=0)
@@ -74,7 +76,7 @@ def compute_native_tet_jacobians(
             all_scaled_quality[lo:hi] = quality
 
     result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
-    if want_scaled_quality:
+    if all_scaled_quality is not None:
         result["scaled_quality"] = all_scaled_quality
     return result
 
@@ -160,12 +162,12 @@ def select_fine_metrics(fine: Dict[str, np.ndarray], cell_ids: np.ndarray,
 
 def _combine_prism_and_tet_jacobians(
     prism_part: Optional[Dict[str, np.ndarray]], tet_part: Optional[Dict[str, np.ndarray]]
-) -> Optional[Dict[str, np.ndarray]]:
-    """把只算了棱柱部分（native 四面体分支专用，见 `build_order_geometry`）
-    的 jacobians 与单独算好的 native 四面体部分按 prism-在前/tet-在后
-    的既有顺序拼接，下游（`mesh.jacobians["det_jacs"].reshape
-    (n_cells, n_sps)` 等）不需要关心这里是分两段算的。"""
+) -> Dict[str, np.ndarray]:
+    """棱柱段与四面体段的 jacobians 按棱柱在前、四面体在后拼接（下游按 `(n_cells, n_sps)` reshape
+    `mesh.jacobians["det_jacs"]` 等，不关心这里是分两段算的）。某一段没有单元时为 None。"""
     if prism_part is None:
+        if tet_part is None:
+            raise ValueError("网格既没有棱柱也没有四面体单元，无法构造 Jacobian")
         return tet_part
     if tet_part is None:
         return prism_part
@@ -199,16 +201,18 @@ def compute_native_prism_jacobians(
             `sps_coords` 生成过同一批节点（不重算），而体积项去混叠的
             FINE 几何要的是 `over_order` 的节点集——两者只差参考点集，
             度量公式完全相同，没有理由写两个函数。
-        n_sps_per_cell: 该段的布局宽度（coarse 是 `(order+1)^3`，fine 是
-            `overintegration_order.prism_n_fine(over_order)`，原生档下后者
-            恰好等于 `ref_native.shape[0]`、不产生填充槽位）。
+        n_sps_per_cell: 该段的布局宽度（coarse 是解点存储宽度 `fr/native_padding.py::sps_width(order)`，fine 是
+            `overintegration_order.prism_n_fine(over_order)`；两者都等于 `ref_native.shape[0]`，不产生填充槽位，
+            填充分支只为与四面体共用布局约定而保留）。
     """
     from autoflowcfd.core.fr_operators.metric_diagnostics import compute_scaled_jacobian_quality
     from autoflowcfd.fr.native_prism.basis import native_prism_exact_jacobian
 
     n_prisms = mesh.n_prism_cells
-    if mesh._fixed_prism_conn is None or n_prisms == 0:
+    prism_conn = mesh._fixed_prism_conn
+    if prism_conn is None or n_prisms == 0:
         return None
+    node_coords = mesh.loaded_node_coords()
 
     ref_native = np.asarray(ref_native, dtype=np.float64)
     n_native = ref_native.shape[0]
@@ -225,7 +229,7 @@ def compute_native_prism_jacobians(
 
     real_dets = np.empty((n_prisms, n_native))
     for i in range(n_prisms):
-        cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
+        cell_nodes = node_coords[prism_conn[i]]
         jac = native_prism_exact_jacobian(ref_native, cell_nodes)   # (n_native,3,3)
         det = np.linalg.det(jac)
         real_dets[i] = det
@@ -238,13 +242,13 @@ def compute_native_prism_jacobians(
         # 填充槽位：复制真实 SP #0
         all_dets[lo + n_native:lo + n_sps_per_cell] = det[0]
         all_inv_jacs[lo + n_native:lo + n_sps_per_cell] = inv[0]
-        if want_scaled_quality:
+        if all_scaled_quality is not None:
             q = compute_scaled_jacobian_quality(jac, det)
             all_scaled_quality[lo:lo + n_native] = q
             all_scaled_quality[lo + n_native:lo + n_sps_per_cell] = q[0]
     _require_positive_det(real_dets, 0, "棱柱")
 
     result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
-    if want_scaled_quality:
+    if all_scaled_quality is not None:
         result["scaled_quality"] = all_scaled_quality
     return result

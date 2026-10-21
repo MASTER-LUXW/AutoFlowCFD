@@ -13,6 +13,8 @@
     $ autoflowcfd utils benchmark --grid model.nas --backend cpu
 """
 
+from typing import Any, Dict
+
 import click
 
 from autoflowcfd.cli.solve.steady.command import _TIME_SCHEME_CHOICES, _TURBULENCE_CHOICES
@@ -165,7 +167,7 @@ def doctor(json_output: bool) -> None:
     try:
         issues = []
         warnings = []
-        info = {}
+        info: Dict[str, Any] = {}
 
         info['python_version'] = ".".join(str(v) for v in sys.version_info[:3])
         # 依赖按 pyproject 的声明逐项核对（2026-10-20 以前清单写死：scipy、tetgen、pyvista 没查，numba、h5py 被列为

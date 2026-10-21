@@ -13,6 +13,7 @@
 """
 
 from dataclasses import dataclass
+from typing import Tuple
 
 import numpy as np
 
@@ -31,8 +32,9 @@ class BasisInverses:
     np_mode_k: np.ndarray
 
 
-def _mode_columns(modes):
-    return tuple(np.array([m[c] for m in modes], dtype=np.int32) for c in range(3))
+def _mode_columns(modes) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    i, j, k = (np.array([m[c] for m in modes], dtype=np.int32) for c in range(3))
+    return i, j, k
 
 
 def build_basis_inverses(order: int) -> BasisInverses:

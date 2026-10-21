@@ -16,12 +16,13 @@
 步起点准备好传入（`TurbulenceLinearization`），与残差同一份。
 """
 
+from typing import Any, Optional
 from dataclasses import dataclass
 
 import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
-from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
+from autoflowcfd.core.turbulence.transport.faces import ScalarConvectionGeometry, boundary_diffusion_targets
 
 from .pointwise import cpu_turbulence_pointwise, turbulence_pointwise_partials
 from .scalar_blocks import assemble_scalar_blocks, convection_ghost_affine
@@ -36,22 +37,22 @@ class TurbulenceLinearization:
     是解点上的强 Dirichlet 行（`(n_cells, n_sps, nv)` 布尔，残差在那里恒为零，块的对应行
     置零；SA-neg 的壁面解点，见 `sa/model.py` 模块文档），None 表示没有。
     """
-    mesh: object
-    ops: object
-    flat: object
-    turb: object
+    mesh: Any                     # HighOrderMesh 或分布式网格适配器（鸭子类型）
+    ops: Any                      # FROperators
+    flat: Any                     # FlatFaceGeometry 或 DistributedFlatFaceGeometry
+    turb: Any                     # 湍流模型对象
     Q: np.ndarray                 # (n_cells, n_sps, 5) 原始变量
     grad_vel: np.ndarray          # (n_cells, n_sps, 3, 3)
     d_wall: np.ndarray            # (n_cells, n_sps)
     mu: float
-    conv_geom: object             # transport/faces.py::ScalarConvectionGeometry
+    conv_geom: ScalarConvectionGeometry
     dirichlet_faces: tuple        # 逐未知量 (n_faces,) 壁面 Dirichlet 面掩码
     dirichlet_values: tuple       # 逐未知量 (n_faces, n_fp) 目标值或 None（目标 0）
     open_face: np.ndarray         # (n_faces,) 开放边界（来流条件）
-    pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise（SST）
-    strong_rows: np.ndarray = None  # (n_cells, n_sps, nv) 强 Dirichlet 行
-    des: object = None            # SST 的 DES 长度尺度求值器（与残差同一个）；None 为 RANS
-    wall_target_k_slope: np.ndarray = None  # (n_faces,) 第 1 个未知量的壁面目标值对 owner 单元第 0 个未知量
+    pointwise: Any = None         # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise（SST）
+    strong_rows: Optional[np.ndarray] = None  # (n_cells, n_sps, nv) 强 Dirichlet 行
+    des: Any = None               # SST 的 DES 长度尺度求值器（与残差同一个）；None 为 RANS
+    wall_target_k_slope: Optional[np.ndarray] = None  # (n_faces,) 第 1 个未知量的壁面目标值对 owner 单元第 0 个未知量
     #                                         真实自由度均值的导数（SST auto 档 d ln omega_w / d k），None 表示没有
 
 

@@ -18,6 +18,13 @@ from .. import turbulence as fr_solver_turbulence
 class _SolverResidualMixin:
     """残差组装、湍流模型与边界幽灵态的委托入口。"""
 
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    artificial_viscosity_alpha: Any
+    mesh: Any
+    ops: Any
+    order: Any
+    state: Any
+
     def _init_turbulence_models(self, n_cells: int, n_sps: int):
         """初始化湍流模型（委托给 fr_solver_turbulence）。"""
         fr_solver_turbulence.init_turbulence_models(self, n_cells, n_sps)

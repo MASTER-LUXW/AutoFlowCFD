@@ -88,7 +88,8 @@ def select_rows(out, row_compact, n_prism_compact: int, want_coupling: bool):
         return blocks
     local = -np.ones(bp_c.shape[0] + bt_c.shape[0], dtype=np.int64)
     local[rc] = np.arange(rc.size)
-    inner, cross = [], []
+    inner: list = []
+    cross: list = []
     for g in out[2].groups:
         lr, lc = local[g.rows], local[g.cols]
         for dest, keep, cols in ((inner, (lr >= 0) & (lc >= 0), lc), (cross, (lr >= 0) & (lc < 0), g.cols)):

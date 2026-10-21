@@ -3,15 +3,17 @@
 `AdaptiveCFLController` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `AdaptiveCFLController` 的 `__init__` 建立，
-这里通过 `self` 访问。
+这里通过 `self` 访问（字段类型声明在 `state.py`）。
 """
 
 from __future__ import annotations
 import math
 from loguru import logger
 
+from .gates import _CFLGatesMixin
 
-class _CFLUpdateMixin:
+
+class _CFLUpdateMixin(_CFLGatesMixin):
     """自适应 CFL 的逐步更新（放大/收缩判据与步拒绝）"""
 
     def update(self, current_residual: float) -> float:
@@ -32,7 +34,7 @@ class _CFLUpdateMixin:
         Returns:
             cfl_number: 下一步使用的 CFL 值
         """
-        if getattr(self, "fixed_cfl", False):
+        if self.fixed_cfl:
             # 固定 CFL：仍然记录历史（诊断/日志要用），但不调节。
             self._step_count += 1
             self.cfl_number = self.cfl_start

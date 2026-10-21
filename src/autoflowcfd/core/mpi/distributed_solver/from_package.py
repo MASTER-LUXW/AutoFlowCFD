@@ -6,7 +6,7 @@
 这里通过 `self` 访问。
 """
 
-from typing import Optional
+from typing import Any, Optional
 from autoflowcfd.core.mpi import get_rank
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
@@ -19,6 +19,45 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 class _DistributedFromPackageMixin:
     """从完全分布式 package 构造，以及本 rank 的局部求解器视图"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _block_jacobi_colors_local: Any
+    _coupling_colors_local: Any
+    _is_fully_distributed: Any
+    _package_freestream: Any
+    _prev_mu_t_local: Any
+    _root_context: Any
+    _sem_num_eddies: Any
+    _turb_model_upper: Any
+    _turbulence_intensity: Any
+    _viscosity_ratio: Any
+    artificial_viscosity_alpha: Any
+    artificial_viscosity_enabled: Any
+    convergence_history: Any
+    current_order: Any
+    ddes_model: Any
+    dist_flat_face: Any
+    freestream: Any
+    halo_exchange: Any
+    iddes_h_max_compact: Any
+    iddes_h_wn_compact: Any
+    mesh: Any
+    mu_molecular: Any
+    n_ranks: Any
+    ops: Any
+    order: Any
+    order_continuation_enabled: Any
+    partition: Any
+    rank: Any
+    sgs_model: Any
+    solver_kwargs: Any
+    state: Any
+    time_integrator: Any
+    turb_model: Any
+    turb_model_name: Any
+    wall_distance_compact: Any
+    wall_model: Any
+    wall_treatment: Any
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,

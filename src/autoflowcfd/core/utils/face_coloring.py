@@ -38,14 +38,14 @@ prange + 写入共享 buffer，无需 per-thread buffer。内存从 O(n_threads 
 """
 
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 def build_cell_face_ownership(
     owner_cell: np.ndarray,
     n_cells: int,
-    neighbor_cell: np.ndarray = None,
-    is_boundary: np.ndarray = None,
+    neighbor_cell: Optional[np.ndarray] = None,
+    is_boundary: Optional[np.ndarray] = None,
 ) -> Dict[int, List[int]]:
     """构建 cell → 触及该 cell（会向其 scatter-add 写入）的面索引列表。
 
@@ -84,8 +84,8 @@ def build_cell_face_ownership(
 def build_face_conflict_graph(
     owner_cell: np.ndarray,
     n_cells: int,
-    neighbor_cell: np.ndarray = None,
-    is_boundary: np.ndarray = None,
+    neighbor_cell: Optional[np.ndarray] = None,
+    is_boundary: Optional[np.ndarray] = None,
 ) -> List[List[int]]:
     """构建面冲突邻接表。
 
@@ -108,7 +108,7 @@ def build_face_conflict_graph(
     n_faces = len(owner_cell)
     cell_to_faces = build_cell_face_ownership(owner_cell, n_cells, neighbor_cell, is_boundary)
 
-    adj = [[] for _ in range(n_faces)]
+    adj: List[List[int]] = [[] for _ in range(n_faces)]
     for cell_id, face_list in cell_to_faces.items():
         n_f = len(face_list)
         if n_f <= 1:
@@ -124,8 +124,8 @@ def build_face_conflict_graph(
 def greedy_face_coloring(
     owner_cell: np.ndarray,
     n_cells: int,
-    neighbor_cell: np.ndarray = None,
-    is_boundary: np.ndarray = None,
+    neighbor_cell: Optional[np.ndarray] = None,
+    is_boundary: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """贪心面图着色。
 

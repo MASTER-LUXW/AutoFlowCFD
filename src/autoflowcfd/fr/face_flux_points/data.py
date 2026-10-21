@@ -5,7 +5,7 @@ AutoFlowCFD - FP 几何组装辅助类和函数
 棱柱四边形面对角线分类、multi-source 解析等辅助函数。
 """
 
-from typing import Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -80,27 +80,50 @@ class _KernelFaceData:
     （`fr/triangle_apex.py`；四边形面与边界面 neighbor 侧为 0）。该侧通量点集与顺序、
     面外插/提升算子都按它取；由单元连接关系唯一决定，共享面两侧的点因此物理重合。
     """
-    __slots__ = (
-        'n_faces', 'n_fp', 'n_sps', 'n1d',
-        'owner_is_primary', 'neighbor_is_primary',
-        'true_normal', 'true_area_weight',
-        'owner_adj_row_exact', 'neighbor_adj_row_exact',
-        'nb_src0_cell', 'nb_src0_tpl', 'nb_src0_tid', 'nb_src1_idx',
-        'ow_src0_cell', 'ow_src0_tpl', 'ow_src0_tid', 'ow_src1_idx',
-        'nb_extra_cell', 'nb_extra_mat', 'ow_extra_cell', 'ow_extra_mat',
-        'mixed_nb_partner', 'mixed_nb_mask', 'mixed_ow_partner', 'mixed_ow_mask',
-        'mixed_bnd_face', 'p0_second_half_frac',
-        'owner_tri_slot', 'neighbor_tri_slot',
-        '_face_conn', '_sps_1d',
-        '_owner_groups', '_neighbor_groups',
-        '_p0_geometry', '_flat_geometry',
-    )
+    n_faces: int
+    n_fp: int
+    n_sps: int
+    n1d: int
+    owner_is_primary: np.ndarray
+    neighbor_is_primary: np.ndarray
+    true_normal: np.ndarray
+    true_area_weight: np.ndarray
+    owner_adj_row_exact: np.ndarray
+    neighbor_adj_row_exact: np.ndarray
+    nb_src0_cell: np.ndarray
+    nb_src0_tpl: np.ndarray
+    nb_src0_tid: np.ndarray
+    nb_src1_idx: np.ndarray
+    ow_src0_cell: np.ndarray
+    ow_src0_tpl: np.ndarray
+    ow_src0_tid: np.ndarray
+    ow_src1_idx: np.ndarray
+    nb_extra_cell: np.ndarray
+    nb_extra_mat: np.ndarray
+    ow_extra_cell: np.ndarray
+    ow_extra_mat: np.ndarray
+    mixed_nb_partner: np.ndarray
+    mixed_nb_mask: np.ndarray
+    mixed_ow_partner: np.ndarray
+    mixed_ow_mask: np.ndarray
+    mixed_bnd_face: np.ndarray
+    p0_second_half_frac: np.ndarray
+    owner_tri_slot: np.ndarray
+    neighbor_tri_slot: np.ndarray
+    _face_conn: Any                 # FRFaceConnectivity
+    _sps_1d: np.ndarray
+    _owner_groups: Dict[Tuple[int, int], List[int]]
+    _neighbor_groups: Dict[Tuple[int, int], List[int]]
+    _p0_geometry: Any               # P0 面几何缓存（core/fr_residual/inviscid_p0.py::p0_face_geometry）
+    _flat_geometry: Any             # 展平面几何缓存（core/fr_operators/face_kernels.py::get_flat_face_geometry）
+    # 槽位表即上面的字段注解（只有一个事实来源）
+    __slots__ = tuple(__annotations__)
 
     def __init__(self, **kw):
         for k, v in kw.items():
             object.__setattr__(self, k, v)
-        self._p0_geometry = None    # P0 面几何缓存（core/fr_residual/inviscid_p0.py::p0_face_geometry）
-        self._flat_geometry = None  # 展平面几何缓存（core/fr_operators/face_kernels.py::get_flat_face_geometry）
+        self._p0_geometry = None
+        self._flat_geometry = None
 
     def __len__(self):
         return self.n_faces

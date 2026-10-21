@@ -187,7 +187,7 @@ def distributed_mesh_adapter(partition: DistributedPartition, dist_fc: Distribut
     """
     key = (partition, local_mesh, ops, getattr(local_mesh, "order", None), getattr(local_mesh, "jacobians", None),
            getattr(local_mesh, "jacobians_fine", None), getattr(local_mesh, "cell_volumes", None))
-    cached = getattr(dist_fc, "_mesh_adapter_cache", None)
+    cached = dist_fc._mesh_adapter_cache
     if cached is not None and len(cached[0]) == len(key) and all(a is b for a, b in zip(cached[0], key)):
         return cached[1]
     adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)

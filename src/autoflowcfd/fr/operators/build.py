@@ -18,13 +18,43 @@ def generate_fr_operators(order: int) -> FROperators:
         operators: 包含所有预计算算子的 FROperators 对象
     """
     # 解点存储宽度（`fr/native_padding.py::sps_width`，原生棱柱真实自由度）：四面体的真实自由度零填充到这个
-    # 宽度（"零填充块对角"不变量）。定义在最前面是因为棱柱原生过积分算子（下一段）也要用它填充粗网格轴。
+    # 宽度（"零填充块对角"不变量）；过积分算子的粗网格轴也填充到这个宽度。
     from autoflowcfd.fr.native_padding import sps_width
 
     n_sps_global = sps_width(order)
 
-    # 6. 棱柱体积项去混叠算子（order==0 时 P0 走独立有限体积路径，不
-    # 需要）。四面体那份见下方 3e。
+    # 四面体原生单纯形基。
+    from ..native_tet.basis import (
+        build_native_tet_operators, build_native_tet_boundary_extrap, build_native_tet_lift,
+    )
+    from ..native_padding import (
+        pad_native_matrix_to_global,
+    )
+
+    ref_native_tet, D_native_tet = build_native_tet_operators(order)
+    n_native_sps_tet = ref_native_tet.shape[0]
+    # 面外插 / 提升按（面, 坍缩顶点槽位）全部构造（fr/triangle_apex.py），组装成按面算子
+    # 索引排好的整表（face_ops.py，见下方 face_extrap_by_op）
+    from ..triangle_apex import N_TRI_SLOTS
+    tet_extrap_slots = {(v, sl): build_native_tet_boundary_extrap(order, v, sl)
+                        for v in range(4) for sl in range(N_TRI_SLOTS)}
+    tet_lift_slots = {(v, sl): build_native_tet_lift(order, v, sl)
+                      for v in range(4) for sl in range(N_TRI_SLOTS)}
+    D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
+
+    # 棱柱原生基（唯一实现，见 fr/native_prism/__init__.py）。
+    #
+    # 原生 `D` 作用在**原生棱柱节点**上的场；`grid/high_order/high_order_mesh_order.py` 的 `build_order_geometry`
+    # 用同一组原生棱柱节点求解点坐标与雅可比。
+    from ..native_prism.basis import build_native_prism_operators
+    from ..native_prism.face import build_all_native_prism_face_operators
+
+    ref_native_prism, D_native_prism = build_native_prism_operators(order)
+    n_native_sps_prism = ref_native_prism.shape[0]
+    prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
+    D_native_prism_padded = pad_native_matrix_to_global(D_native_prism, n_sps_global, pad_axes=(0, 1))
+
+    # 体积项去混叠（过积分）算子：order==0 时全部为 None（P0 走独立有限体积路径，不需要）。
     #
     # 过积分阶数与细点数一律取自 `fr/overintegration_order.py`（与 `grid/high_order/high_order_mesh_order.py`
     # 的 `build_order_geometry` 同一个来源，算子形状与 `mesh.jacobians_fine` 才对得上）。
@@ -38,6 +68,7 @@ def generate_fr_operators(order: int) -> FROperators:
     overint_lifted_div_tet = overint_lifted_div_prism = None
     overint_project_f2c_tet = overint_project_f2c_prism = None
     if order >= 1:
+        # 棱柱
         overint_order_prism = overintegration_order(order)
         n_fine_prism = prism_n_fine(overint_order_prism)
         # 细网格轴取**真实**细点数（填充槽位恒为零、零贡献，而 `D_fine` 的收缩是 O(n_fine^2)）；粗网格轴填充到
@@ -45,7 +76,6 @@ def generate_fr_operators(order: int) -> FROperators:
         from ..native_prism.overintegration import (
             build_native_prism_l2_projection, build_native_prism_overintegration_operators,
         )
-        from ..native_padding import pad_native_matrix_to_global
 
         (_ref_fine_np, _c2f_np, overint_D_fine_prism,
          _f2c_np) = build_native_prism_overintegration_operators(
@@ -66,40 +96,9 @@ def generate_fr_operators(order: int) -> FROperators:
         overint_project_f2c_prism = pad_native_matrix_to_global(
             build_native_prism_l2_projection(order, overint_order_prism), n_sps_global, pad_axes=(0,))
 
-    # 3e. 四面体原生单纯形基。
-    from ..native_tet.basis import (
-        build_native_tet_operators, build_native_tet_boundary_extrap, build_native_tet_lift,
-    )
-    from ..native_padding import (
-        pad_native_matrix_to_global,
-    )
-
-    ref_native_tet, D_native_tet = build_native_tet_operators(order)
-    n_native_sps_tet = ref_native_tet.shape[0]
-    # 面外插 / 提升按（面, 坍缩顶点槽位）全部构造（fr/triangle_apex.py），组装成按面算子
-    # 索引排好的整表（face_ops.py，见下方 face_extrap_by_op）
-    from ..triangle_apex import N_TRI_SLOTS
-    tet_extrap_slots = {(v, sl): build_native_tet_boundary_extrap(order, v, sl)
-                        for v in range(4) for sl in range(N_TRI_SLOTS)}
-    tet_lift_slots = {(v, sl): build_native_tet_lift(order, v, sl)
-                      for v in range(4) for sl in range(N_TRI_SLOTS)}
-    D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
-    # 3f. 棱柱原生基（唯一实现，见 fr/native_prism/__init__.py）。
-    #
-    # 原生 `D` 作用在**原生棱柱节点**上的场；`grid/high_order/high_order_mesh_order.py` 的 `build_order_geometry`
-    # 用同一组原生棱柱节点求解点坐标与雅可比。
-    from ..native_prism.basis import build_native_prism_operators
-    from ..native_prism.face import build_all_native_prism_face_operators
-
-    ref_native_prism, D_native_prism = build_native_prism_operators(order)
-    n_native_sps_prism = ref_native_prism.shape[0]
-    prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
-    D_native_prism_padded = pad_native_matrix_to_global(D_native_prism, n_sps_global, pad_axes=(0, 1))
-
-    # 四面体过积分（去混叠）算子：细网格轴取真实细点数 `(oo+1)(oo+2)(oo+3)/6`；粗网格轴（interp 的列、
-    # restrict / project 的行）按"零填充块对角"填充到 `n_sps_global`（`pad_native_matrix_to_global` 一次只处理
-    # 同一个 native 长度的轴集合，所以两个轴分开处理）。
-    if order >= 1:
+        # 四面体：细网格轴取真实细点数 `(oo+1)(oo+2)(oo+3)/6`；粗网格轴（interp 的列、restrict / project 的行）
+        # 按"零填充块对角"填充到 `n_sps_global`（`pad_native_matrix_to_global` 一次只处理同一个 native 长度的
+        # 轴集合，所以两个轴分开处理）。
         from ..native_tet.overintegration import (
             build_native_tet_l2_projection,
             build_native_tet_overintegration_operators,

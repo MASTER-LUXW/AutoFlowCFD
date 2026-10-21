@@ -89,7 +89,7 @@ def write_cgns(mesh: ConvertibleMesh, path: str) -> None:
             _node(coords, f"Coordinate{axis}", "DataArray_t", "R8", np.ascontiguousarray(mesh.nodes[:, k],
                                                                                          dtype=np.float64))
 
-        taken = set()
+        taken: set = set()
         start = 1
         if mesh.is_volume:
             if len(mesh.prisms):
@@ -112,7 +112,7 @@ def write_cgns(mesh: ConvertibleMesh, path: str) -> None:
             # 指向它——Pointwise/ICEM 等前处理器的通用写法，下游读取器按族识别边界（VTK 的 CGNS 读取器只认
             # FamilySpecified/BCDirichlet/BCNeumann，其余 BC 类型直接跳过）
             zone_bc = _node(zone, "ZoneBC", "ZoneBC_t", "MT")
-            family_taken = set()
+            family_taken: set = set()
             for name, first, last in face_ranges:
                 family = _section_name(name, family_taken)
                 fam = _node(base, family, "Family_t", "MT")

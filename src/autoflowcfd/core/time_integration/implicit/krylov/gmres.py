@@ -71,7 +71,7 @@ GMRES(30) 恰好在加速之前丢掉子空间，198 次迭代、1068 s 才到�
 是 50 次。能收敛的求解不受影响：判据只在"按当前速率到不了"时触发。
 """
 
-from typing import Callable, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 
@@ -130,9 +130,9 @@ def projected_remaining(history, rtol: float) -> float:
 
 
 def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
-                restart: int, max_iter: int, red: LocalReductions = None,
-                flexible: bool = False, review_at: int = None,
-                split: "FlexibleSplit" = None) -> Tuple[object, int, int, float]:
+                restart: int, max_iter: int, red: Optional[LocalReductions] = None,
+                flexible: bool = False, review_at: Optional[int] = None,
+                split: "Optional[FlexibleSplit]" = None) -> Tuple[Any, int, int, float]:
     """解 `A x = b`，返回 `(x, iterations, info, rel_residual)`。
 
     `info == 0` 表示达到 `||b - A x|| <= rtol * ||b||`；`info > 0` 表示
@@ -168,8 +168,8 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     # （2026-09-29）：Windows 上 `empty` 立即计入提交量，plate_demo P3 一个向量 0.16 GB、
     # 重启 30 就是 4.8 GB，而块 Jacobi 下实际只迭代 13 次——未用到的一半多把第 2 个
     # Newton 步挤到 OOM。
-    V = []
-    Z = []          # 灵活模式下的 M^{-1} v_j（预处理作用本来就返回新数组，直接持有它）
+    V: list = []
+    Z: list = []    # 灵活模式下的 M^{-1} v_j（预处理作用本来就返回新数组，直接持有它）
     single = basis_itemsize(rtol) == 4 and b.dtype == xp.float64
     store = xp.float32 if single else b.dtype
 

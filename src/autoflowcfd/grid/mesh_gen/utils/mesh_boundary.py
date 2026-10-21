@@ -99,7 +99,7 @@ def _mixed_faces(nodes, prism_cells, tet_cells, strict):
     )
 
 
-def _classify_exterior_faces(nodes, faces, surface_nodes, surface_faces, surface_boundaries):
+def _classify_exterior_faces(nodes, faces, surface_nodes, surface_faces, surface_boundaries) -> dict:
     """生成网格（面数据 `faces`）的外部面逐个找所在的面网格三角形（几何包含）。
 
     Returns:
@@ -108,14 +108,14 @@ def _classify_exterior_faces(nodes, faces, surface_nodes, surface_faces, surface
         face_area、tri_area（面网格三角形面积）。
     """
     names: List[str] = list(surface_boundaries.groups.keys())
-    tri_idx, tri_group = [], []
+    tri_idx, group_parts = [], []
     for gi, name in enumerate(names):
         idx = np.asarray(surface_boundaries.groups[name])
         idx = idx[idx < len(surface_faces)]
         tri_idx.append(idx)
-        tri_group.append(np.full(len(idx), gi, dtype=np.int64))
+        group_parts.append(np.full(len(idx), gi, dtype=np.int64))
     tri_idx = np.concatenate(tri_idx)
-    tri_group = np.concatenate(tri_group)
+    tri_group = np.concatenate(group_parts)
     tri = surface_nodes[surface_faces[tri_idx]]
 
     bidx = faces.get_boundary_face_indices()
@@ -326,11 +326,11 @@ def match_points_to_surface_groups(
     if not tri_idx or sum(len(t) for t in tri_idx) == 0 or len(points) == 0:
         return names, group_index
     tri = surface_nodes[surface_faces[np.concatenate(tri_idx)]]
-    code = np.concatenate(code)
+    tri_code = np.concatenate(code)
 
     dist_tol = _ON_SURFACE_RELATIVE_TOLERANCE * float(np.ptp(surface_nodes, axis=0).max())
     host = _containing_triangle(points, tri, dist_tol)
-    group_index[host >= 0] = code[host[host >= 0]]
+    group_index[host >= 0] = tri_code[host[host >= 0]]
 
     rest = np.flatnonzero(host < 0)
     if len(rest):
@@ -338,7 +338,7 @@ def match_points_to_surface_groups(
         radius = np.linalg.norm(tri - centroids[:, None, :], axis=2).max(axis=1)
         dist, nearest = cKDTree(centroids).query(points[rest])
         matched = dist <= np.maximum(radius[nearest] * distance_tolerance_factor, 1e-12)
-        group_index[rest[matched]] = code[nearest[matched]]
+        group_index[rest[matched]] = tri_code[nearest[matched]]
     return names, group_index
 
 
@@ -391,6 +391,8 @@ def map_boundaries_by_geometry(
     if not surface_grid.boundaries.groups:
         raise ValueError("伴随面网格没有任何边界组，无法给外部体网格的外部面确定边界条件")
 
+    if faces.node_connectivity is None:
+        raise ValueError("体网格的面数据缺少面角点（node_connectivity），无法按几何匹配边界组")
     vol_nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
     face_corners = vol_nodes[faces.node_connectivity[boundary_face_idx]]
     owner = faces.connectivity[boundary_face_idx, 0].astype(np.int64)

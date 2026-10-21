@@ -53,7 +53,7 @@ def write_checkpoint(
     quiet: bool = False,
     surface_mesh: Optional[str] = None,
     target_order: Optional[int] = None,
-) -> Optional[str]:
+) -> str:
     """把求解器状态写成 HDF5 checkpoint，供 `solve resume` 真正恢复求解
     （V2.0 二次评审 Tier 1 #13/#14：此前 `solve steady/transient` 从不
     写 checkpoint，`solve resume` 因此永远无事可做，`post` 命令组也找
@@ -203,7 +203,7 @@ def write_checkpoint(
         metadata=metadata,
         extra_fields=extra_fields,
     )
-    if path and not quiet:
+    if not quiet:
         print(f"   - Checkpoint: {path}")
     return path
 

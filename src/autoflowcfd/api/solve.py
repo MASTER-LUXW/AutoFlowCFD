@@ -34,6 +34,9 @@ def _resolved_config(config_cls, config, fields: dict):
 class _APISolveMixin:
     """求解入口：稳态、瞬态、从 checkpoint 续算"""
 
+    # 最近一次求解用的体网格（`AutoFlowCFDAPI.__init__` 置 None）
+    volume_mesh: Optional[VolumeMeshData]
+
     def _solve_and_write(self, solver, run):
         """求解并按 `run.output_dir` / `checkpoint_interval` 落盘（中间 checkpoint + 收尾结果），与 CLI 同一组写出函数。
 

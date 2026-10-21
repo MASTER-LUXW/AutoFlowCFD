@@ -6,6 +6,8 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any, Optional
+
 import numpy as np
 from autoflowcfd.core.mpi.comm import allreduce_sum
 
@@ -13,9 +15,17 @@ from autoflowcfd.core.mpi.comm import allreduce_sum
 class _DistributedSupportMixin:
     """halo 交换、阶数切换、传感器门控滤波、负载均衡报告"""
 
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _is_fully_distributed: Any
+    halo_exchange: Any
+    n_ranks: Any
+    partition: Any
+    rank: Any
+    state: Any
+
     def save_checkpoint_distributed(self, output_dir: str, iteration: int, input_file: str, order: int,
-                                    turbulence_model: str, target_order: int = None,
-                                    surface_mesh: str = None):
+                                    turbulence_model: str, target_order: Optional[int] = None,
+                                    surface_mesh: Optional[str] = None):
         """分布式 checkpoint 保存（集体操作，全部 rank 调用）；与多 GPU 同名同签名，CLI 对两个分布式后端
         用同一个回调（`cli/solve/distributed_checkpoint_io.py::distributed_periodic_checkpoint_callback`）。"""
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_save_checkpoint

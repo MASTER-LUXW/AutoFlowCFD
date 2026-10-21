@@ -31,7 +31,7 @@
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -58,16 +58,16 @@ from .wall_stress import add_wall_stress_blocks
 @dataclass
 class MeanFlowLinearization:
     """平均流残差的离散参数（与残差调用同一组值）。"""
-    mesh: object
-    ops: object
-    ghost_provider: object
+    mesh: Any                                # HighOrderMesh 或分布式网格适配器（鸭子类型）
+    ops: Any                                 # FROperators
+    ghost_provider: Any                      # 边界幽灵态提供者
     mu: float
     mach_ref: float
     low_mach: bool
     mu_t: Optional[np.ndarray] = None        # (n_cells, n_sps) 冻结的动力涡粘
     nu_av: Optional[np.ndarray] = None       # (n_cells, n_sps) 冻结的问题单元人工扩散系数（运动粘度）
-    flat: object = None                      # None -> get_flat_face_geometry(mesh, ops)
-    wall_model: object = None                # 平衡壁面模型（`EquilibriumWallModel`），None 表示没有壁面模型剪应力
+    flat: Any = None                         # None -> get_flat_face_geometry(mesh, ops)
+    wall_model: Any = None                   # 平衡壁面模型（`EquilibriumWallModel`），None 表示没有壁面模型剪应力
     Pr: float = PRANDTL
     Pr_t: float = PRANDTL_TURBULENT
 

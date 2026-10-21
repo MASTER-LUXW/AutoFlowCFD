@@ -226,8 +226,9 @@ def cfl_triplet_errors(cfl_init: Optional[float], cfl_max: Optional[float],
     named = {"cfl_init": cfl_init, "cfl_max": cfl_max, "cfl_min": cfl_min}
     errors = [f"{k} 必须为正数（CFL），得到 {v}" for k, v in named.items() if v is not None and v <= 0]
     for lo, hi in (("cfl_min", "cfl_init"), ("cfl_init", "cfl_max"), ("cfl_min", "cfl_max")):
-        if named[lo] is not None and named[hi] is not None and named[lo] > named[hi]:
-            errors.append(f"{lo} ({named[lo]}) 不能超过 {hi} ({named[hi]})（CFL）")
+        v_lo, v_hi = named[lo], named[hi]
+        if v_lo is not None and v_hi is not None and v_lo > v_hi:
+            errors.append(f"{lo} ({v_lo}) 不能超过 {hi} ({v_hi})（CFL）")
     return errors
 
 
@@ -391,4 +392,8 @@ class TransientConfig(SolverConfig):
 def field_default(config_cls, name: str):
     """配置类字段的默认值（命令行选项默认值、Python API 续算参数默认值都读这里——默认值只在配置类里写一次）。"""
     f = next(f for f in dataclasses.fields(config_cls) if f.name == name)
-    return f.default if f.default is not dataclasses.MISSING else f.default_factory()
+    if f.default is not dataclasses.MISSING:
+        return f.default
+    if f.default_factory is not dataclasses.MISSING:
+        return f.default_factory()
+    raise ValueError(f"{config_cls.__name__}.{name} 没有默认值")

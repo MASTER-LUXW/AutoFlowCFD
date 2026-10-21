@@ -42,6 +42,8 @@ halo 交换是集体调用：Newton/GMRES/线搜索里一切决定"再求值一�
 经过全局归约，各 rank 的求值次数一致。
 """
 
+from typing import Any
+
 import numpy as np
 
 from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
@@ -188,7 +190,11 @@ class DistributedTurbulenceBackend:
         self.shape = self.model.transported_fields()[0].shape
         self.cell_is_prism = cell_is_prism
         self.order = int(order)
-        self._adapter = self._view = self._inputs = self._conv_geom = None
+        # 紧凑视图、冻结输入与标量对流几何，`prepare_inputs` 建立
+        self._adapter: Any = None
+        self._view: Any = None
+        self._inputs: Any = None
+        self._conv_geom: Any = None
         self.mu_t_compact = None
 
     def _to_local(self, a_compact: np.ndarray) -> np.ndarray:

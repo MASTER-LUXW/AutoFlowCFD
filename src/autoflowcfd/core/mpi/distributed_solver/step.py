@@ -6,6 +6,8 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any
+
 from functools import partial
 
 import numpy as np
@@ -16,6 +18,33 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 class _DistributedStepMixin:
     """CPU MPI 分布式的单步推进与局部时间步长"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _cfl_controller: Any
+    _distributed_positivity_limiter: Any
+    _newton_last_info: Any
+    _prev_mu_t_local: Any
+    artificial_viscosity_alpha: Any
+    artificial_viscosity_enabled: Any
+    ddes_model: Any
+    dist_flat_face: Any
+    fixed_cfl_number: Any
+    halo_exchange: Any
+    iddes_h_max_compact: Any
+    iddes_h_wn_compact: Any
+    local_solver: Any
+    low_mach_precond_enabled: Any
+    mesh: Any
+    ops: Any
+    order: Any
+    partition: Any
+    sgs_model: Any
+    state: Any
+    time_integrator: Any
+    turb_model: Any
+    turb_model_name: Any
+    wall_distance_compact: Any
+    wall_model: Any
 
     def _compute_distributed_local_time_step(self, U_local, mu_t_local=None,
                                              return_physical_too: bool = False):

@@ -19,7 +19,7 @@ AutoFlowCFD - FR 单元-面 Flux Points 几何预计算：核心数值原语 (V2
 400 行限制。
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -162,7 +162,7 @@ def build_cross_interp(
     target_face_code: int,
     source_phys: np.ndarray,
     char_length: float = 1.0,
-    translation: np.ndarray = None,
+    translation: Optional[np.ndarray] = None,
 ) -> tuple:
     """求 target_cell 的解在给定 source_phys 目标物理点集上的取值算子，
     形状 (n_source_pts, n_sps)（n_sps=sps_width(order)，与 coarse 网格全局体积

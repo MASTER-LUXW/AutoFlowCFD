@@ -56,6 +56,7 @@ def _corner_cell_face_conn():
         center=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
         face_node_ids=np.zeros((n_faces, 3), dtype=np.int32),
         is_boundary=np.array([True, True]),
+        face_translation=np.zeros((n_faces, 3)),
     )
 
 

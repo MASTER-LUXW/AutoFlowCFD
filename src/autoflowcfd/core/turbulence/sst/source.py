@@ -9,7 +9,7 @@ DES/DDES/IDDES：k 方程破坏项的长度尺度在**同一次**求值里、用
 的第一次求值还要退回 RANS 破坏项，分布式路径为它维护了跨步持久状态与 halo 交换。
 """
 
-from typing import Tuple
+from typing import Any, Tuple
 
 import numpy as np
 from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
@@ -22,6 +22,22 @@ from .bounds import model_evaluation_fields, omega_realizability_floor
 
 class _SSTSourceMixin:
     """k/omega 源项（产生、耗散、交叉扩散、环境维持项、realizability 下限）"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    beta1: Any
+    beta2: Any
+    beta_star: Any
+    compute_blending_function_F1: Any
+    compute_blending_function_F2: Any
+    compute_eddy_viscosity: Any
+    compute_strain_rate_magnitude: Any
+    compute_vorticity_magnitude: Any
+    k_field: Any
+    kappa: Any
+    omega_field: Any
+    production_factor: Any
+    sigma_w1: Any
+    sigma_w2: Any
 
     def compute_source_terms(self, Q: np.ndarray, grad_U: np.ndarray,
                              d_wall: np.ndarray, mu: float,

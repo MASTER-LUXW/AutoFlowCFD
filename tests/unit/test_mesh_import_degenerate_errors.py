@@ -25,7 +25,7 @@ def test_element_referencing_a_missing_node_is_an_error(tmp_path):
     path.write_text("GRID,1,,0.0,0.0,0.0\nGRID,2,,1.0,0.0,0.0\nGRID,3,,0.0,1.0,0.0\n"
                     "CTRIA3,1,1,1,2,3\nCTRIA3,2,1,1,2,9\n")
     with pytest.raises(NASParseError, match="引用不存在的节点 1.*第 5 行"):
-        NASParser(str(path)).parse(skip_validation=True)
+        NASParser(str(path)).parse()
 
 
 def _volume_file(tmp_path, tet_line):

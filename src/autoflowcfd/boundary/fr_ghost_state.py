@@ -142,8 +142,8 @@ class InletSEMGhostState:
         self._row = {f: k for k, f in enumerate(faces)}
         self._points = (np.stack([face_positions[f] for f in faces]) if faces else np.zeros((0, 1, 3)))
         self._sigma = (np.stack([face_sigma[f] for f in faces]) if faces else np.zeros((0, 1)))
-        self._version = None
-        self._velocity = None                 # (n_faces, n_fp, 3) 瞬时速度
+        self._version: Optional[int] = None
+        self._velocity: Optional[np.ndarray] = None   # (n_faces, n_fp, 3) 瞬时速度，按涡核版本缓存
 
     def restricted_to_faces(self, face_ids: np.ndarray) -> "InletSEMGhostState":
         """面号换成 `face_ids` 的下标（分布式：`face_ids` 是本 rank 面序对应的全局面号）；涡核对象共享
@@ -153,12 +153,13 @@ class InletSEMGhostState:
                                   {i: self.face_sigma[g] for i, g in pairs}, self.Q_mean, self.reynolds_stress)
 
     def _instantaneous_velocity(self) -> np.ndarray:
-        if self._version != self.sem.version:
+        velocity = self._velocity
+        if velocity is None or self._version != self.sem.version:
             n_faces, n_fp = self._sigma.shape
             raw = self.sem.unit_fluctuations(self._points.reshape(-1, 3), self._sigma.reshape(-1))
-            self._velocity = (self.Q_mean[1:4] + raw @ self._a_t).reshape(n_faces, n_fp, 3)
-            self._version = self.sem.version
-        return self._velocity
+            velocity = (self.Q_mean[1:4] + raw @ self._a_t).reshape(n_faces, n_fp, 3)
+            self._velocity, self._version = velocity, self.sem.version
+        return velocity
 
     def ghost_states(self, faces: np.ndarray, Q_owner_fp: np.ndarray) -> np.ndarray:
         """`(n, n_fp, 5)`：一批面（本对象面号空间）的入口幽灵态。"""

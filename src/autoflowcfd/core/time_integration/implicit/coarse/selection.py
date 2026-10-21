@@ -25,7 +25,7 @@ class CoarsePreconditionerFactory:
         self.high_order = bool(high_order)
         self.ctx = ctx if ctx is not None and ctx.n_ranks > 1 else None
         self._hierarchy = None
-        self._space = None
+        self._space: Optional[GlobalCoarseSpace] = None
 
     def hierarchy(self, struct):
         if self._hierarchy is None:
@@ -37,6 +37,8 @@ class CoarsePreconditionerFactory:
         return bool(self.hierarchy(struct))
 
     def _global_space(self, struct) -> GlobalCoarseSpace:
+        if self.ctx is None:
+            raise RuntimeError("单进程没有全局粗空间")
         if self._space is None:
             self._space = GlobalCoarseSpace(struct, self.high_order, self.ctx)
         return self._space
@@ -62,5 +64,7 @@ class CoarsePreconditionerFactory:
 
         if self.ctx is None:
             return local(dtau_flat)
+        if cross is None:
+            raise ValueError("分布式块 ILU 档的全局粗校正需要跨 rank 耦合块（`cross_coupling` 的结果）")
         return GlobalCoarseCorrection(self._global_space(struct), local, diag, off, struct, cross, dtau_flat,
                                       jac.n_sps)

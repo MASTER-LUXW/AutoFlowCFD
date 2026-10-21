@@ -4,6 +4,8 @@
 数组模块无关：数组模块取自入参（`core/utils/array_module.py`），CPU 与 GPU 模型共用这一份。
 """
 
+from typing import Any
+
 import numpy as np
 
 from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX, report_viscosity_cap
@@ -14,6 +16,9 @@ from .kernels import compute_strain_and_vorticity_magnitude
 
 class _SSTBlendingMixin:
     """SST 混合函数 F1/F2、应变率与涡量模、涡粘度"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    a1: Any
 
     def compute_strain_rate_magnitude(self, grad_u):
         """应变率模 |S| = sqrt(2 S_ij S_ij)，`grad_u (n_cells, n_sps, 3, 3)` -> `(n_cells, n_sps)`。"""

@@ -208,6 +208,8 @@ def fill_without_oversized_tetrahedra(
             f"体内超大四面体 {int(interior.sum())} 个（最大为上限的 {worst:.1f} 倍）："
             f"插入 {len(new_points)} 个点阵点后重新四面体化（第 {rnd + 1} 轮）")
         extra = new_points if extra is None else np.vstack([extra, new_points])
+    if best is None:                              # 第一轮必然记下结果
+        raise RuntimeError("四面体化没有产生任何结果")
     worst, nodes, tets, n_interior, limited, vols = best
     if np.any(limited):
         logger.warning(

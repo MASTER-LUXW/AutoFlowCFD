@@ -46,7 +46,7 @@ Jacobian 每单元一个 `(27*5)^2` 的块加上面耦合块，在同一网格�
 的对角形式（见 `preconditioner.py` 里如实说明的局限）。
 """
 
-from typing import Callable, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union
 
 
 import numpy as np
@@ -61,6 +61,9 @@ from .physicality import _cellwise_relaxation, density_pressure_row_limits, upda
 from ..blocks.preconditioner import PseudoTransientDiagonal
 from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm, accept_step
 from ..reductions import LocalReductions
+
+if TYPE_CHECKING:
+    from .coupled_step import CoupledBlockPreconditioner
 
 #: 单次 `step_newton_krylov` 调用里允许缩小 `dtau` 重试的档数
 #: （每档 `dtau_control.FAIL_SHRINK`，即 4 倍）。
@@ -84,7 +87,7 @@ def step_newton_krylov(
     gmres_restart: Optional[int] = None,
     gmres_max_iter: int = GMRES_MAX_ITER,
     dtau_scale: float = 1.0,
-    block_precond: Optional[BlockJacobiCache] = None,
+    block_precond: Optional[Union[BlockJacobiCache, "CoupledBlockPreconditioner"]] = None,
     physicality: Callable = density_pressure_row_limits,
     rows_per_cell: int = 1,
     red: Optional[LocalReductions] = None,

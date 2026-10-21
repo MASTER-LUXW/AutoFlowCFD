@@ -6,6 +6,8 @@
 这里通过 `self` 访问。
 """
 
+from typing import Any
+
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.gpu.gpu_time_integration import (
@@ -15,6 +17,13 @@ from autoflowcfd.core.gpu.gpu_time_integration import (
 
 class _GPUSolverTimeStepMixin:
     """单机 GPU 的局部时间步长与当前 CFL"""
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    U_gpu: Any
+    freestream: Any
+    mesh: Any
+    mesh_data: Any
+    order: Any
 
     def _compute_local_time_step_gpu(self, return_physical_too: bool = False, nu_av=None):
         """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。
@@ -93,7 +102,7 @@ class _GPUSolverTimeStepMixin:
                 mach_ref=(self.freestream["mach_ref"] if precond else None),
                 return_physical_too=precond,
             )
-            if precond:
+            if dt_phys_all_sps is not None:
                 dt_all_sps[:, sp], dt_phys_all_sps[:, sp] = out_sp
             else:
                 dt_all_sps[:, sp] = out_sp

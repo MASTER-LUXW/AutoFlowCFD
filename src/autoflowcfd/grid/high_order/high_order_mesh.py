@@ -8,7 +8,7 @@ AutoFlowCFD - 高阶 FR 网格（HighOrderMesh）。
 3. 几何守恒律（GCL）验证（Kopriva 度量恒等式，`gcl_check.py`）
 """
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
 from loguru import logger
@@ -19,6 +19,9 @@ from ..curved_mapping.curved_mapping_orientation import (
     fix_tet_orientation,
 )
 from ..connectivity.face_connectivity import FRFaceConnectivity, build_face_connectivity
+
+if TYPE_CHECKING:
+    from autoflowcfd.fr.face_flux_points.data import _KernelFaceData
 
 #: 标准参考四面体 `(-1,-1,-1),(1,-1,-1),(-1,1,-1),(-1,-1,1)` 的体积
 #: （见 `fr/native_tet/basis.py::compute_native_tet_jacobian`）。
@@ -81,7 +84,7 @@ class HighOrderMesh:
         self.n_cells = 0
         self.n_prism_cells = 0
         self.face_connectivity: Optional[FRFaceConnectivity] = None
-        self.face_flux_points: Optional[list] = None
+        self.face_flux_points: Optional["_KernelFaceData"] = None
         self.boundary_groups: Optional[Dict[str, np.ndarray]] = None
         self.boundary_bc_types: Optional[Dict[str, str]] = None
         self.boundary_surface_mesh: Optional[Dict[str, object]] = None
@@ -135,7 +138,7 @@ class HighOrderMesh:
         self.n_cells = n_prisms + (len(tet_conn) if tet_conn is not None else 0)
 
         # --- 1/2. 棱柱/四面体单元：先修正朝向（保证正体积），存下修正后的
-        # connectivity/节点坐标——这两者与阶数无关，是 _build_order_geometry
+        # connectivity/节点坐标——这两者与阶数无关，是 build_order_geometry
         # 在任意阶数下重算 SPs/Jacobian 的唯一输入。
         fixed_prism_conn = None
         if prism_conn is not None and n_prisms > 0:
@@ -154,11 +157,13 @@ class HighOrderMesh:
         self._fixed_tet_conn = fixed_tet_conn
         self._node_coords = nodes
 
-        geom = self._build_order_geometry(self.order)
-        self.sps_coords = geom["sps_coords"]
-        self.jacobians = geom["jacobians"]
-        self.jacobians_fine = geom["jacobians_fine"]
-        self.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
+        from .high_order_mesh_order import build_order_geometry
+
+        geom = build_order_geometry(self, self.order)
+        self.sps_coords = geom.sps_coords
+        self.jacobians = geom.jacobians
+        self.jacobians_fine = geom.jacobians_fine
+        self.n_sps_per_cell_fine = geom.n_sps_per_cell_fine
 
         # 用当前（目标）阶数的高阶 Gauss-Legendre 求积算一次真实体积并固定
         # 下来——见 __init__ 里 cell_volumes 属性的文档。
@@ -235,12 +240,11 @@ class HighOrderMesh:
 
         cache_active_order(self)
 
-    def _build_order_geometry(self, order: int) -> Dict[str, np.ndarray]:
-        """在给定阶数下重新推导 SPs 物理坐标与 Jacobian。实现见
-        high_order_mesh_order.py::build_order_geometry。"""
-        from .high_order_mesh_order import build_order_geometry
-
-        return build_order_geometry(self, order)
+    def loaded_node_coords(self) -> np.ndarray:
+        """修正单元朝向时存下的节点坐标（与阶数无关的几何输入）；`load_from_volume_mesh` 之前调用即报错。"""
+        if self._node_coords is None:
+            raise RuntimeError("HighOrderMesh 尚未加载网格（先调用 load_from_volume_mesh）")
+        return self._node_coords
 
     def set_order(self, order: int) -> None:
         """切换网格当前活动的多项式阶数（顺序 Continuation 专用）。

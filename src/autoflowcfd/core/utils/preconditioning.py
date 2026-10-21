@@ -23,6 +23,8 @@ Constant Density Flows", AIAA Journal 33(11):2050-2057.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 from numba import njit, prange
 
@@ -219,7 +221,7 @@ def _apply_low_mach_precond_kernel(R, Q, mach_ref, k, out) -> None:
 
 def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,
                                   mach_ref: float, k: float = 1.1,
-                                  out: np.ndarray = None) -> np.ndarray:
+                                  out: Optional[np.ndarray] = None) -> np.ndarray:
     """把 Weiss-Smith 伪时间预处理矩阵 Gamma 作用到平均流残差上。
 
     `dU/dtau = -R` 变成 `dU/dtau = -Gamma R`。稳态不动点不变

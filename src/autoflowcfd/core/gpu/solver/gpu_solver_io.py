@@ -4,6 +4,8 @@
 `host_view.py`）。
 """
 
+from typing import Any
+
 from autoflowcfd.core.gpu import get_cupy
 
 
@@ -13,6 +15,9 @@ class _GPUSolverIOMixin:
     子类需要提供：U_gpu, Q_gpu, array_mgr, mesh, iteration,
     residual_history, turb_model_gpu, _dual_time_U_prev 等属性。
     """
+
+    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    turb_model_gpu: Any
 
     def cleanup(self):
         """释放 GPU 资源。"""

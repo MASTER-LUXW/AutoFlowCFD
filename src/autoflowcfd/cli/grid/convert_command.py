@@ -2,17 +2,15 @@
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import click
 
 from autoflowcfd.cli.grid.options import units_option
 from loguru import logger
 
-from autoflowcfd.cli.grid.commands import grid
 
-
-@grid.command()
+@click.command()
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False))
 @click.option("--format", "-f", "fmt", type=click.Choice(["vtk", "cgns", "stl"]), required=True, help="输出格式")
 @click.option("--output", "-o", type=click.Path(dir_okay=False),
@@ -49,7 +47,7 @@ def convert(input_file: str, fmt: str, output: Optional[str], units: str, json_o
             click.echo(json.dumps({"command": "grid.convert", "status": "error", "error": str(e)}, indent=2))
         raise click.ClickException(f"Grid conversion failed: {e}")
 
-    result = {
+    result: Dict[str, Any] = {
         "command": "grid.convert",
         "status": "success",
         "input": str(input_file),

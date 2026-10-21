@@ -5,7 +5,7 @@
 范数（`linear_solve.py::_solve_direction`）。三者必须一致，见 `ResidualNorm` 文档。
 """
 
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import numpy as np
 
@@ -93,7 +93,7 @@ class ResidualNorm:
 
 
 def accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: float,
-                red: LocalReductions, norm: "ResidualNorm") -> Tuple[object, float, float, int]:
+                red: LocalReductions, norm: "ResidualNorm") -> Tuple[Any, float, float, int]:
     """按残差接受判据回溯 `theta`，返回
     `(U_new, theta, res_norm_new, n_extra_residual_eval)`。
 

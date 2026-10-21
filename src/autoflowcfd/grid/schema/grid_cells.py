@@ -93,11 +93,11 @@ class CellArray:
         return len(self.connectivity)
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> Tuple[int, ...]:
         """获取单元数组形状
 
         Returns:
-            Tuple[int, int]: 形状元组 (N_cells, 3)
+            形状元组 (N_cells, 3)
         """
         return self.connectivity.shape
 

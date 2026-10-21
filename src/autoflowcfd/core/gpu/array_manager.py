@@ -99,7 +99,7 @@ class GPUArrayManager:
 
     # ─── 基础传输 ───────────────────────────────────────────
 
-    def to_gpu(self, np_array: np.ndarray) -> 'cp.ndarray':
+    def to_gpu(self, np_array: np.ndarray) -> Any:
         """CPU numpy 数组 → GPU CuPy 数组。
 
         Args:
@@ -111,7 +111,7 @@ class GPUArrayManager:
         with self.device:
             return self._cp.asarray(np_array)
 
-    def to_cpu(self, cp_array: 'cp.ndarray') -> np.ndarray:
+    def to_cpu(self, cp_array: Any) -> np.ndarray:
         """GPU CuPy 数组 → CPU numpy 数组。
 
         Args:
@@ -122,7 +122,7 @@ class GPUArrayManager:
         """
         return self._cp.asnumpy(cp_array)
 
-    def gpu_zeros(self, shape, dtype=np.float64) -> 'cp.ndarray':
+    def gpu_zeros(self, shape, dtype=np.float64) -> Any:
         """在 GPU 上创建零数组。
 
         Args:
@@ -135,7 +135,7 @@ class GPUArrayManager:
         with self.device:
             return self._cp.zeros(shape, dtype=dtype)
 
-    def gpu_empty(self, shape, dtype=np.float64) -> 'cp.ndarray':
+    def gpu_empty(self, shape, dtype=np.float64) -> Any:
         """在 GPU 上创建未初始化数组。
 
         Args:
@@ -148,7 +148,7 @@ class GPUArrayManager:
         with self.device:
             return self._cp.empty(shape, dtype=dtype)
 
-    def gpu_copy(self, cp_array: 'cp.ndarray') -> 'cp.ndarray':
+    def gpu_copy(self, cp_array: Any) -> Any:
         """在 GPU 上复制数组。
 
         Args:
@@ -161,7 +161,7 @@ class GPUArrayManager:
 
     # ─── 网格数据上传 ────────────────────────────────────────
 
-    def upload_mesh_data(self, mesh, ops) -> Dict[str, 'cp.ndarray']:
+    def upload_mesh_data(self, mesh, ops) -> Dict[str, Any]:
         """一次性上传网格的所有常驻 GPU 数据。
 
         包括 Jacobian 度量项、面连接关系、面几何信息等。上传后缓存

@@ -69,7 +69,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     starting_order = solver.current_order
     orders = list(range(starting_order, original_order + 1))
     total_iter = 0
-    final_residual = None        # 最终阶段至少推进一步（max_iter >= 1 由 solve 入口保证），循环结束时必有值
+    final_residual = float("nan")  # 最终阶段至少推进一步（max_iter >= 1 由 solve 入口保证），循环结束时必有值
     with blas_threads_limited(1):
         for target_p in orders:
             if total_iter >= max_iter:

@@ -11,7 +11,6 @@ AutoFlowCFD V2.0 - GPU 版物理通量计算（欧拉 + 粘性）
 - primitive_to_conserved_gpu: 原始变量 → 守恒变量
 """
 
-import numpy as np
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
@@ -172,15 +171,11 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRAND
         mu_t = effective_eddy_viscosity_array(cp.asarray(mu_t), mu, cp)
     mu_total = mu if mu_t is None else mu + mu_t
 
-    # 热导率：k = mu * Cp / Pr（分子）+ mu_t * Cp / Pr_t（湍流）
+    # 热导率：k = mu * Cp / Pr（分子）+ mu_t * Cp / Pr_t（湍流）。此前按 mu_total 是否标量分支，标量分支对
+    # mu_total 整体用 Pr（mu_t_is_effective 且 mu_t 是非零 Python 标量时湍流部分用错普朗特数）；现按 mu_t
+    # 是否给出写成一个式子，数组情形逐位不变
     Cp = GAMMA * R_AIR / (GAMMA - 1.0)
-    if np.isscalar(mu_total):
-        k_eff = mu_total * Cp / Pr if np.isscalar(Pr) else mu_total * Cp / Pr
-    else:
-        # mu_total 是数组时，mu 部分用 Pr，mu_t 部分用 Pr_t
-        k_molecular = mu * Cp / Pr
-        k_turbulent = mu_t * Cp / Pr_t
-        k_eff = k_molecular + k_turbulent
+    k_eff = mu * Cp / Pr if mu_t is None else mu * Cp / Pr + mu_t * Cp / Pr_t
 
     # 速度梯度分量（`[..., i, j]`，见函数文档"真实 bug 修复"一节——不能
     # 用 `[:, i, j]`，那只认定恰好一个前导批量维）

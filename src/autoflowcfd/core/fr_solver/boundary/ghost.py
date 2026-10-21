@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 边界幽灵态 provider（含 SEM 入口 FP 位置）
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -138,7 +138,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 下游无从区分（壁面距离、壁面模型、气动力积分、湍流壁面条件都只认物理
     # 无滑移固壁，唯一判据 `boundary/wall_kind.py`）。
     wall_is_no_slip = getattr(solver, "wall_model", None) is None
-    type_map = {
+    type_map: Dict[str, Tuple[str, Dict[str, Any]]] = {
         "WALL": ("WALL", {"is_no_slip": wall_is_no_slip,
                           "physical_no_slip": True}),
         "SLIP_WALL": ("WALL", {"is_no_slip": False,
@@ -199,7 +199,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         if raw_type not in type_map:
             raise ValueError(f"边界组 '{name}' 的类型 {raw_type!r} 求解器不支持（支持 {sorted(type_map)}）")
         mapped_type, default_params = type_map[raw_type]
-        config = {"type": mapped_type, **default_params}
+        config: Dict[str, Any] = {"type": mapped_type, **default_params}
 
         if mapped_type == "INLET" and use_sem:
             config["sem"] = _build_sem_inlet(solver, name, group_code == code, _dir, Q_free)

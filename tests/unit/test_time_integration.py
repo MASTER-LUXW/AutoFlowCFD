@@ -17,3 +17,12 @@ def test_generic_step_rejects_dual_time_scheme():
     with pytest.raises(ValueError, match="DUAL_TIME"):
         ti.step(U_n, lambda u: 0.01 * u, np.full(U_n.shape[0], 1e-2))
     assert not hasattr(ti, "step_dual_time")
+
+
+@pytest.mark.parametrize("scheme", [TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME])
+def test_implicit_scheme_has_no_explicit_stage_table(scheme):
+    """隐式格式没有 Shu-Osher 系数表：误走显式 stage 推进必须报错。此前取表时缺省回退到前向 Euler 表，静默推进。"""
+    ti = TimeIntegrator(scheme=scheme)
+    U = np.ones((2, 5))
+    with pytest.raises(ValueError, match="不是显式格式"):
+        ti._ssp_rk_stage_step(U, lambda u: np.zeros_like(u), np.ones(2))

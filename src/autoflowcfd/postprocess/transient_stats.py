@@ -86,7 +86,7 @@ class TransientStatistics:
         grid_data: 体网格（棱柱在前、四面体在后）或面网格；样本的单元顺序须与之一致
     """
 
-    def __init__(self, grid_data):
+    def __init__(self, grid_data) -> None:
         self.grid_data = grid_data
         self._fields = {name: RunningMoments() for name in _FIELD_NAMES}
         self._coeffs = {name: RunningMoments() for name in _COEFF_NAMES}
@@ -128,7 +128,7 @@ class TransientStatistics:
                        'n_samples': m.n} for name, m in self._coeffs.items()}
 
     def compute_statistics(self) -> TransientResult:
-        if self.n_samples == 0:
+        if self.n_samples == 0 or self.t_first is None or self.t_last is None:
             raise RuntimeError("还没有累积任何样本")
         coeff = self.get_coefficient_statistics()
         result = TransientResult(

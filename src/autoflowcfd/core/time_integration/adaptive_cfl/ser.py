@@ -103,6 +103,7 @@ Newton 都被完整接受（`theta = 1`、没有缩 dtau）。纯 SER 在这段�
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 from loguru import logger
 
@@ -152,7 +153,7 @@ class SERCFLController:
         self.growth_limit = float(growth_limit)
         self.shrink_limit = float(shrink_limit)
         self.cfl_number = self._clamp(self.cfl_start)
-        self._prev_residual = None
+        self._prev_residual: Optional[float] = None
 
     def _clamp(self, cfl: float) -> float:
         return min(self.cfl_max, max(self.cfl_min, cfl))
