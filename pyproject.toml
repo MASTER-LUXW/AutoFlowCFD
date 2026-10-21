@@ -7,7 +7,7 @@ maintainers = ["Mr Lu <luxw_chd@126.com>"]
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/AutoFlowCFD/AutoFlowCFD"
-documentation = "https://autoflowcfd.readthedocs.io"
+documentation = "https://github.com/AutoFlowCFD/AutoFlowCFD/tree/main/docs"
 keywords = ["cfd", "automotive", "aerodynamics", "flux-reconstruction", "gpu-computing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -19,9 +19,9 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = ">=3.10,<3.12"
 numpy = "^1.26.0"
-scipy = {version = "^1.10.0", python = ">=3.10,<3.12"}
+scipy = "^1.10.0"
 click = "^8.1.0"
 pyyaml = "^6.0.0"
 h5py = "^3.9.0"
