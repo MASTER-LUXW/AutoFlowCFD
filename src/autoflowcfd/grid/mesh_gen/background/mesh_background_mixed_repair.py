@@ -62,7 +62,7 @@ def _repair_mixed_mesh_post_stage_c(
     if len(prism_cells):
         prism_keep_mm, tet_keep_mm = repair_nonmanifold_mixed(nodes_obj, prism_cells, merged_cells.astype(np.int64))
         if not prism_keep_mm.all() or not tet_keep_mm.all():
-            merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
+            merged_nodes, prism_cells, merged_cells, _ = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
                 prism_keep_mm, tet_keep_mm,
             )
@@ -81,7 +81,7 @@ def _repair_mixed_mesh_post_stage_c(
             # 如 ANSA 可以走进去的孔洞，因为周围存活单元的新暴露面闭合
             # 成自身自洽的小流形，甚至通过了水密性开放边检查）。
             if not prism_keep_mm.all() or not tet_keep_mm.all():
-                merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
+                merged_nodes, prism_cells, merged_cells, _ = patch_nonmanifold_cavity_mixed(
                     merged_nodes, prism_cells, merged_cells.astype(np.int64),
                     prism_keep_mm, tet_keep_mm,
                     n_buffer_rings=4, max_cavity_cells=15_000,
@@ -155,7 +155,7 @@ def _repair_mixed_mesh_post_stage_c(
             # 会话记录），但触发这次崩溃的确切机制本轮未能定位。在
             # 找到真正根因之前，调大 n_buffer_rings 对这个调用点是已
             # 验证的不安全操作，不要在未确认修复的情况下重新尝试。
-            merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
+            merged_nodes, prism_cells, merged_cells, _ = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
                 ar_keep, tet_keep_allones,
             )

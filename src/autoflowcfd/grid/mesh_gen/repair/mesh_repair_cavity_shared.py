@@ -1,8 +1,8 @@
 """阶段 B' 局部重铺（cavity retile）用到的共享底层工具。
 
 从 mesh_repair_cavity.py 拆分出来，供 remesh_core_cavity（同目录
-mesh_repair_cavity.py）和 patch_nonmanifold_cavity（同目录
-mesh_repair_nonmanifold_patch.py）两个局部重新四面体化流程共用：cavity
+mesh_repair_cavity.py）和 patch_nonmanifold_cavity_mixed（同目录
+mesh_repair_nonmanifold_mixed.py）两个局部重新四面体化流程共用：cavity
 （待重铺区域）的环形扩张、cavity 自身边界面提取，以及重铺后的质量评分。
 """
 

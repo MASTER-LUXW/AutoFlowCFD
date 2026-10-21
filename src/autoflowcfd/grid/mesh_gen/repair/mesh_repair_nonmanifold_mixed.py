@@ -1,12 +1,15 @@
-"""针对跨越棱柱(BL)+四面体(transition/core)混合网格的非流形面局部 cavity
-修补——是 mesh_repair_cavity.patch_nonmanifold_cavity 的混合网格版本。
+"""非流形 / 标记坏的空腔局部重铺（棱柱(BL)+四面体混合网格；没有棱柱时即纯四面体网格，两种网格同一个实现）。
 
-单独拆成一个模块（而不是加进已经超过本项目 450 行上限的
-mesh_repair_cavity.py），纯粹为了控制文件行数；两个模块用的是同一套
-底层技巧。
+为什么要重铺而不是删除：`repair_nonmanifold_cells` / `repair_nonmanifold_mixed` 对 3+ 单元共享面的修复是"保留最大、
+丢弃其余"——额外单元是真正冗余的重复时正确，但当它们来自网格的两个不同区域（例如过渡四面体与 tetgen 核心填充）
+在锐角处都合法地占据同一空间时，丢弃"输方"会移除真实几何、留下孔洞。已直接确认：真实 cube_demo 运行测得
+0.189 m^3 缺失（合并网格体积 vs. 精确的包围盒减物体体积），位置正是删除单元处，导出网格截图里可见沿物体一侧的虚空。
+
+2026-10-22（I-142）以前纯四面体网格另有一份实现（`mesh_repair_nonmanifold_patch.py::patch_nonmanifold_cavity`）：把
+全部种子合成**一个**空腔（任一簇超上限或 tetgen 失败就整体回退成删单元留洞）、没有近重合点焊接、没有质量门。
 """
 
-from typing import List, Tuple
+from typing import List, NamedTuple
 
 import numpy as np
 from loguru import logger
@@ -52,6 +55,15 @@ CAVITY_WELD_TOLERANCE_FRACTION = 0.10
 _MAX_WELD_GROWTH = 3
 
 
+class CavityPatch(NamedTuple):
+    """`patch_nonmanifold_cavity_mixed` 的结果。`tet_kept` (n_tet_in,)：输入四面体里原样保留的那些（按原顺序排在
+    `tet_cells` 最前面，其后是全部新铺的四面体），调用方据此把逐四面体的附带数组（如坏单元掩码）变换到新网格。"""
+    nodes: np.ndarray
+    prism_cells: np.ndarray
+    tet_cells: np.ndarray
+    tet_kept: np.ndarray
+
+
 def patch_nonmanifold_cavity_mixed(
     nodes: np.ndarray,
     prism_cells: np.ndarray,
@@ -61,14 +73,11 @@ def patch_nonmanifold_cavity_mixed(
     n_buffer_rings: int = 1,
     max_cavity_cells: int = 5000,
     max_clusters_attempted: int = 20_000,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """在棱柱(BL)+四面体(transition/core)混合网格上局部重铺非流形/标记坏的空腔。
+) -> CavityPatch:
+    """在棱柱(BL)+四面体(transition/core)混合网格上局部重铺非流形/标记坏的空腔（为什么重铺而不删除见模块文档）。
 
-    是 mesh_repair_cavity.patch_nonmanifold_cavity 的混合网格版本。
-    不调用 face_extractor，而是直接在混合单元集上操作。
-    repair_nonmanifold_mixed 自身的"保留最大、丢弃其余"策略会导致
-    超过共享面丢失一侧的真实孔洞——参见
-    mesh_repair_cavity.patch_nonmanifold_cavity 的文档字符串了解原因。
+    不调用 face_extractor，而是直接在单元集上操作：输入按定义在局部是非流形的，正是 FaceExtractor 严格模式拒绝的
+    情形（其非严格模式在单元完全不被任何面引用时也会硬失败）。
 
     每个连通的种子单元簇（接触超过共享面的，或被调用方的 keep 掩码
     标记为坏的——例如 mesh_background.py 的 BL 棱柱纵横比检查）都成为
@@ -99,21 +108,20 @@ def patch_nonmanifold_cavity_mixed(
         n_buffer_rings: 在提取每个簇的边界之前，围绕每个簇的面邻接
             环数。
         max_cavity_cells: 单簇安全上限（不是总预算）——单个簇这么大
-            表明结构上不同的东西（参见 patch_nonmanifold_cavity 的
-            文档字符串）；跳过而不是尝试，与 remesh_core_cavity 的
+            表明结构上不同的东西，值得单独调查而不是局部修补；跳过而不是尝试，与 remesh_core_cavity 的
             单簇大小上限相同。
         max_clusters_attempted: 本次调用将尝试的独立簇总数上限，
             与 remesh_core_cavity 的上限出于相同原因（许多小簇，
             每个都便宜，但每次调用 tetgen 有实际开销，仍会累积）。
 
     Returns:
-        (new_nodes, new_prism_cells, new_tet_cells) —— 如果两个 keep 掩码已经全为 True 则返回
-        未修改的（非副本）原始数组；否则反映成功修补的簇数（0 或更多
-        ——部分结果，超大/失败的簇保持调用方 keep 掩码找到的原样，
-        是预期且正常的，不是错误）。
+        `CavityPatch` —— 如果两个 keep 掩码已经全为 True、或没有簇被接受，则节点与单元是未修改的（非副本）原始
+        数组；否则反映成功修补的簇（部分结果：超大/失败的簇保持调用方 keep 掩码找到的原样，是预期且正常的，
+        不是错误；调用方随后重新检查并决定是否删除）。
     """
+    unchanged = CavityPatch(nodes, prism_cells, tet_cells, np.ones(len(tet_cells), dtype=bool))
     if prism_keep.all() and tet_keep.all():
-        return nodes, prism_cells, tet_cells
+        return unchanged
 
     from ..tetgen.mesh_tetgen_core import fill_core_volume
     from ...validation.quality_validator import MeshQualityValidator
@@ -190,7 +198,7 @@ def patch_nonmanifold_cavity_mixed(
     if len(seed_idx) == 0:
         logger.warning("Non-manifold mixed-cavity patch: seed set empty after degenerate-face filtering - "
                        "falling back to plain cell removal")
-        return nodes, prism_cells, tet_cells
+        return unchanged
 
     seed_pos = -np.ones(n_total, dtype=np.int64)
     seed_pos[seed_idx] = np.arange(len(seed_idx))
@@ -341,7 +349,7 @@ def patch_nonmanifold_cavity_mixed(
             f"accepted (skipped_size={n_skipped_size}, rejected={n_rejected}, "
             f"failed={n_failed}) - falling back to plain cell removal"
         )
-        return nodes, prism_cells, tet_cells
+        return unchanged
 
     keep_prism_outside = np.ones(n_prism, dtype=bool)
     keep_tet_outside = np.ones(n_tet, dtype=bool)
@@ -384,4 +392,4 @@ def patch_nonmanifold_cavity_mixed(
         f"{n_welded} node(s) welded mesh-wide; "
         f"skipped_size={n_skipped_size}, rejected={n_rejected}, failed={n_failed})"
     )
-    return new_nodes, new_prism_cells, new_tet_cells
+    return CavityPatch(new_nodes, new_prism_cells, new_tet_cells, keep_tet_outside)

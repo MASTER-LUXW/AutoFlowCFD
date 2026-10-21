@@ -60,7 +60,7 @@ def test_cavity_patch_with_weld_keeps_the_mesh_closed():
     before, _ = _exterior(tets)
     keep = np.ones(len(tets), dtype=bool)
     keep[np.flatnonzero((tets == a).any(axis=1))[0]] = False
-    new_nodes, _, new_tets = patch_nonmanifold_cavity_mixed(
+    new_nodes, _, new_tets, _ = patch_nonmanifold_cavity_mixed(
         nodes, np.empty((0, 6), dtype=np.int64), tets, np.ones(0, dtype=bool), keep)
     after, n_nonmanifold = _exterior(np.asarray(new_tets, dtype=np.int64))
     assert n_nonmanifold == 0

@@ -22,10 +22,8 @@ tetgen 用法相同），然后将结果拼回被移除单元的位置。这在�
 重新转出，让现有调用方继续不受影响地使用。
 
 进一步拆分：cavity 扩张/边界提取/质量评分的共享工具在
-mesh_repair_cavity_shared.py；patch_nonmanifold_cavity（非流形修补，与
-remesh_core_cavity 共用同一套局部重新四面体化技巧，但用途不同）在
-mesh_repair_nonmanifold_patch.py。两者都在本文件重新转出，外部代码一律
-仍从 `mesh_repair_cavity` 导入即可。
+mesh_repair_cavity_shared.py；非流形空腔重铺（与 remesh_core_cavity 共用同一套局部重新四面体化技巧，但用途
+不同）在 mesh_repair_nonmanifold_mixed.py（混合网格与纯四面体网格同一个实现）。
 
 remesh_core_cavity 自身体积过大（超过 400 行上限），其中"逐簇尝试局部
 重新四面体化"的循环体（占了函数体的大半）进一步拆到了
@@ -44,7 +42,7 @@ from .mesh_repair_cavity_shared import (
     _CAVITY_FACE_TEMPLATES,
 )
 from .mesh_repair_cavity_cluster_attempt import _attempt_cavity_retile_clusters
-from .mesh_repair_nonmanifold_patch import patch_nonmanifold_cavity
+from .mesh_repair_nonmanifold_mixed import patch_nonmanifold_cavity_mixed
 
 if TYPE_CHECKING:
     from ...schema.grid_faces import FaceData
@@ -53,7 +51,6 @@ if TYPE_CHECKING:
 __all__ = [
     '_CAVITY_FACE_TEMPLATES',
     'remesh_core_cavity',
-    'patch_nonmanifold_cavity',
 ]
 
 
@@ -233,7 +230,7 @@ def remesh_core_cavity(
     # "204 invalid (>2 cells)" 面之后。运行本函数自身调用方
     # 已对初始网格信任的相同清理使该不变量在本函数自身变异
     # 后也保持为真，而非留给下一次调用（致命地）发现。
-    # 先尝试局部重铺，与 patch_nonmanifold_cavity 自身文档
+    # 先尝试局部重铺，与 patch_nonmanifold_cavity_mixed 模块文档
     # 字符串相同原理：此处简单的"保留最大、丢弃其余"删除
     # 本身被发现留下真实孔洞——已直接确认，非理论，在其他
     # 两个 repair_nonmanifold_cells 调用点（mesh_background.py，
@@ -242,12 +239,12 @@ def remesh_core_cavity(
     # 到正好是这个块。
     keep = repair_nonmanifold_cells(new_nodes, new_cells)
     if not keep.all():
-        new_nodes, new_cells, new_bad_cell_mask = patch_nonmanifold_cavity(
-            new_nodes, new_cells, keep,
-            bad_cell_mask=new_bad_cell_mask,
-        )
-        if new_bad_cell_mask is None:          # 传入了掩码，patch_nonmanifold_cavity 按同样的行变换返回它
-            raise RuntimeError("patch_nonmanifold_cavity 没有返回坏单元掩码")
+        patched = patch_nonmanifold_cavity_mixed(
+            new_nodes, np.empty((0, 6), dtype=np.int64), new_cells.astype(np.int64), np.ones(0, dtype=bool), keep)
+        # 保留的原四面体按原顺序在前、新铺的在后；新铺单元"不已知坏"（与 remesh_core_cavity 对其创建单元同一约定）
+        n_new = len(patched.tet_cells) - int(patched.tet_kept.sum())
+        new_bad_cell_mask = np.concatenate([new_bad_cell_mask[patched.tet_kept], np.zeros(n_new, dtype=bool)])
+        new_nodes, new_cells = patched.nodes, patched.tet_cells.astype(new_cells.dtype)
         keep = repair_nonmanifold_cells(new_nodes, new_cells)
         if not keep.all():
             n_removed = int(np.size(keep) - np.count_nonzero(keep))
