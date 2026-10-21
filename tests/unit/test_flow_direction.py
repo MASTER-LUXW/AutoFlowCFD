@@ -201,7 +201,7 @@ class TestAllFiveConsumersUseTheDirection:
          ["direction", "area_vectors @ d"],
          "参考面积沿来流方向投影"),
         ("autoflowcfd.core.mpi.distributed_solver",
-         ["freestream_velocity", "aoa_deg"],
+         ["direction_from_freestream", "aoa_deg"],
          "CPU MPI 分布式初场 + freestream 字典"),
     ]
 

@@ -75,9 +75,12 @@ def test_no_other_module_writes_the_default_values():
 
 
 def test_fully_distributed_package_without_freestream_key_is_an_error():
-    """完全分布式包读取直接取键：缺键报错，不按缺省来流静默运行。"""
-    src = inspect.getsource(__import__("autoflowcfd.core.mpi.distributed_solver.from_package",
-                                       fromlist=["x"]))
+    """完全分布式包读取直接取键：缺键报错，不按缺省来流静默运行（来流经 `_settings_from_package` 原样进入
+    `solver.freestream`，初场在共用装配 `assembly.py` 里直接取键）。"""
+    from tests.unit._module_source import module_source
+
+    src = module_source("autoflowcfd.core.mpi.distributed_solver")
+    assert "{**package['freestream'], \"mach_ref\": package['mach_ref']}" in src
     for key in ("vel_inf", "rho_inf", "p_inf"):
-        assert f"package['freestream'].get('{key}'" not in src
-        assert f"package['freestream']['{key}']" in src
+        assert f"freestream'].get('{key}'" not in src and f'freestream.get("{key}"' not in src
+        assert f'self.freestream["{key}"]' in src

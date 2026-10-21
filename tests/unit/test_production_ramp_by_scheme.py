@@ -81,9 +81,9 @@ def test_package_and_multi_gpu_constructors_use_the_shared_initializer():
     """CPU MPI 完全分布式与多 GPU 的构造要真实分区包 / CuPy，这里钉住它们走同一个初始化函数；
     `advance_production_ramp` 不再有懒默认值，漏掉初始化会直接报错而不是静默取 50。"""
     from autoflowcfd.core.gpu.distributed.gpu_distributed import setup as mgpu_setup
-    from autoflowcfd.core.mpi.distributed_solver import from_package
+    from autoflowcfd.core.mpi.distributed_solver import assembly
 
-    assert "init_production_ramp(self, time_scheme)" in inspect.getsource(from_package)
+    assert "init_production_ramp(self, time_scheme)" in inspect.getsource(assembly)
     assert "init_production_ramp(self, time_scheme)" in inspect.getsource(mgpu_setup)
     assert "getattr" not in inspect.getsource(advance_production_ramp)
 

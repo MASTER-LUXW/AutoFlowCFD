@@ -183,4 +183,4 @@ def recv_pickled(source: int, tags: Tuple[int, int]) -> Any:
     buf = np.empty(int(size[0]), dtype=np.uint8)
     for lo in range(0, buf.size, MESSAGE_CHUNK_BYTES):
         comm.Recv(buf[lo:lo + MESSAGE_CHUNK_BYTES], source=source, tag=tags[1])
-    return pickle.loads(memoryview(buf))
+    return pickle.loads(buf.data)

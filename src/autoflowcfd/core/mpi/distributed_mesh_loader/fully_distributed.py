@@ -254,20 +254,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     # --- 1. 每个 rank 独立插值/重置自己的 local U + 湍流场（纯本地，
     # 数学与 CPU"传统模式"完全一致）---
     #
-    # 自由来流条件：`self.freestream` 只在 turb_model_name 为
-    # SST/DDES/IDDES 时才被 `from_fully_distributed_package` 设置（见
-    # 该方法对应代码），NONE/LES/WMLES 分支没有这个属性——`self.
-    # _package_freestream` 是本函数与 `from_fully_distributed_package`
-    # 共同维护的、对全部 turb_model_name 都存在的通用存储点（见
-    # `from_fully_distributed_package` 里的同名赋值、以及本函数末尾
-    # "应用新包"一节的同名更新）。
-    # 不给兜底（2026-09-24）：此前两个来源都取不到时会静默造一个
-    # `{'rho_inf': 1.225, 'vel_inf': 33.33, 'p_inf': 101325.0}` —— 那是与
-    # 构造函数默认值并存的第二份事实来源，而且会让一个真实的"来流丢失"
-    # 缺陷以"用了一个看似合理的来流"的形式静默通过。`solver.freestream`
-    # 自 2026-09-18 起对全部湍流模型无条件设置（见 distributed_solver/
-    # core.py 同名注释），取不到就是真缺陷，应当直接 AttributeError。
-    freestream = getattr(solver, '_package_freestream', None) or solver.freestream
+    # 自由来流：`solver.freestream` 对全部湍流模型无条件设置（`distributed_solver/assembly.py`），不给兜底
+    freestream = solver.freestream
 
     if target_p > old_order:
         # 延拓算子按基分派（2026-09-20，理由见 `fr/order_interp.py`）
@@ -351,7 +339,6 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         boundary_ghost_provider=my_package['boundary_ghost_provider'],
         freestream={**my_package['freestream'], "mach_ref": my_package['mach_ref']},
     )
-    solver._package_freestream = my_package['freestream']
 
     reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）

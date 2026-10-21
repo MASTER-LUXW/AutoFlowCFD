@@ -7,57 +7,46 @@
 """
 
 from typing import Any, Optional
-from autoflowcfd.core.mpi import get_rank
-from autoflowcfd.core.mpi.halo import HaloExchange
-from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.comm import barrier
-from autoflowcfd.core.time_integration.base import (
-    TimeIntegrator, require_distributed_scheme,
-)
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+
+from .assembly import DistributedRunSettings, canonical_turbulence_model
+
+
+def _settings_from_package(package: dict) -> DistributedRunSettings:
+    """完全分布式加载的运行设置：取自 root 打包的紧凑包（`distributed_mesh_loader/package.py`，键恒有）。"""
+    names = ('mu_molecular', 'turbulence_intensity', 'viscosity_ratio', 'sem_num_eddies',
+             'artificial_viscosity_enabled', 'artificial_viscosity_alpha', 'wall_treatment', 'time_scheme',
+             'dual_time_inner_iter', 'time_accurate', 'adaptive_cfl', 'cfl_start', 'cfl_max', 'cfl_min',
+             'low_mach_precond')
+    return DistributedRunSettings(
+        turb_model_name=canonical_turbulence_model(package['turb_model_name']),
+        freestream={**package['freestream'], "mach_ref": package['mach_ref']},
+        **{name: package[name] for name in names})
 
 
 class _DistributedFromPackageMixin:
     """从完全分布式 package 构造，以及本 rank 的局部求解器视图"""
 
     # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
+    _assemble_settings: Any
+    _assemble_state: Any
+    _assemble_time_stepping: Any
     _block_jacobi_colors_local: Any
     _coupling_colors_local: Any
     _is_fully_distributed: Any
-    _package_freestream: Any
-    _prev_mu_t_local: Any
     _root_context: Any
-    _sem_num_eddies: Any
-    _turb_model_upper: Any
-    _turbulence_intensity: Any
-    _viscosity_ratio: Any
-    artificial_viscosity_alpha: Any
-    artificial_viscosity_enabled: Any
-    convergence_history: Any
-    current_order: Any
     ddes_model: Any
     dist_flat_face: Any
-    freestream: Any
-    halo_exchange: Any
     iddes_h_max_compact: Any
     iddes_h_wn_compact: Any
     mesh: Any
-    mu_molecular: Any
-    n_ranks: Any
     ops: Any
-    order: Any
-    order_continuation_enabled: Any
     partition: Any
-    rank: Any
     sgs_model: Any
     solver_kwargs: Any
-    state: Any
-    time_integrator: Any
     turb_model: Any
     turb_model_name: Any
     wall_distance_compact: Any
-    wall_model: Any
-    wall_treatment: Any
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,
@@ -73,10 +62,9 @@ class _DistributedFromPackageMixin:
         提供者），本 rank 从未持有、也不需要持有完整全局网格——这是
         "完全分布式加载"名副其实的内存优化。
 
-        用 `cls.__new__(cls)` 绕开主 `__init__`（那个构造函数的很多步骤
-        ——如 `build_distributed_partition`/`build_distributed_flat_face`
-        ——本身就要求一个完整全局网格，在这条路径下没有意义、也没有
-        数据可用），直接把 package 里已经算好的内容赋到对应属性上。
+        用 `cls.__new__(cls)` 绕开主 `__init__`（分区与面几何构建要求完整全局网格，这条路径下由 root 预先算好随包
+        下发）；与网格来源无关的装配（设置、状态、时间推进）与主 `__init__` 同一组方法（`assembly.py`），这里只给出
+        几何与湍流几何量的来源。
 
         全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与
         Order Continuation 均已接入。换阶由 `DistributedFRSolver._interpolate_to_new_order` 调用
@@ -112,105 +100,37 @@ class _DistributedFromPackageMixin:
 
         configure_numba_threads(n_threads)
         self = cls.__new__(cls)
-        self.rank = rank if rank is not None else get_rank()
+        settings = _settings_from_package(package)
+        self._assemble_settings(rank, n_ranks, package['order'], settings)
         self._is_fully_distributed = True
         self._root_context = root_context
-        self.order = int(package['order'])
-        self.current_order = self.order
-        self.order_continuation_enabled = True
-        self.n_ranks = n_ranks
 
-        precompacted_mesh = package['precompacted_mesh']
-        self.mesh = precompacted_mesh
-        # 每个 rank 本地重新生成算子（纯函数，只依赖 order/tet_basis_
-        # mode/flux_point_type，见 fr/operators.py），而不是把 root 算好
-        # 的 FROperators 对象整个 pickle 发过来——避免不必要的大数组
-        # 序列化开销（微分算子矩阵与单元数无关，每个 rank 反正都要
-        # 用同一份，本地重算比跨进程传输更便宜）。
+        self.mesh = package['precompacted_mesh']
+        # 每个 rank 本地重新生成算子（纯函数，只依赖阶数），不随包 pickle 传输：微分算子与单元数无关，本地重算比
+        # 跨进程传输便宜
         self.ops = generate_fr_operators(package['order'])
-
         self.partition = package['partition']
-        # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
+        # 隐式步的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
         self._block_jacobi_colors_local = package['cell_colors']
         self._coupling_colors_local = package['cell_colors_d2']
         self.dist_flat_face = package['dist_fc']
-
-        n_sps = precompacted_mesh.n_sps_per_cell
-        self.state = DistributedFRState(self.partition, n_sps)
-        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
-
-        self.convergence_history = ConvergenceHistory()
-        n_vars = self.state.n_vars
-        # 均匀自由流场初始化（同一处真实 bug 修复，见
-        # DistributedFRState.initialize_uniform 文档）——"完全分布式
-        # 加载"路径同样从未初始化过 state，同一个根因。
-        # 初场方向同上（2026-09-17）；aoa/aos 由 root 打进 package 的
-        # freestream 字典，见 distributed_mesh_loader.distributed_mesh_load_v2。来流三要素直接取键：包里恒有它们，
-        # 缺键说明打包有误，不能静默按缺省来流运行（2026-10-19 以前 .get(..., 33.33/1.225/101325)，I-46）
-        from autoflowcfd.core.utils.flow_direction import freestream_velocity
-        _v0 = freestream_velocity(
-            package['freestream']['vel_inf'],
-            package['freestream'].get('aoa_deg', 0.0) or 0.0,
-            package['freestream'].get('aos_deg', 0.0) or 0.0)
-        self.state.initialize_uniform(
-            rho=package['freestream']['rho_inf'],
-            u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
-            p=package['freestream']['p_inf'],
-        )
-        self.halo_exchange = HaloExchange(self.partition, n_sps, n_vars)
-
+        n_sps = self.mesh.n_sps_per_cell
+        self._assemble_state(n_sps)
         self.solver_kwargs = {}
-        # SST/DDES/IDDES/WMLES（2026-09-02 补齐）：root 已经把
-        # wall_distance/h_max/h_wn 算好、按本 rank 的 compact 索引空间
-        # 切好放进 package，这里只需要构造真正的 turb_model（compact
-        # 索引空间外的部分，即 n_local 大小的持久状态）+ 对应的 halo
-        # 交换器，不需要重新算任何几何量。
-        turb_model_name = package['turb_model_name']
-        # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/
-        # 未知的 turb_model_name，而不是静默把 `self.turb_model_name`
-        # 设成该值但 `self.turb_model`/`.wall_model`/`.sgs_model` 都
-        # 留空——`step()` 会静默把它当成 'none' 跑（湍流物理完全缺失，
-        # 不会有任何报错或警告）。
-        from autoflowcfd.core.turbulence.registry import has_transport_equations, require_supported
-        if turb_model_name != require_supported(turb_model_name):
-            raise NotImplementedError(
-                f"DistributedFRSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
-                f"'{turb_model_name}'（应为规范化的大写模型名）。")
-        self.turb_model_name = turb_model_name
-        self._turb_model_upper = turb_model_name
-        # Order Continuation（见 core/mpi/distributed_mesh_loader/fully_distributed.py::
-        # redistribute_fully_distributed_for_new_order 文档）：`self.freestream` 只在 SST/DDES/IDDES 分支才会被设置
-        # （见下方），但阶数切换时需要对**任意** turb_model_name 都能
-        # 拿到自由来流条件（重置 P0 均匀流场需要），这里存一份通用的、
-        # 不依赖 turb_model_name 分支的副本。
-        self._package_freestream = package['freestream']
-        # 与传统模式同一条（见那边说明）：`self.freestream` 与决定物理解的
-        # 参数**无条件**设置（2026-09-25：粘度与 Tu/VR 此前只在 SST/DDES/IDDES
-        # 分支里设，none/les/wmles 运行的 checkpoint 因此写的是替身缺省值）。
-        self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
-        self.mu_molecular = package['mu_molecular']
-        self._turbulence_intensity = package['turbulence_intensity']
-        self.artificial_viscosity_enabled = bool(package['artificial_viscosity_enabled'])
-        self.artificial_viscosity_alpha = float(package['artificial_viscosity_alpha'])
-        from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
-        self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
-        self._viscosity_ratio = package['viscosity_ratio']
-        self._sem_num_eddies = package['sem_num_eddies']
+
+        # 湍流几何量（壁距、DES 网格尺度）由 root 在完整网格上算好、切成本 rank 的紧凑索引空间随包下发；湍流模型
+        # 对象与全部后端同一个构造处（`build_turbulence_models`）——这里的 `self.mesh` 是 `PrecompactedMeshData`，
+        # 没有完整节点坐标，不能像 `init_turbulence_models` 那样现算 DES 网格尺度
+        from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models
+        from autoflowcfd.core.turbulence.registry import has_transport_equations
+
         self.wall_distance_compact = package['wall_distance_compact']
         self.iddes_h_max_compact = package['iddes_h_max_compact']
         self.iddes_h_wn_compact = package['iddes_h_wn_compact']
-        # `step()` 无条件读取 turb_model / ddes_model / sgs_model / wall_model（与主 `__init__` 同一组属性），不适用的为 None
-        self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
-        # 湍流模型对象与全部后端同一个构造处（`build_turbulence_models`）；DES 网格尺度由 root 算好随包下发——这里的
-        # `self.mesh` 是 `PrecompactedMeshData`，没有完整节点坐标，不能像 `init_turbulence_models` 那样现算
-        from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models
-
-        models = build_turbulence_models(self, turb_model_name, self.partition.n_local_cells, n_sps)
+        models = build_turbulence_models(self, self.turb_model_name, self.partition.n_local_cells, n_sps)
         self.turb_model, self.ddes_model, self.sgs_model = models
-
-        if has_transport_equations(turb_model_name):
-            # 壁距交给模型（SST 的 omega 上界按 root 算好的壁距取全局最小、SA 的壁面解点），
-            # 与传统模式同一函数
+        if has_transport_equations(self.turb_model_name):
+            # 壁距交给模型（SST 的 omega 上界按 root 算好的壁距取全局最小、SA 的壁面解点），与传统模式同一函数
             from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
             apply_distributed_wall_distance(self.turb_model, self.wall_distance_compact, self)
 
@@ -229,53 +149,7 @@ class _DistributedFromPackageMixin:
             boundary_ghost_provider=package['boundary_ghost_provider'],
             freestream={**package['freestream'], "mach_ref": package['mach_ref']},
         )
-        # 真实读取 package 里的 time_scheme/dual_time_inner_iter（不再
-        # 硬编码 SSP_RK3）——`build_fully_distributed_rank_package`
-        # 2026-09-02 已接入这两个字段（见 distributed_mesh_loader.py
-        # 模块文档"DUAL_TIME 支持"一节），`.get(...)` 默认值只是兼容
-        # 没有这两个字段的旧 checkpoint/package。
-        time_scheme = require_distributed_scheme(
-            package['time_scheme'])
-        dual_time_steps = package['dual_time_inner_iter']
-        self.time_integrator = TimeIntegrator(
-            scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
-        )
-        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
-        init_production_ramp(self, time_scheme)
-        reset_dual_time_history(self)
-        # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
-        from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-        reset_newton_state(self)
-
-        # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）。
-        # 这两个机制此前在分布式路径上都不存在，因为它们都以"存在一个由
-        # CFL 数决定的逐单元局部步长"为前提，而这条路径当时用全局固定
-        # dt（被记作"已接受的简化"）。局部步长已补齐（见
-        # `_compute_distributed_local_time_step`），这两个机制随之接入，
-        # 语义与单机 `FRSolver` 完全一致：
-        #   * 控制器按**全局**残差范数更新（allreduce 之后的那个值），
-        #     所有 rank 因此得到同一个 CFL 数——这是分布式下唯一正确的
-        #     做法，按各自的局部残差更新会让各 rank 的 CFL 漂移、
-        #     破坏一致性；
-        #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
-        #     需要单独推导 Gamma 的分配方式；时间精确显式推进同样不启用）；
-        # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
-        # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
-        # 构造点此前各写一份且已分叉，见该模块文档）。
-        # 此前这里只对 SSP-RK2/RK3 建控制器，其余方案（DUAL_TIME 的伪
-        # 时间步）走 cfl.py 的替身回退 0.1，与单机的 cfl_start 不一致。
-        from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
-
-        configure_time_stepping(
-            self, time_scheme, time_accurate=bool(package['time_accurate']),
-            adaptive_cfl=bool(package['adaptive_cfl']),
-            cfl_start=package['cfl_start'], cfl_max=package['cfl_max'], cfl_min=package['cfl_min'],
-            low_mach_precond=package['low_mach_precond'])
-        # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
-        # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
-        # （即上一步的结果）是同一个时序。
-        self._prev_mu_t_local = None
+        self._assemble_time_stepping(settings)
 
         barrier()
         return self
