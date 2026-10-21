@@ -73,6 +73,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               checkpoint_interval: int, units: str = "mm", bc_type: tuple = ()) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
+    \f
+
     Args:
         input_file: 输入体网格文件 - .pkl 或 .nas 体网格（需要配合
             --surface-mesh）- 先用 'grid generate-volume' 或 'grid

@@ -85,6 +85,7 @@ def transient_mean(case: str, grid: Optional[str], output: str, warmup_time: flo
                    reference_area: Optional[float], skip_quality_check: bool) -> None:
     """时间平均流场（节点分辨率，导出为 VTK）与气动系数时均。
 
+    \b
     Examples:
         $ autoflowcfd post transient-mean --case transient_results/ --warmup-time 0.05
     """
@@ -151,6 +152,7 @@ def transient_mean(case: str, grid: Optional[str], output: str, warmup_time: flo
 def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: float) -> None:
     """速度与压力脉动的均方根（节点分辨率，导出为 VTK）。
 
+    \b
     Examples:
         $ autoflowcfd post transient-rms --case transient_results/ --warmup-time 0.05
     """
@@ -194,6 +196,7 @@ def transient_psd(case: str, output: str, warmup_time: float, nperseg: Optional[
 
     样本是求解器每个物理步在探针位置求的 FR 解多项式值（`core/probes`），采样间隔即物理时间步长。
 
+    \b
     Examples:
         $ autoflowcfd solve transient mesh.pkl --dt 1e-4 --probe 1.5 0.0 0.5 -o transient_results/
         $ autoflowcfd post transient-psd --case transient_results/ --warmup-time 0.05

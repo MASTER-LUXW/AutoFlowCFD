@@ -52,9 +52,19 @@ def export_vtk(
     boundaries_only: bool,
     high_order: bool,
 ) -> None:
-    """把场数据导出为 VTK 格式。
+    """把 checkpoint 的场导出为 VTK（ParaView 等查看器可视化）。
 
-    把仿真结果导出为 VTK 格式，供 ParaView 或其他兼容 VTK 的查看器可视化。
+    低阶导出取单元积分平均（同时写单元值与按体积加权的节点值），--high-order 按 FR 解多项式导出高阶 Lagrange
+    单元，--boundaries-only 只写命名边界面片。格式按扩展名：.vtk legacy、.vtu XML。
+
+    \b
+    Examples:
+        $ autoflowcfd post export-vtk --case results -o flow.vtu
+        $ autoflowcfd post export-vtk --case results -o flow.vtu --variables velocity --variables q_criterion
+        $ autoflowcfd post export-vtk --case results -o flow_ho.vtu --high-order
+        $ autoflowcfd post export-vtk --case results -o walls.vtu --boundaries-only
+        $ autoflowcfd post export-vtk --case results --checkpoint results/checkpoints/checkpoint_iter_000100.h5 -o t100.vtu
+    \f
 
     Args:
         case: 存有仿真结果的算例目录
@@ -62,33 +72,6 @@ def export_vtk(
         variables: 要导出的变量（velocity、pressure、k、omega、nu_tilde、nut、turbulence、q_criterion）
         grid: 体网格文件路径（.pkl 或 .nas）
         checkpoint: checkpoint 文件路径（.h5）；瞬态算例要导出某一时刻就指定那一时刻的 checkpoint
-
-    Examples:
-        # 基本导出（自动从算例目录探测网格和 checkpoint）
-        $ autoflowcfd post export-vtk --case results/steady/
-
-        # 显式指定网格和 checkpoint
-        $ autoflowcfd post export-vtk \
-          --case results/ \
-          --grid results/grid/sedan.nas \
-          --checkpoint results/checkpoints/checkpoint_0500.h5 \
-          --output flow_field.vtk
-
-        # 导出指定变量
-        $ autoflowcfd post export-vtk \
-          --case results/ \
-          --variables velocity pressure \
-          --output vel_pres.vtk
-
-        # 瞬态：导出某一时刻（指定该时刻的 checkpoint）
-        $ autoflowcfd post export-vtk \
-          --case results/transient/ \
-          --checkpoint results/transient/checkpoints/checkpoint_iter_000100.h5 \
-          --output step_100.vtk
-
-    所需数据：
-        1. 体网格文件（.nas）——提供网格几何
-        2. checkpoint 文件（.h5）——提供解向量（velocity、pressure 等）
 
     Note:
         若未指定 --grid 和 --checkpoint，命令会尝试从算例目录结构里自动

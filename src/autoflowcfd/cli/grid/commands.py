@@ -41,13 +41,16 @@ def grid() -> None:
 
     解析、校验、分析 ANSA .nas 网格文件。
 
+    \b
     Examples:
         # 解析网格文件
         $ autoflowcfd grid parse sedan.nas
 
+    \b
         # 校验网格质量
         $ autoflowcfd grid validate sedan.nas
 
+    \b
         # 显示网格信息
         $ autoflowcfd grid info sedan.nas
     """
@@ -74,6 +77,21 @@ def parse(
 
     从 NAS 格式提取节点、单元和边界信息。
 
+    \b
+    Examples:
+        # 基本解析
+        $ autoflowcfd grid parse sedan.nas
+
+    \b
+        # 自定义输出路径
+        $ autoflowcfd grid parse sedan.nas -o output/grid.json
+
+    \b
+        # 米制坐标的文件
+        $ autoflowcfd grid parse plate.nas --units m
+    
+    \f
+
     Args:
         input_file: .nas 网格文件路径
         output: 输出 JSON 文件路径
@@ -81,16 +99,6 @@ def parse(
         units: 文件坐标单位（mm / m / auto）
         skip_validation: 跳过质量校验
         json_output: 以 JSON 格式输出结果
-
-    Examples:
-        # 基本解析
-        $ autoflowcfd grid parse sedan.nas
-
-        # 自定义输出路径
-        $ autoflowcfd grid parse sedan.nas -o output/grid.json
-
-        # 米制坐标的文件
-        $ autoflowcfd grid parse plate.nas --units m
     """
     from autoflowcfd.grid import NASParser
 
@@ -185,19 +193,23 @@ def validate(
 
     检查长宽比、扭曲度、Jacobian 行列式等网格质量指标。
 
+    \b
+    Examples:
+        # 基本校验
+        $ autoflowcfd grid validate sedan.nas
+
+    \b
+        # 自定义阈值
+        $ autoflowcfd grid validate sedan.nas --threshold-aspect-ratio 500.0
+    
+    \f
+
     Args:
         input_file: .nas 网格文件路径
         report: 质量报告输出文件
         threshold_aspect_ratio: 长宽比阈值
         units: 文件坐标单位（mm / m / auto）
         json_output: 以 JSON 格式输出结果
-
-    Examples:
-        # 基本校验
-        $ autoflowcfd grid validate sedan.nas
-
-        # 自定义阈值
-        $ autoflowcfd grid validate sedan.nas --threshold-aspect-ratio 500.0
     """
     from autoflowcfd.grid import NASParser, GridValidator
 
@@ -265,17 +277,21 @@ def info(input_file: str, units: str, json_output: bool) -> None:
 
     不生成任何文件，快速查看网格信息。
 
-    Args:
-        input_file: .nas 网格文件路径
-        units: 文件坐标单位（mm / m / auto）
-        json_output: 以 JSON 格式输出结果
-
+    \b
     Examples:
         # 快速查看
         $ autoflowcfd grid info sedan.nas
 
+    \b
         # JSON 输出
         $ autoflowcfd grid info sedan.nas --json
+    
+    \f
+
+    Args:
+        input_file: .nas 网格文件路径
+        units: 文件坐标单位（mm / m / auto）
+        json_output: 以 JSON 格式输出结果
     """
     from autoflowcfd.grid import NASParser
 

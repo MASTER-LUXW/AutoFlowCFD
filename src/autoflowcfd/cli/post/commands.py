@@ -30,10 +30,12 @@ def post() -> None:
 
     分析和可视化仿真结果。
 
+    \b
     Examples:
         # 计算气动系数
         $ autoflowcfd post coefficients --case results/
 
+    \b
         # 导出 VTK
         $ autoflowcfd post export-vtk --case results/
     """
@@ -56,7 +58,7 @@ def post() -> None:
 @click.option("--moment-center", nargs=3, type=float, default=(0.0, 0.0, 0.0), show_default=True,
               help="力矩参考点 x y z (m)，车辆通常取前后轴中点在地面上的投影")
 @click.option("--groups", multiple=True,
-              help="参与积分的 WALL 组名（可重复给出；缺省为全部 WALL 组，例如要排除地面时只给车身各组）")
+              help="参与积分的固壁组名（可重复给出；缺省为全部物理无滑移固壁组，例如要排除地面时只给车身各组）")
 @click.option("--threads", type=int, default=-1, help="CPU 后端 numba 并行线程数")
 @click.option("--skip-quality-check", is_flag=True,
               help="跳过重建时的网格质量门检查（原求解靠该选项才跑得起来的网格，后处理同样需要跳过；不建议，"
@@ -82,6 +84,7 @@ def coefficients(
     在 checkpoint 保存的 FR 解（全部解点）上重建求解器（网格、面几何、状态），用与 `solve` 收尾同一个函数
     `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr` 积分壁面压力与粘性力。
 
+    \b
     Examples:
         $ autoflowcfd post coefficients --case results/ --reference-area 2.2
     """
@@ -137,13 +140,16 @@ def report(case: str, checkpoint: Optional[str], output: str) -> None:
 
     由 checkpoint 保存的收敛历史（每次迭代的残差 / 系数 / CFL）与求解参数构建，包含收敛判定与气动系数。
 
+    \b
+    Examples:
+        $ autoflowcfd post report --case results/
+    
+    \f
+
     Args:
         case: 算例目录
         checkpoint: 要生成报告的 checkpoint（默认取最新一个）
         output: 输出报告文件
-
-    Examples:
-        $ autoflowcfd post report --case results/
     """
     logger.info(f"Generating report for case: {case}")
 
@@ -192,18 +198,22 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
 
     可视化残差收敛历史及其他监控变量。
 
+    \b
+    Examples:
+        # 绘制残差
+        $ autoflowcfd post convergence --case results/
+
+    \b
+        # 保存到文件
+        $ autoflowcfd post convergence --case results/ -o conv.png
+    
+    \f
+
     Args:
         case: 算例目录
         checkpoint: 要绘制的 checkpoint（默认取最新一个）
         output: 输出图片文件
         variables: 要绘制的变量（'residual' 和/或 'cfl' 和/或 'coefficients'）
-
-    Examples:
-        # 绘制残差
-        $ autoflowcfd post convergence --case results/
-
-        # 保存到文件
-        $ autoflowcfd post convergence --case results/ -o conv.png
     """
     logger.info(f"Plotting convergence for case: {case}")
 

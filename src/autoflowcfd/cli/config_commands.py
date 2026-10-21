@@ -24,10 +24,12 @@ def config() -> None:
     
     创建、验证和管理 YAML 配置文件。
     
+    \b
     Examples:
         # 创建配置模板
         $ autoflowcfd config init --template steady
         
+    \b
         # 验证配置
         $ autoflowcfd config validate simulation.yaml
     """
@@ -44,16 +46,21 @@ def init(template: str, output: str) -> None:
     
     为稳态或瞬态仿真创建带有合理默认值的 YAML 配置模板。
     
-    Args:
-        template: 模板类型（稳态/瞬态）
-        output: 输出文件路径
-    
+
+    \b
     Examples:
         # 稳态模板
         $ autoflowcfd config init --template steady -o steady_config.yaml
         
+    \b
         # 瞬态模板
         $ autoflowcfd config init --template transient -o transient_config.yaml
+    
+    \f
+
+    Args:
+        template: 模板类型（稳态/瞬态）
+        output: 输出文件路径
     """
     # 模板由配置类的字段与默认值逐项生成（`config/loader.py::ConfigLoader.save_template`，唯一实现）。
     # 2026-10-05 以前这里另有两份手写模板：默认值过时（CFL 0.1/5.0、收敛容差 1e-6），瞬态模板的
@@ -84,16 +91,21 @@ def show(config_file: str, json_output: bool) -> None:
     
     加载并显示 YAML 配置文件，并进行验证。
     
-    Args:
-        config_file: YAML 配置文件路径
-        json_output: 以 JSON 格式输出
-    
+
+    \b
     Examples:
         # 显示配置
         $ autoflowcfd config show simulation.yaml
         
+    \b
         # JSON 输出
         $ autoflowcfd config show simulation.yaml --json
+    
+    \f
+
+    Args:
+        config_file: YAML 配置文件路径
+        json_output: 以 JSON 格式输出
     """
     from autoflowcfd.config import ConfigLoader
     
@@ -140,16 +152,21 @@ def validate(config_file: str, json_output: bool) -> None:
     
     检查配置文件是否存在语法错误和无效值。
     
-    Args:
-        config_file: YAML 配置文件路径
-        json_output: 以 JSON 格式输出
-    
+
+    \b
     Examples:
         # 验证配置
         $ autoflowcfd config validate simulation.yaml
         
+    \b
         # JSON 输出
         $ autoflowcfd config validate simulation.yaml --json
+    
+    \f
+
+    Args:
+        config_file: YAML 配置文件路径
+        json_output: 以 JSON 格式输出
     """
     from autoflowcfd.config import ConfigLoader, TransientConfig
 

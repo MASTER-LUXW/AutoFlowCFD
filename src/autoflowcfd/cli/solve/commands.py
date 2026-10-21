@@ -108,7 +108,7 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default=None,
               help='续算的输出目录（checkpoint 与结果）；不给时为 checkpoint 所在算例目录')
 @click.option('--reset-turbulence', is_flag=True,
-              help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（此前失控、未恢复），或缺少湍流场 / 涡粘时，'
+              help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（湍流场曾失控、未恢复），或缺少湍流场 / 涡粘时，'
                    '把湍流场重置为来流值再续算（平均流保留）。不给时这两种 checkpoint 拒绝续算并报告')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
@@ -119,17 +119,17 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
            gpu_device: Optional[int], dt: Optional[float], tol: float, output_dir: Optional[str],
            reset_turbulence: bool) -> None:
-    """从检查点真正恢复并继续求解（不是只打印元信息）。
+    """从 checkpoint 续算。
 
-    重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
-    构造参数（input_file/order/turbulence_model/backend/自由来流条件，
-    见 checkpoint_io/write.py::write_checkpoint 文档），用它们重新走一遍
-    load_mesh_for_solver + FRSolver(...) 构造出一个全新求解器，再用
-    checkpoint 里完整保存的 (n_cells,n_sps,n_vars) 状态（metadata['fields']
-    ['U_sps']，不是拍扁过的单元中心近似）整体替换掉初始化时生成的均匀
-    流场，然后调用 solver.solve() 继续迭代——此前这里只是把 checkpoint
-    读出来打几行日志，从不重建求解器也不继续迭代，是伪装成可用命令的
-    stub（V2.0 二次评审 CL-01 发现）。
+    按 checkpoint 记录的网格（输出目录的 volume_mesh.pkl）、阶数、湍流模型与全部物理参数重建求解器，恢复解点状态、
+    湍流场、收敛历史与时间状态后继续迭代 `--max-iter` 步。CFL、步数、容差等数值参数可以重新给出；`--time-scheme`
+    只在两个稳态格式之间切换。
+
+    \b
+    Examples:
+        $ autoflowcfd solve resume results/checkpoints/checkpoint_iter_000500.h5 --max-iter 1000
+        $ mpirun -np 8 autoflowcfd solve resume results/checkpoints/checkpoint_iter_000500.h5 --n-ranks 8
+    \f
 
     Args:
         checkpoint_file: checkpoint 文件路径（solve steady/transient 产出）
@@ -277,8 +277,8 @@ def _resume_distributed(
 def status(backend: bool) -> None:
     """查看求解器状态：可用后端，或 `solve steady` / `solve transient` 支持的阶数、时间格式与湍流模型。
 
-    能力清单直接读两个命令自己的选项定义（唯一来源）。2026-10-20 以前写死在这里且已过时（"Orders: P1, P2, P3"
-    而稳态支持 P0，还列出了已删除的格式）。
+    \f
+    能力清单直接读两个命令自己的选项定义（唯一来源）。
 
     Args:
         backend: 列出可用后端

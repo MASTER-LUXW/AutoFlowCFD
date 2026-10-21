@@ -85,25 +85,24 @@ def generate_volume(
     mu_molecular: float = MU_MOLECULAR,
     units: str = "mm",
 ) -> None:
-    """从面网格 .nas 文件生成体网格并导出。
+    """从面网格 .nas 生成体网格并导出为 .nas。
 
-    运行完整的网格流水线：解析面网格 -> 校验面网格质量 -> 生成混合体网格
-    （边界层挤出 + 笛卡尔背景网格）-> 校验体网格质量 -> 导出为 Nastran
-    .nas。无论质量报告是否通过，体网格都会被导出——一个真正无法收敛的
-    case（见 mesh_repair.py 里记录的已知极限）也应该产出一个可供检查或
-    转交的网格文件，而不是什么都不产出。真正拦截"质量不过关的网格不能
-    求解"的地方是 `autoflowcfd solve steady`。
+    解析面网格 -> 校验面网格质量 -> 边界层棱柱挤出 + tetgen 核心区四面体 -> 体网格质量报告 -> 导出（与输入同一
+    坐标单位）。质量报告不通过时照常导出（便于检查或手工修改），求解命令在迭代前用质量门拦截。
+
+    \b
+    Examples:
+        $ autoflowcfd grid generate-volume car.nas -o car_volume.nas --bl-layers 6
+        $ autoflowcfd grid generate-volume car.nas -o car_volume.nas --target-yplus 1 --ref-velocity 40 --ref-length 4.5
+    \f
 
     Args:
         input_file: 面网格 .nas 文件路径
         output: 输出体网格 .nas 文件路径
         growth_rate: 边界层增长率
         min_cell_size: 最小单元尺寸 (m)
-        bl_layers: 边界层阶段挤出多少层之后，剩余体积直接由边界层自身
-            外表面交给 tetgen 填充（见
-            mesh_background_merge._build_merged_mesh——现在已经没有单独
-            的结构化"过渡层"阶段了，见 ProjectFiles Part13 P49）；
-            None 时默认为 8
+        bl_layers: 边界层挤出层数，之后剩余体积由边界层外表面交给 tetgen 填充
+            （`mesh_background_merge._build_merged_mesh`）；None 时取生成器缺省（8）
         skip_quality_report: 跳过质量报告的计算/打印（导出本身始终照常
             进行）
         json_output: 以 JSON 格式输出结果
@@ -114,7 +113,7 @@ def generate_volume(
         first_layer_height / target_yplus / ref_velocity / ref_length / rho_inf / mu_molecular: 边界层第一层
             高度，直接给出或由目标 y+ 推出（`grid/mesh_gen/extrusion/first_layer.py`）
         units: 输入面网格的坐标单位（mm / m / auto）；导出的体网格 .nas 用同一单位（auto 时为判定出的单位），
-            内部与 .pkl 一律为米。此前导出恒为毫米，米制输入的往返因此差 1000 倍
+            内部与 .pkl 一律为米
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
@@ -295,6 +294,17 @@ def import_volume(
     VolumeMeshData，与 'autoflowcfd solve steady'/'transient' 已经直接
     消费的缓存格式相同。
 
+    \b
+    Examples:
+        # 导入、按需修复、并准备求解
+        $ autoflowcfd grid import-volume car_volume.nas -s car_surface.nas -o car_volume.pkl
+
+    \b
+        # 然后直接从缓存求解
+        $ autoflowcfd solve steady car_volume.pkl
+    
+    \f
+
     Args:
         volume_mesh_file: 体网格 .nas 文件路径
         surface_mesh: 原始面网格 .nas 文件路径
@@ -305,13 +315,6 @@ def import_volume(
         json_output: 以 JSON 格式输出结果
         bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
         units: 体网格与面网格的坐标单位（mm / m / auto，两者同一单位）
-
-    Examples:
-        # 导入、按需修复、并准备求解
-        $ autoflowcfd grid import-volume car_volume.nas -s car_surface.nas -o car_volume.pkl
-
-        # 然后直接从缓存求解
-        $ autoflowcfd solve steady car_volume.pkl
     """
     from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
     from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options

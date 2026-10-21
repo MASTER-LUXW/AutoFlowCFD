@@ -29,13 +29,16 @@ def utils() -> None:
     
     系统实用工具和诊断工具。
     
+    \b
     Examples:
         # 检查版本
         $ autoflowcfd utils version
         
+    \b
         # 运行诊断
         $ autoflowcfd utils doctor
         
+    \b
         # 性能基准测试
         $ autoflowcfd utils benchmark --grid model.nas
     """
@@ -49,15 +52,20 @@ def version(json_output: bool) -> None:
     
     显示 AutoFlowCFD 版本和构建信息。
     
-    Args:
-        json_output: 以 JSON 格式输出
-    
+
+    \b
     Examples:
         # 基本版本
         $ autoflowcfd utils version
         
+    \b
         # 详细 JSON 输出
         $ autoflowcfd utils version --json
+    
+    \f
+
+    Args:
+        json_output: 以 JSON 格式输出
     """
     from autoflowcfd import __version__
     
@@ -138,15 +146,19 @@ def doctor(json_output: bool) -> None:
 
     检查系统环境中是否存在潜在问题和缺失的依赖项。
 
-    Args:
-        json_output: 以 JSON 格式输出
-
+    \b
     Examples:
         # 运行诊断
         $ autoflowcfd utils doctor
 
+    \b
         # JSON 输出
         $ autoflowcfd utils doctor --json
+    
+    \f
+
+    Args:
+        json_output: 以 JSON 格式输出
     """
     if not json_output:
         logger.info("正在运行环境诊断...")
@@ -267,14 +279,15 @@ def benchmark(
 
     网格加载（含质量门）、边界条件与求解器构造与 `solve steady` 是同一条路径（`load_mesh_for_solver` +
     `build_single_node_solver`），计时的是 `solve()` 的完整求解步（粘性、湍流、隐式线性求解都在内，预热一步后
-    计时 `iterations` 步）。分项：残差求值的次数与总耗时（求解器残差方法上计时）、隐式格式每步的 GMRES 迭代数与
-    矩阵向量积次数（`_newton_last_info`），其余（线性求解与预处理、湍流、步长、监控）为总耗时减去残差耗时——
-    JFNK 的矩阵向量积本身就是残差求值，按调用拆分不重叠。2026-10-20 以前只计时一次无粘残差求值，却以
-    "计算速率 iter/min"报告。
+    计时 `iterations` 步）。分项：残差求值的次数与总耗时、隐式格式每步的 GMRES 迭代数与矩阵向量积次数，其余
+    （线性求解与预处理、湍流、步长、监控）为总耗时减去残差耗时——JFNK 的矩阵向量积本身就是残差求值，按调用拆分
+    不重叠。输入是体网格（`grid generate-volume` 的输出或 .pkl）。
 
-    2026-10-19（I-5）改动：此前输入是面网格、命令内部先生成体网格（tetgen 耗时算进"网格加载"），残差调用不传
-    边界幽灵态提供者、由核心函数静默换成零梯度外插——计时的是"边界不可见"的残差，与真实求解不是同一个计算。
-    体网格请先用 `grid generate-volume` 生成。
+    \b
+    Examples:
+        $ autoflowcfd utils benchmark volume_mesh.pkl --backend cpu
+        $ autoflowcfd utils benchmark volume_mesh.pkl -t newton-krylov -m sa -p 2 -n 20
+    \f
 
     Args:
         grid_file: 体网格（.pkl，或 GRID+CTETRA/CPENTA 的 .nas 并给出 --surface-mesh）
@@ -287,10 +300,7 @@ def benchmark(
         time_scheme: 时间格式（rk3 / newton-krylov）
         turbulence_model: 湍流模型
         json_output: 以 JSON 格式输出
-
-    Examples:
-        $ autoflowcfd utils benchmark volume_mesh.pkl --backend cpu
-        $ autoflowcfd utils benchmark volume_mesh.pkl -t newton-krylov -m sa -p 2 -n 20
+        bc_type: `--bc-type 组名=类型`（可重复）
     """
     import time as _time
 

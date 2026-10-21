@@ -50,49 +50,24 @@ from .utils_commands import utils
 @click.version_option(version=__version__, prog_name="AutoFlowCFD")
 @click.option("--verbose", "-v", is_flag=True, help="启用详细输出")
 def cli(verbose: bool) -> None:
-    """AutoFlowCFD - 高性能汽车外流场 CFD 求解器。
-    
-    AutoFlowCFD 是专注于汽车外流场仿真的开源计算流体力学软件。
-    
-    主要特性:
-        - FR（通量重构）高阶离散方法
-        - SST k-ω、DDES、WMLES、LES 漫流模型体系
-        - CPU (Numba) 和 GPU (CUDA) 计算后端
-        - ANSA .nas 网格文件支持
-        - 完善的后处理工具
-    
+    """AutoFlowCFD - 汽车外流场高阶 CFD 求解器（通量重构 FR，P0~P3）。
+
+    \b
     命令组:
-        grid     网格处理（解析、验证、信息、转换、生成体网格、导入体网格）
-        solve    求解器命令（稳态、瞬态、恢复、状态）
-        post     后处理（气动系数、VTK导出、报告等）
-        config   配置管理（初始化、查看、验证）
-        utils    实用工具（版本、环境检查、性能测试）
+        grid     网格：解析、校验、信息、转换、生成体网格、导入体网格
+        solve    求解：稳态、瞬态、续算、状态
+        post     后处理：气动系数、VTK 导出、收敛曲线、报告、瞬态统计与压力谱
+        config   配置文件：生成模板、查看、校验
+        utils    工具：环境检查、性能基准
 
-    示例:
-        # 解析网格文件
-        $ autoflowcfd grid parse sedan.nas
+    \b
+    典型流程（.nas 坐标缺省按毫米，米制文件加 --units m）:
+        $ autoflowcfd grid generate-volume car.nas -o car_volume.nas
+        $ autoflowcfd solve steady car_volume.nas --surface-mesh car.nas -o results
+        $ autoflowcfd post coefficients --case results --reference-area 2.2
+        $ autoflowcfd post export-vtk --case results -o flow.vtu
 
-        # 从面网格生成体网格（求解前必需步骤）
-        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas
-
-        # 运行稳态仿真（输入必须为 .pkl 体网格）
-        $ autoflowcfd solve steady sedan_volume.pkl --backend gpu --order 3
-
-        # 运行瞬态 DES 仿真
-        $ autoflowcfd solve transient sedan_volume.pkl --physical-time 0.3
-        
-        # 计算气动系数
-        $ autoflowcfd post coefficients --case results/
-        
-        # 生成配置模板
-        $ autoflowcfd config init --template steady
-        
-        # 检查环境
-        $ autoflowcfd utils doctor
-    
-    使用以下命令查看特定命令的帮助信息:
-        $ autoflowcfd <command> --help
-        $ autoflowcfd <command> <subcommand> --help
+    各命令的选项：autoflowcfd <命令组> <命令> --help
     """
     # 日志一律走 stderr（err=True），不写 stdout：本 CLI 的多个子命令支持
     # `--json`/`-j` 输出机器可解析的 JSON 到 stdout，供下游 Agent 工具化
