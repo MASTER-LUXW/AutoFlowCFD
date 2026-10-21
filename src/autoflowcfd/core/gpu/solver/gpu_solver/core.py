@@ -127,8 +127,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         NONE/SST/SA/DDES/IDDES/WMLES/LES 均已实现（SST 为 core/gpu/turbulence/gpu_turbulence_sst.py；
         DES 长度尺度、WALE、WMLES 壁面模型是数组模块无关的同一份实现 core/turbulence/des/、sgs.py、
         wmles/，以 xp=cupy 调用）。k/omega 输运（gpu_scalar_transport.py）与 CPU 侧同样只有 isfinite
-        归零这一道防线（离群值抑制"机制3"已于 2026-09-19 在两侧一并删除——真实网格消融对照证明它无效，
-        见 fr_residual/inviscid.py），两侧对称。
+        归零这一道防线，两侧对称。
         GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
         无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
         公式，但真正的端到端 GPU 冒烟测试需要用户在有 GPU 的环境上补做。

@@ -209,7 +209,4 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
 
     residual += correction
     del correction
-
-    # 机制3 已删除，依据见 `fr_residual/inviscid.py` 同一处的完整记录
-    # （真实网格消融对照：触发 15 次但残差轨迹只差 ~1e-10、结局不变）。
     return residual

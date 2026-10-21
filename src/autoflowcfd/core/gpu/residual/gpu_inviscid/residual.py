@@ -139,9 +139,4 @@ def compute_inviscid_residual_fr_gpu(
     )
 
     residual = residual + correction
-
-    # 机制3（异常残差抑制）已于 2026-09-19 删除，完整依据见
-    # `fr_residual/inviscid.py` 同一处。**对 GPU 路径还额外省掉一次
-    # `GPU -> CPU -> GPU` 往返**：那一步是为了复用 CPU 的 numba 实现而
-    # 把整个残差场与守恒场都拷回主机再拷回来。
     return cp.asnumpy(residual) if input_is_numpy else residual
