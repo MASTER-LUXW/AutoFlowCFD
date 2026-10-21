@@ -86,9 +86,9 @@ export_solver_highorder_vtk(solver, "flow_ho.vtu", fields=["velocity", "pressure
 不带解的网格（检查生成的体网格、边界分组）用 `grid convert`：
 
 ```bash
-autoflowcfd grid convert cube/cube_volume.nas --units m -f vtk -o cube_mesh.vtu   # 体单元 + 外部面的组号
-autoflowcfd grid convert examples/cube_demo/cube_demo.nas --units m -f stl       # 每个边界组一个 solid
-autoflowcfd grid convert cube/cube_volume.nas --units m -f cgns                  # CGNS/HDF5，ZoneBC 每组一个 Family
+autoflowcfd grid convert cube/cube_volume.nas -f vtk -o cube_mesh.vtu   # 体单元 + 外部面的组号
+autoflowcfd grid convert examples/cube_demo/cube_demo.nas -f stl       # 每个边界组一个 solid
+autoflowcfd grid convert cube/cube_volume.nas -f cgns                  # CGNS/HDF5，ZoneBC 每组一个 Family
 ```
 
 ---

@@ -32,7 +32,7 @@ from autoflowcfd import AutoFlowCFDAPI
 
 api = AutoFlowCFDAPI()
 
-surface = api.load_grid("car_surface.nas")                 # NAS 面网格（三角形）
+surface = api.load_grid("car_surface.nas", units="mm")     # NAS 面网格（三角形）
 volume_mesh = api.generate_volume_mesh(surface, bl_layers=6)
 
 result = api.run_steady(volume_mesh, order=2, turbulence="sa", time_scheme="newton-krylov", vel_inf=40.0)
@@ -50,19 +50,20 @@ api.export_vtk("result.vtu", high_order=True)               # ParaView 打开
 
 | 方法 | 说明 |
 |---|---|
-| `load_grid(grid_file, encoding="UTF-8", validate=True)` | 解析 NAS 面网格，返回 `GridData`。`validate` 时跑 `GridValidator`（与 `grid validate` 同一实现），不通过只记警告 |
+| `load_grid(grid_file, units="mm", bc_types=None, encoding="UTF-8", validate=True)` | 解析 NAS 面网格，返回 `GridData`。`units`：mm / m / auto（同 `--units`，内部一律米）；`bc_types`：`{组名: 类型}` 覆盖按组名识别的结果（同 `--bc-type`）；`validate` 时跑 `GridValidator`（与 `grid validate` 同一实现），不通过只记警告 |
 | `validate_grid(grid_data)` | 面网格质量校验结果字典：`passed`、`summary`、长宽比/扭曲度/Jacobian 统计 |
 | `get_grid_info(grid_data)` | 节点数、单元数、边界组 |
-| `generate_volume_mesh(grid_data, **kwargs)` | 由面网格生成体网格，返回 `VolumeMeshData`，与 `grid generate-volume` 同一入口（见下） |
+| `generate_volume_mesh(grid_data, *, first_layer_height=None, target_yplus=None, ref_velocity=None, ref_length=None, rho_inf=1.225, mu_molecular=1.8e-5, **kwargs)` | 由面网格生成体网格，返回 `VolumeMeshData`，与 `grid generate-volume` 同一入口（见下） |
 | `validate_volume_mesh(volume_mesh)` | 体网格质量报告（`MeshQualityReport`，即求解前质量门的判据）：`.passed`、`.summary()` |
 | `get_volume_mesh_info(volume_mesh)` | 节点数、单元数、单元类型 |
 
 `generate_volume_mesh` 的参数：
-- 可用参数为 `growth_rate`、`min_cell_size`、`max_cell_size`、`bl_layers`、`bl_only`、`core_only`、`output`、`first_layer_height`。
+- 第一层高度直接给出（`first_layer_height`，米）或由目标 y+ 推出（`target_yplus` + `ref_velocity` + `ref_length`），二选一，与 CLI 同一个函数。
+- 其余参数为 `growth_rate`、`min_cell_size`、`max_cell_size`、`bl_layers`、`bl_only`、`core_only`。
 - 含义与 `grid generate-volume` 的同名选项一致。
 - 传入未知参数时报 `TypeError`。
 
-边界条件类型在生成体网格时按面网格的属性名识别。名字识别不了的组，用 `grid generate-volume --bc-type 组名=类型` 生成。
+边界条件类型按面网格的属性名识别；名字识别不了的组在 `load_grid(..., bc_types={...})` 里指定（同 CLI `--bc-type`）。
 
 ---
 

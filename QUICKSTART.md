@@ -32,7 +32,7 @@
 
 | 目录 | 内容 |
 |------|------|
-| `examples/cube_demo/` | `cube_demo.nas`（圆角立方体 + 风洞的面网格，4 组：inlet / outlet / tunnel / body，米制） |
+| `examples/cube_demo/` | `cube_demo.nas`（圆角立方体 + 风洞的面网格，4 组：inlet / outlet / tunnel / body，坐标为毫米） |
 | `examples/ahmed_demo/` | `ahmed_body_demo.nas`（Ahmed 体 + 地面 + 风洞的面网格，5 组），`config_example.yaml`（配置文件示例） |
 | `examples/plate_demo/` | `plate_demo.nas`（平板面网格） |
 
@@ -63,11 +63,12 @@ poetry run autoflowcfd utils doctor       # 逐项核对 pyproject 声明的依�
 ### 1. 面网格 -> 体网格
 
 ```bash
-poetry run autoflowcfd grid info examples/cube_demo/cube_demo.nas --units m
-poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --units m \
+poetry run autoflowcfd grid info examples/cube_demo/cube_demo.nas
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas \
     -o cube/cube_volume.nas
 ```
 
+`.nas` 的缺省单位是毫米（`--units mm`），米制文件加 `--units m`，`grid info` 打印的包围盒（米）可用来核对。
 `generate-volume` 生成边界层棱柱 + 四面体混合网格，导出为体网格 `.nas`（与输入同一单位），并打印质量报告。常用选项：
 `--bl-layers`（边界层层数）、`--first-layer-height`（第一层高度，米）或 `--target-yplus 1 --ref-velocity 40
 --ref-length 1`（按目标 y+ 推出第一层高度）、`--max-cell-size`、`--bc-type 组名=类型`（组名识别不了时指定边界类型）。
@@ -75,7 +76,7 @@ poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --u
 ### 2. 稳态求解
 
 ```bash
-poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas --units m \
+poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas \
     --order 1 --turbulence-model sa --time-scheme newton-krylov --vel-inf 40 --max-iter 200 -o cube/steady
 ```
 
@@ -150,7 +151,7 @@ output_dir: ./results
 from autoflowcfd import AutoFlowCFDAPI
 
 api = AutoFlowCFDAPI()
-surface = api.load_grid("examples/cube_demo/cube_demo.nas", units="m")
+surface = api.load_grid("examples/cube_demo/cube_demo.nas", units="mm")
 volume_mesh = api.generate_volume_mesh(surface)
 
 # 参数名就是配置文件字段（docs/CONFIGURATION_GUIDE.md）；求解前跑与 CLI 同一道网格质量门

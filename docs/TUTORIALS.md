@@ -21,14 +21,14 @@
 ## 教程 1：立方体绕流稳态 RANS
 
 `examples/cube_demo/cube_demo.nas`：带圆角的立方体（边长 1 m）放在风洞里，4 个边界组 inlet / outlet / tunnel / body，
-坐标单位米。
+坐标单位毫米（`.nas` 的缺省单位）。
 
 ```bash
 # 1. 体网格（边界层棱柱 + 四面体），打印质量报告
-poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --units m -o cube/cube_volume.nas
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas -o cube/cube_volume.nas
 
 # 2. 稳态 SA，P0 -> P1 逐阶爬坡，隐式 Newton-Krylov
-poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas --units m \
+poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas \
     --order 1 --turbulence-model sa --time-scheme newton-krylov --max-iter 300 --checkpoint-interval 20 -o cube/steady
 ```
 
@@ -133,7 +133,7 @@ mpirun -np 4 poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --b
 from autoflowcfd import AutoFlowCFDAPI
 
 api = AutoFlowCFDAPI()
-volume_mesh = api.generate_volume_mesh(api.load_grid("examples/cube_demo/cube_demo.nas", units="m"))
+volume_mesh = api.generate_volume_mesh(api.load_grid("examples/cube_demo/cube_demo.nas", units="mm"))
 
 rows = []
 for aoa in (0.0, 5.0, 10.0):

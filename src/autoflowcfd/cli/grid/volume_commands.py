@@ -30,19 +30,16 @@ _BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按�
 
 
 def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu):
-    """`--first-layer-height` 或 `--target-yplus`（二选一）-> 第一层高度；都不给时 None（生成器取默认）。"""
-    if target_yplus is None:
-        if ref_velocity is not None or ref_length is not None:
-            raise click.UsageError("--ref-velocity/--ref-length 只用于 --target-yplus")
-        return first_layer_height
-    if first_layer_height is not None:
-        raise click.UsageError("--first-layer-height 与 --target-yplus 只能给一个")
-    if ref_velocity is None or ref_length is None:
-        raise click.UsageError("--target-yplus 需要 --ref-velocity 与 --ref-length")
-    from autoflowcfd.grid.mesh_gen.extrusion.first_layer import first_layer_height_for_yplus
+    """`--first-layer-height` 或 `--target-yplus`（二选一）-> 第一层高度（`first_layer.resolve_first_layer_height`，
+    与 Python API 共用）；参数组合不对时转成命令行用法错误。"""
+    from autoflowcfd.grid.mesh_gen.extrusion.first_layer import resolve_first_layer_height
 
-    height = first_layer_height_for_yplus(target_yplus, ref_velocity, ref_length, rho, mu)
-    logger.info(f"目标 y+={target_yplus:g}（U={ref_velocity:g} m/s, L={ref_length:g} m）-> 第一层高度 {height:.4g} m")
+    try:
+        height = resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu)
+    except ValueError as e:
+        raise click.UsageError(f"{e}（--first-layer-height / --target-yplus / --ref-velocity / --ref-length）")
+    if target_yplus is not None:
+        logger.info(f"目标 y+={target_yplus:g}（U={ref_velocity:g} m/s, L={ref_length:g} m）-> 第一层高度 {height:.4g} m")
     return height
 
 

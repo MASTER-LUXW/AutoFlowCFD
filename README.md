@@ -56,9 +56,9 @@ cd AutoFlowCFD
 poetry install                 # 另有 -E gpu（CuPy）、-E mpi（mpi4py、pymetis）、-E perf（psutil）
 poetry run autoflowcfd utils doctor
 
-# 面网格 -> 体网格 -> 稳态求解 -> 后处理（examples/cube_demo 为米制）
-poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --units m -o cube/cube_volume.nas
-poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas --units m \
+# 面网格 -> 体网格 -> 稳态求解 -> 后处理（examples/cube_demo 的坐标为毫米，即 .nas 的缺省单位）
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas -o cube/cube_volume.nas
+poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas \
     --order 1 --turbulence-model sa --time-scheme newton-krylov --vel-inf 40 --max-iter 200 -o cube/steady
 poetry run autoflowcfd post coefficients --case cube/steady --reference-area 1.0
 poetry run autoflowcfd post export-vtk --case cube/steady -o cube/steady/flow.vtu

@@ -21,7 +21,7 @@
 ```python
 from autoflowcfd.grid import NASParser, GridValidator
 
-surface = NASParser("examples/cube_demo/cube_demo.nas", units="m").parse()
+surface = NASParser("examples/cube_demo/cube_demo.nas", units="mm").parse()
 report = GridValidator(surface).validate()          # passed / summary / aspect_ratio / skewness / jacobian
 print(surface.node_count, surface.cell_count, sorted(surface.boundaries.groups), report["passed"])
 ```
