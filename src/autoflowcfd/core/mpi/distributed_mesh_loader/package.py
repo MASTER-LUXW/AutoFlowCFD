@@ -4,10 +4,9 @@
 紧凑包再发送，取代此前"发全局网格、各 rank 自己切"的做法。
 """
 
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import numpy as np
 
-from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
+from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
 from typing import Optional
 
 
@@ -31,31 +30,14 @@ class PrecompactedMeshData:
     量级的数组，本设计让每个非 root rank 只持有自己 local+halo 那一份，
     不是全局那一份）。
 
-    face_connectivity 故意留空（`None`）；`face_flux_points` 是一个
-    非 None 的哨兵值，不是真实数据（见下方"哨兵值说明"）：非 root rank 上的全部计算
-    （`DistributedMeshAdapter`/
-    `distributed_compute_inviscid_residual`/`_viscous_residual` 全部
-    只通过 `dist_fc`（压缩面几何，由 root 预先构建、随本对象一起下发）
-    访问面数据，从未读取 `mesh.face_connectivity`/`mesh.face_flux_points`
-    本身——边界幽灵态与湍流模型需要的全局量（壁距、IDDES 网格尺度）都由 root 在完整网格上算好、切成紧凑索引空间随包下发。
-
-    哨兵值说明：`compute_inviscid_residual_fr`/`compute_viscous_
-    residual` 入口处各有一个 `mesh.face_connectivity is None or mesh.
-    face_flux_points is None` 的"存在性"检查（不是内容检查——已核实
-    这两个函数被 `DistributedMeshAdapter` 包裹调用时，真正的面几何数据
-    全部来自显式传入的 `flat_face_override`/`dist_fc`，从未真正读取
-    `mesh.face_flux_points` 的内容，"传统模式"下这个检查能通过纯粹是
-    因为 `local_mesh` 恰好是带着真实 `face_flux_points` 的完整全局
-    网格，不代表这个属性的内容被使用）——`face_connectivity` 走
-    `DistributedMeshAdapter.face_connectivity` 属性单独返回
-    `self.dist_fc`（非 None，真实数据），只有 `face_flux_points` 这个
-    检查还需要一个非 None 值才能通过；这里给它一个明确标注"仅哨兵、
-    非真实数据"的占位字符串，不给 `None`（会让上面这个良性检查失败）
-    也不给看起来像真实数据的对象（避免误导未来的读者以为这里有真实
-    面通量点几何）。
+    不持有全局面表（`face_connectivity` 为 None，没有 `face_flux_points`）：非 root rank 上的全部计算
+    （`DistributedMeshAdapter` / `distributed_compute_inviscid_residual` / `_viscous_residual`）只通过 `dist_fc`
+    （压缩面几何，由 root 预先构建、随本对象一起下发，作为 `flat_face_override` 传给残差函数）访问面数据；
+    边界幽灵态与湍流模型需要的全局量（壁距、IDDES 网格尺度）都由 root 在完整网格上算好、切成紧凑索引空间随包下发。
+    2026-10-21（I-104）以前 `face_flux_points` 是一个字符串哨兵，只为通过残差函数入口一个与
+    `flat_face_override` 无关的存在性检查；该检查已移到只在没有 `flat_face_override` 时才走的
+    `get_flat_face_geometry`。
     """
-
-    _FACE_FLUX_POINTS_SENTINEL = "PrecompactedMeshData: no real face_flux_points, see class docstring"
 
     def __init__(
         self, det_jacs, inv_jacs, jacobians_fine,
@@ -82,9 +64,8 @@ class PrecompactedMeshData:
         self.sps_coords = sps_coords
         self.cell_types = cell_types
 
-        # 见类文档"哨兵值说明"一节。
+        # 不持有全局面表（见类文档）；`distributed_cfl.extract_local_face_area_normal` 据此改读下面的 face_area/normal
         self.face_connectivity = None
-        self.face_flux_points = self._FACE_FLUX_POINTS_SENTINEL
 
         # 逐面 area/normal（2026-09-14 新增）：本 rank 局部面那一段，由
         # root 按 `partition.local_faces` 从全局 `FRFaceConnectivity` 切好
@@ -105,26 +86,27 @@ def build_fully_distributed_rank_package(
     boundary_ghost_provider_global,
     freestream: dict, mu_molecular: float, mach_ref: float,
     order: int, enable_viscous: bool,
-    turb_model_name: str = "NONE",
+    *,
+    turb_model_name: str,
+    turbulence_intensity: float,
+    viscosity_ratio: float,
+    time_scheme: TimeIntegrationScheme,
+    dual_time_inner_iter: int,
+    cfl_start: Optional[float],
+    cfl_max: Optional[float],
+    cfl_min: Optional[float],
+    time_accurate: bool,
+    adaptive_cfl: bool,
+    artificial_viscosity_enabled: bool,
+    artificial_viscosity_alpha: float,
+    wall_treatment: str,
+    low_mach_precond: bool,
+    sem_num_eddies: Optional[int],
     wall_distance_source=None,
     h_max_global: Optional[np.ndarray] = None,
     h_wn_global: Optional[np.ndarray] = None,
-    turbulence_intensity: float = 0.01,
-    viscosity_ratio: float = 5.0,
-    time_scheme=None,
-    dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
-    cfl_start: Optional[float] = None,
-    cfl_max: Optional[float] = None,
-    cfl_min: Optional[float] = None,
-    time_accurate: bool = False,
-    adaptive_cfl: bool = True,
     global_cell_colors: Optional[np.ndarray] = None,
     global_cell_colors_d2: Optional[np.ndarray] = None,
-    artificial_viscosity_enabled: bool = False,
-    artificial_viscosity_alpha: float = 1.0,
-    wall_treatment: str = DEFAULT_WALL_TREATMENT,
-    low_mach_precond: bool = True,
-    sem_num_eddies: Optional[int] = None,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -159,13 +141,18 @@ def build_fully_distributed_rank_package(
             "边界条件"一节）
         freestream, mu_molecular, mach_ref, order, enable_viscous:
             纯配置量（标量/小 dict），直接透传
+        turb_model_name, turbulence_intensity, viscosity_ratio, time_scheme, dual_time_inner_iter, cfl_start /
+            cfl_max / cfl_min, time_accurate, adaptive_cfl, artificial_viscosity_enabled / _alpha, wall_treatment,
+            low_mach_precond, sem_num_eddies: 运行配置，仅限关键字且必传（与单机 FRSolver 同名参数同义；
+            `time_scheme` 是 `TimeIntegrationScheme` 枚举值）。2026-10-21（I-104）以前带缺省值（`time_scheme=None`
+            静默取 SSP_RK3、Tu / VR 取 0.01 / 5.0 等），调用方漏传一个就在分布式上换成另一种格式或物理而不报错。
         global_cell_colors: (n_global_cells,) 全局一致的块 Jacobi 着色
             （`core/mpi/distributed_implicit.py::global_cell_colors`，只有隐式
             稳态需要；调用方对同一个网格算一次），包里放本 rank local 段
         global_cell_colors_d2: (n_global_cells,) 全局一致的距离 2 着色（P0 差分装配
             面邻居耦合块用，`distributed_implicit.py::global_cell_colors_d2`），同上
-        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`）
-            （大写），决定是否需要计算 wall_distance/h_max/h_wn
+        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`），决定是否需要计算
+            wall_distance/h_max/h_wn
         wall_distance_source: 壁面距离来源（`core/utils/wall_distance`），
             root 由体网格构造一次、对每个 rank 的 compact 解点查询
         h_max_global, h_wn_global: (n_global_cells,) IDDES 专用，root
@@ -191,8 +178,6 @@ def build_fully_distributed_rank_package(
         raise NotImplementedError(
             f"build_fully_distributed_rank_package: 无法识别的 turb_model_name '{turb_model_name}'"
             f"（应为规范化的大写模型名）。")
-    if time_scheme is None:
-        time_scheme = TimeIntegrationScheme.SSP_RK3
 
     from autoflowcfd.core.mpi.partition import build_distributed_partition
     from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face

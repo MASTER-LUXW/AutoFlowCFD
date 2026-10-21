@@ -215,17 +215,6 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     owner_cube_face = fc.owner_cube_face.astype(np.int64)
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
 
-    from autoflowcfd.fr.face_flux_points.merge import _KernelFaceData
-    if not isinstance(ffp_data, _KernelFaceData):
-        raise TypeError(
-            f"build_flat_face_geometry: mesh.face_flux_points 必须是 "
-            f"_KernelFaceData（build_face_flux_points 的唯一产出类型），"
-            f"收到的是 {type(ffp_data).__name__}——这不是一个已知的合法"
-            f"构造方式，之前支持过的逐面对象慢速路径已确认没有任何调用方"
-            f"后删除（2026-09-03），如果这里真的需要一种新的 mesh.face_"
-            f"flux_points 构造方式，需要先补上对应的展平逻辑，不能假装"
-            f"可以正确产出结果。"
-        )
     owner_is_primary = ffp_data.owner_is_primary
     neighbor_is_primary = ffp_data.neighbor_is_primary
     true_normal = ffp_data.true_normal
@@ -330,8 +319,20 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
 
 
 def get_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
-    """`mesh` 当前阶数的展平面几何，缓存在 `mesh.face_flux_points._flat_geometry` 上（见模块文档"缓存"）。"""
+    """`mesh` 当前阶数的展平面几何，缓存在 `mesh.face_flux_points._flat_geometry` 上（见模块文档"缓存"）。
+
+    网格必须带面表（`load_from_volume_mesh(build_faces=True)`）。分布式路径的 mesh-like 对象不持有全局面表，
+    残差函数由调用方传入按 local+halo 紧凑索引构造好的面几何（`flat_face_override`），不经过这里。
+    """
+    from autoflowcfd.fr.face_flux_points.merge import _KernelFaceData
+
     ffp = mesh.face_flux_points
+    if mesh.face_connectivity is None or ffp is None:
+        raise RuntimeError("网格没有面表（face_connectivity / face_flux_points）：需按 "
+                           "load_from_volume_mesh(build_faces=True) 构造")
+    if not isinstance(ffp, _KernelFaceData):
+        raise TypeError(f"mesh.face_flux_points 必须是 _KernelFaceData（build_face_flux_points 的产出），"
+                        f"得到 {type(ffp).__name__}")
     if ffp._flat_geometry is None:
         ffp._flat_geometry = build_flat_face_geometry(mesh, ops)
     return ffp._flat_geometry

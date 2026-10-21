@@ -146,11 +146,6 @@ class DistributedMeshAdapter:
         return self.dist_fc
 
     @property
-    def face_flux_points(self):
-        """返回面通量点（从本地网格获取）。"""
-        return self.local_mesh.face_flux_points
-
-    @property
     def jacobians(self):
         """返回 Jacobian 信息，已按 local+halo 压缩索引空间重排（见类文档）。"""
         return self._jacobians

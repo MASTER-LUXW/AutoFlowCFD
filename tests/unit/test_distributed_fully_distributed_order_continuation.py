@@ -21,6 +21,7 @@ order` 的 Send/Recv 分支天然不会被触发（`range(1, 1)` 为空，root �
 """
 
 import numpy as np
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
@@ -60,8 +61,9 @@ def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
     package = build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, 0, n_ranks,
         boundary_ghost_provider_global, freestream, mu_molecular, mach_ref,
-        order, enable_viscous, turb_model_name=turb_model_name,
+        order, enable_viscous,
         wall_distance_source=wall_distance_source, h_max_global=h_max_global, h_wn_global=h_wn_global,
+        **distributed_run_options(turb_model_name=turb_model_name),
     )
     root_context = {
         'mesh': mesh, 'ops': ops, 'fc': fc, 'cell_partition': cell_partition,

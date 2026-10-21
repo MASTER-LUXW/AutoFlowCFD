@@ -1,6 +1,5 @@
 """AutoFlowCFD V2.0 - 完全分布式加载入口与跨阶数重分发。"""
 
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import numpy as np
 from typing import Optional
 
@@ -10,8 +9,8 @@ from autoflowcfd.core.mpi import get_comm, get_rank
 from .package import build_fully_distributed_rank_package
 
 
-from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, needs_wall_model
-from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+from autoflowcfd.core.turbulence.wall_model.treatment import needs_wall_model
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
@@ -23,24 +22,25 @@ def distributed_mesh_load_v2(
     freestream: dict,
     mu_molecular: float,
     mach_ref: float,
-    enable_viscous: bool = True,
+    *,
+    enable_viscous: bool,
+    turb_model_name: str,
+    turbulence_intensity: float,
+    viscosity_ratio: float,
+    time_scheme: TimeIntegrationScheme,
+    dual_time_inner_iter: int,
+    cfl_start: Optional[float],
+    cfl_max: Optional[float],
+    cfl_min: Optional[float],
+    time_accurate: bool,
+    adaptive_cfl: bool,
+    artificial_viscosity_enabled: bool,
+    artificial_viscosity_alpha: float,
+    wall_treatment: str,
+    low_mach_precond: bool,
+    sem_num_eddies: Optional[int],
     bc_overrides: Optional[dict] = None,
     skip_quality_check: bool = False,
-    turb_model_name: str = "NONE",
-    turbulence_intensity: float = 0.01,
-    viscosity_ratio: float = 5.0,
-    time_scheme=None,
-    dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
-    cfl_start: Optional[float] = None,
-    cfl_max: Optional[float] = None,
-    cfl_min: Optional[float] = None,
-    artificial_viscosity_enabled: bool = False,
-    artificial_viscosity_alpha: float = 1.0,
-    sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
-    time_accurate: bool = False,
-    adaptive_cfl: bool = True,
-    wall_treatment: str = DEFAULT_WALL_TREATMENT,
-    low_mach_precond: bool = True,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -68,11 +68,13 @@ def distributed_mesh_load_v2(
             h_wn` 都只需要完整网格，root 有，只算一次，见下方调用点；
             LES/WMLES 不需要任何 root 预计算的几何量），非 root rank 从未需要这些几何
             量的计算依赖。
-        time_scheme, dual_time_inner_iter: DUAL_TIME 支持（2026-09-02
-            续接）——透传给 `build_fully_distributed_rank_package`，
-            `time_scheme` 是 `TimeIntegrationScheme` 枚举值（不是
-            字符串），None（默认）时回退到 `TimeIntegrationScheme.
-            SSP_RK3`。
+        enable_viscous: 是否计入粘性项（仅限关键字、必传）
+        turbulence_intensity, viscosity_ratio, time_scheme, dual_time_inner_iter, cfl_start /
+            cfl_max / cfl_min, time_accurate, adaptive_cfl, artificial_viscosity_enabled / _alpha, wall_treatment,
+            low_mach_precond, sem_num_eddies: 运行配置（透传给 `build_fully_distributed_rank_package`），仅限关键字
+            且必传（与单机 FRSolver 同名参数同义；`time_scheme` 是 `TimeIntegrationScheme` 枚举值）。
+            2026-10-21（I-104）以前带缺省值（`time_scheme=None` 静默取 SSP_RK3、Tu / VR 取 0.01 / 5.0 等），
+            调用方漏传一个就在分布式上换成另一种格式或物理而不报错。
 
     Returns:
         (my_package, root_context)：`my_package` 是本 rank 的紧凑包

@@ -15,6 +15,7 @@ from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.registry import uses_synthetic_inlet
 from autoflowcfd.core.utils.checkpoint_physics import SEM_AUTO, physics_metadata
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.validation._channel_mesh import build_channel_mesh_prism
 
 _BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
@@ -97,7 +98,7 @@ def test_fully_distributed_package_carries_the_eddy_count():
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), rank=0, n_ranks=1,
         boundary_ghost_provider_global=build_boundary_ghost_provider(stub, bc_overrides={}),
         freestream=freestream, mu_molecular=MU_MOLECULAR, mach_ref=0.05, order=1, enable_viscous=True,
-        turb_model_name="LES", sem_num_eddies=55)
+        **distributed_run_options(turb_model_name="LES", sem_num_eddies=55))
     assert package["sem_num_eddies"] == 55
     assert DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1)._sem_num_eddies == 55
     # 打包端恒写的键缺失时报错（此前 .get(键, 缺省) 静默换成缺省值）
@@ -117,8 +118,9 @@ def test_fully_distributed_load_builds_the_synthetic_inlet(tmp_path):
     with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(mesh, None)):
         package, root_context = distributed_mesh_load_v2(
             "m.pkl", 1, None, 1, freestream={"rho_inf": RHO_INF, "vel_inf": 10.0, "p_inf": P_INF},
-            mu_molecular=MU_MOLECULAR, mach_ref=0.05, turb_model_name="LES",
-            time_scheme=TimeIntegrationScheme.DUAL_TIME, sem_num_eddies=55)
+            mu_molecular=MU_MOLECULAR, mach_ref=0.05, enable_viscous=True,
+            **distributed_run_options(turb_model_name="LES", time_scheme=TimeIntegrationScheme.DUAL_TIME,
+                                      sem_num_eddies=55))
     provider = root_context["boundary_ghost_provider_global"]
     sem_states = [c["sem"] for c in provider.code_to_config.values() if c.get("sem") is not None]
     assert len(sem_states) == 1 and sem_states[0].sem.num_eddies == 55

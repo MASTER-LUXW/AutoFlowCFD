@@ -7,6 +7,7 @@ from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.fr.operators import generate_fr_operators
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
@@ -61,6 +62,7 @@ def _build_all_packages(mesh, ops, n_ranks=2):
             boundary_ghost_provider_global, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(),
         )
         for r in range(n_ranks)
     ]

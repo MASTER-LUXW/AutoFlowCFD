@@ -80,7 +80,6 @@ class TestDistributedMeshAdapter:
             }
             jacobians_fine = None
             cell_volumes = np.arange(12, dtype=float)
-            face_flux_points = None
 
         class MockOps:
             pass

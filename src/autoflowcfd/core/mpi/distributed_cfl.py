@@ -280,7 +280,7 @@ def compute_distributed_local_time_step(
             （halo 交换产出并已按 dist_fc.perm 重排到"棱柱在前"排列）。
         Q_compact: 同形状的原始变量 (rho,u,v,w,p)。
         dist_fc: DistributedFlatFaceGeometry。
-        local_mesh: 提供 face_flux_points 的网格对象。
+        local_mesh: 完整全局网格或 `PrecompactedMeshData`（逐面 area/normal 的来源，见 `extract_local_face_area_normal`）。
         jacobians: 已按 dist_fc.compact_global_ids 抽取/重排好的
             {'det_jacs','inv_jacs'}（与 DistributedMeshAdapter 同一来源）。
         cell_volumes: 同上，(n_local+n_halo,)。

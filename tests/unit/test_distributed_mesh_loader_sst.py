@@ -5,6 +5,7 @@ import pytest
 
 from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import _nonuniform_U, mesh_and_ops
 from tests.unit._boundary_groups import tag_wall_cells
@@ -43,9 +44,8 @@ class TestFullyDistributedSstTurbulence:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
-            turb_model_name="SST",
-            turbulence_intensity=0.02, viscosity_ratio=8.0,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="SST", turbulence_intensity=0.02, viscosity_ratio=8.0),
         )
 
         assert package['turb_model_name'] == "SST"
@@ -105,8 +105,8 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True, turb_model_name="SST",
-            wall_distance_source=synthetic_wall_source(mesh),
+            order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="SST"),
         )
 
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -144,7 +144,8 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,
             boundary_ghost_provider_global=build_boundary_ghost_provider(root_stub, bc_overrides={}),
             freestream=freestream, mu_molecular=mu, mach_ref=0.2, order=mesh.order, enable_viscous=True,
-            turb_model_name="SA", viscosity_ratio=3.0, wall_distance_source=synthetic_wall_source(mesh),
+            wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="SA", viscosity_ratio=3.0),
         )
         assert package['wall_distance_compact'] is not None
 
@@ -196,8 +197,8 @@ class TestFullyDistributedSstTurbulence:
                 mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
                 boundary_ghost_provider_global=boundary_ghost_provider,
                 freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-                order=mesh.order, enable_viscous=True, turb_model_name="DDES",
-                wall_distance_source=synthetic_wall_source(mesh),
+                order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+                **distributed_run_options(turb_model_name="DDES"),
             )
 
         h_max_global, _h_wn_global = compute_h_max_and_h_wn(mesh)
@@ -205,9 +206,9 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True, turb_model_name="DDES",
-            h_max_global=h_max_global,
+            order=mesh.order, enable_viscous=True, h_max_global=h_max_global,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="DDES"),
         )
 
         assert package['iddes_h_max_compact'] is not None
@@ -264,9 +265,9 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True, turb_model_name="IDDES",
-            h_max_global=h_max_global, h_wn_global=h_wn_global,
+            order=mesh.order, enable_viscous=True, h_max_global=h_max_global, h_wn_global=h_wn_global,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="IDDES"),
         )
 
         assert package['iddes_h_max_compact'] is not None
@@ -327,8 +328,8 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True, turb_model_name="WMLES",
-            wall_distance_source=synthetic_wall_source(mesh),
+            order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="WMLES"),
         )
 
         # WMLES 的匹配点高度取自单元几何，不需要壁距（WALL_DISTANCE_MODELS 只含输运模型）
@@ -376,8 +377,8 @@ class TestFullyDistributedSstTurbulence:
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True, turb_model_name="LES",
-            wall_distance_source=synthetic_wall_source(mesh),
+            order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(turb_model_name="LES"),
         )
 
         assert package['wall_distance_compact'] is None  # LES 不需要壁面距离

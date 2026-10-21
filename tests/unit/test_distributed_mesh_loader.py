@@ -43,6 +43,7 @@ from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import (
     _FakeHaloExchange, _build_all_packages, _nonuniform_U, mesh_and_ops,
@@ -232,6 +233,7 @@ class TestDistributedFRSolverFromFullyDistributedPackage:
             freestream=freestream, mu_molecular=mu, mach_ref=mach_ref,
             order=mesh.order, enable_viscous=True,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(),
         )
 
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)

@@ -37,6 +37,7 @@ import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdf
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
 import autoflowcfd.core.gpu.gpu_face_geometry as gpu_face_geometry_mod
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
@@ -107,8 +108,8 @@ def _build_none_package(mesh, ops, rank=0, n_ranks=1):
     return build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, rank, n_ranks,
         boundary_ghost_provider, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
-        order=mesh.order, enable_viscous=True, turb_model_name="NONE",
-        wall_distance_source=synthetic_wall_source(mesh),
+        order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+        **distributed_run_options(turb_model_name="NONE"),
     )
 
 
@@ -126,9 +127,8 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
     return build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, rank, n_ranks,
         boundary_ghost_provider, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
-        order=mesh.order, enable_viscous=True, turb_model_name="SST",
-        turbulence_intensity=0.02, viscosity_ratio=8.0,
-        wall_distance_source=synthetic_wall_source(mesh),
+        order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+        **distributed_run_options(turb_model_name="SST", turbulence_intensity=0.02, viscosity_ratio=8.0),
     )
 
 
@@ -151,7 +151,7 @@ def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, mode
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
         build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=1.8e-5, mach_ref=0.2,
-        order=mesh.order, enable_viscous=True, turb_model_name=model)
+        order=mesh.order, enable_viscous=True, **distributed_run_options(turb_model_name=model))
     solver = build_multi_gpu_solver_from_fully_distributed_package(
         MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
     assert isinstance(solver.sgs_model_gpu, WALEModel)

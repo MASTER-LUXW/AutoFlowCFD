@@ -45,8 +45,9 @@ def build_distributed_solver(*, multi_gpu: bool, fully_distributed: bool, input_
     from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
     require_distributed_runtime(multi_gpu)
+    # 命令行不提供固定 CFL 的选项（`adaptive_cfl=True`；时间精确推进由 `time_accurate` 决定步长规则）
     numerics = dict(cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, low_mach_precond=low_mach_precond,
-                    time_accurate=time_accurate, sem_num_eddies=sem_num_eddies,
+                    time_accurate=time_accurate, adaptive_cfl=True, sem_num_eddies=sem_num_eddies,
                     artificial_viscosity_enabled=physics["artificial_viscosity_enabled"],
                     artificial_viscosity_alpha=physics["artificial_viscosity_alpha"],
                     wall_treatment=physics["wall_treatment"], turbulence_intensity=physics["turbulence_intensity"],

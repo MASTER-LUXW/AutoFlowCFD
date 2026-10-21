@@ -207,12 +207,6 @@ def compute_inviscid_residual_fr(
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
     """
-    if mesh.face_connectivity is None or mesh.face_flux_points is None:
-        raise RuntimeError(
-            "HighOrderMesh has no face_connectivity/face_flux_points - "
-            "call load_from_volume_mesh(build_faces=True) first."
-        )
-
     if mesh.n_points_1d == 1:
         # P0（Order Continuation 最低阶）：单个解点的度量无法代表单元各面各自的真实法向，走独立的
         # 真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0 文档。面着色取自与 P>=1
@@ -275,18 +269,7 @@ def compute_inviscid_residual_fr(
         compute_inviscid_interface_correction_kernel,
     )
 
-    # #2（V2.0 专家组盲审第4轮，2026-08-28）：flat_face_override 显式传入
-    # 时优先使用，不再无条件调用 get_flat_face_geometry(mesh, ops)——CPU
-    # 分布式路径（core/mpi/distributed_compute.py）下 `mesh` 是
-    # `DistributedMeshAdapter`，其 `face_connectivity`/`face_flux_points`
-    # 是 local+halo 压缩索引空间下的分布式几何数据（`DistributedFlatFaceGeometry`
-    # /局部 HighOrderMesh 片段），不是 `get_flat_face_geometry` 内部
-    # `build_flat_face_geometry` 期望的完整全局 FRFaceConnectivity——用它
-    # 重新构建一遍等于试图从不完整/类型不匹配的数据重新推导面几何，
-    # 必然出错或产出错误结果。调用方需要直接传入已经按同一套 local+halo
-    # 压缩索引空间构造好的 `DistributedFlatFaceGeometry.base_flat`（与
-    # gpu_inviscid/residual.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
-    # 参数同一个道理）。单机路径不传，行为完全不变。
+    # 分布式路径（`DistributedMeshAdapter`）传入按 local+halo 紧凑索引构造好的面几何，它不持有全局面表
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider) if primitives is None else primitives.Q_ghost
 

@@ -25,6 +25,7 @@ from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.fr.operators import generate_fr_operators
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._fake_halo import ShapeKeyedFakeHalo
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -147,8 +148,8 @@ def test_fully_distributed_build_wires_sa(monkeypatch, gpu_shim):
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
         build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=MU, mach_ref=0.2,
-        order=mesh.order, enable_viscous=True, turb_model_name="SA", viscosity_ratio=3.0,
-        wall_distance_source=synthetic_wall_source(mesh))
+        order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
+        **distributed_run_options(turb_model_name="SA", viscosity_ratio=3.0))
     solver = build_multi_gpu_solver_from_fully_distributed_package(
         MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
 

@@ -5,6 +5,7 @@ import numpy as np
 
 from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
 
+from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import _nonuniform_U, mesh_and_ops
 
@@ -36,8 +37,8 @@ class TestFullyDistributedDualTimeSupport:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
-            time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=7,
             wall_distance_source=synthetic_wall_source(mesh),
+            **distributed_run_options(time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=7),
         )
         assert package['time_scheme'] == TimeIntegrationScheme.DUAL_TIME
         assert package['dual_time_inner_iter'] == 7
@@ -46,30 +47,21 @@ class TestFullyDistributedDualTimeSupport:
         # TestRankPackagePicklable 同一个判据）——枚举值可安全序列化。
         pickle.loads(pickle.dumps(package))
 
-    def test_default_time_scheme_is_ssp_rk3(self, mesh_and_ops):
-        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+    def test_run_options_have_no_defaults(self):
+        """时间格式、湍流模型与 Tu / VR 等运行配置在两个加载入口上都是仅限关键字、必传（I-104）：此前
+        `time_scheme=None` 静默取 SSP_RK3、Tu / VR 取 0.01 / 5.0，漏传即在分布式上换成另一种格式或物理。"""
+        import inspect
 
-        mesh, ops = mesh_and_ops
-        n_cells = mesh.n_cells
-        cell_partition = np.zeros(n_cells, dtype=np.int32)
-        freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
+        from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
+        from tests.unit._distributed_run_options import distributed_run_options
 
-        import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
-
-        package = build_fully_distributed_rank_package(
-            mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,
-            boundary_ghost_provider_global=boundary_ghost_provider,
-            freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
-            order=mesh.order, enable_viscous=True,
-            wall_distance_source=synthetic_wall_source(mesh),
-        )
-        assert package['time_scheme'] == TimeIntegrationScheme.SSP_RK3
-        assert package['dual_time_inner_iter'] == 20
+        for func in (build_fully_distributed_rank_package, distributed_mesh_load_v2):
+            params = inspect.signature(func).parameters
+            for name in [*distributed_run_options(), "enable_viscous"]:
+                if func is build_fully_distributed_rank_package and name == "enable_viscous":
+                    continue  # 位置参数（无缺省值）
+                assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, (func.__name__, name)
+                assert params[name].default is inspect.Parameter.empty, (func.__name__, name)
 
     def test_from_fully_distributed_package_step_uses_dual_time(self, mesh_and_ops):
         """真正调用 `step()`：DUAL_TIME 分支必须被走到（而不是静默退回
@@ -99,11 +91,11 @@ class TestFullyDistributedDualTimeSupport:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
-            time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=3,
             wall_distance_source=synthetic_wall_source(mesh),
             # 内迭代是 Newton 步：全局一致的块着色由 root 随包下发（`fully_distributed.py` 对隐式格式同样这样做）
             global_cell_colors=global_cell_colors(mesh.face_connectivity, n_cells),
             global_cell_colors_d2=global_cell_colors_d2(mesh.face_connectivity, n_cells),
+            **distributed_run_options(time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=3),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
         assert solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
