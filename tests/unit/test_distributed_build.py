@@ -73,14 +73,16 @@ def test_fully_distributed_mode_forwards_every_parameter(multi_gpu):
     calls, volume_data = _build(multi_gpu, True)
     assert volume_data is None
     args, kw = calls["load_v2"]
-    assert args == ("m.pkl", 2, None, 4)
+    assert args[1:] == (2, 4) and "load" not in calls        # root 网格加载函数只在 root 的加载流程里调用
+    args[0]()
+    assert calls["load"] == (("m.pkl", 2), {"surface_mesh": None, "skip_quality_check": True})
     assert kw["freestream"] == {k: _PHYSICS[k] for k in ("rho_inf", "vel_inf", "p_inf", "aoa_deg", "aos_deg")}
     for key in ("mu_molecular", "turbulence_intensity", "viscosity_ratio", "artificial_viscosity_enabled",
                 "artificial_viscosity_alpha", "wall_treatment"):
         assert kw[key] == _PHYSICS[key], key
     for key, value in _NUMERICS.items():
         assert kw[key] == value, key
-    assert kw["turb_model_name"] == "DDES" and kw["dual_time_inner_iter"] == 9 and kw["skip_quality_check"] is True
+    assert kw["turb_model_name"] == "DDES" and kw["dual_time_inner_iter"] == 9
     fd = calls["gpu_fd" if multi_gpu else "cpu_fd"][1]
     assert fd["n_ranks"] == 4 and fd["root_context"] == "ctx"
     assert (fd["device_id"] == 1) if multi_gpu else (fd["n_threads"] == 6)

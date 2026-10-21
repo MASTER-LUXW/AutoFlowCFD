@@ -109,17 +109,14 @@ def test_gpu_solvers_accept_the_eddy_count(cls_path):
 
 def test_fully_distributed_root_provider_uses_the_users_settings():
     """完全分布式加载的 root 按用户的 Tu / 分子粘度 / 涡核数构造合成湍流入口（与单机同一组量）。"""
-    from unittest.mock import patch
-
     from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
     from tests.unit._distributed_run_options import distributed_run_options
 
     stub = _stub()
-    with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(stub.mesh, None)):
-        _, root_context = distributed_mesh_load_v2(
-            "m.pkl", 1, None, 1, freestream=dict(FREESTREAM), mu_molecular=2.5e-5, mach_ref=0.1,
-            enable_viscous=True, **distributed_run_options(turb_model_name="LES", turbulence_intensity=0.07,
-                                                           sem_num_eddies=33))
+    _, root_context = distributed_mesh_load_v2(
+        lambda: (stub.mesh, None), 1, 1, freestream=dict(FREESTREAM), mu_molecular=2.5e-5, mach_ref=0.1,
+        enable_viscous=True, **distributed_run_options(turb_model_name="LES", turbulence_intensity=0.07,
+                                                       sem_num_eddies=33))
     provider = root_context["boundary_ghost_provider_global"]
     ghost = next(cfg["sem"] for cfg in provider.code_to_config.values() if cfg.get("sem") is not None)
     k = 1.5 * (FREESTREAM["vel_inf"] * 0.07) ** 2

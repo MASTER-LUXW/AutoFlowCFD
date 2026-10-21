@@ -11,6 +11,9 @@ AutoFlowCFD V2.0 - MPI 通信封装
 - Timer: 通信计时与性能统计
 """
 
+import pickle
+from typing import Any, Tuple
+
 import numpy as np
 
 from autoflowcfd.core.mpi import get_comm, get_mpi, get_rank, mpi_available
@@ -156,3 +159,28 @@ def run_on_root(fn):
     if message is not None:
         raise RuntimeError(f"root rank 执行失败：{message}")
     return result
+
+
+#: 点对点发送 pickle 字节的单条消息上限：MPI 消息计数是 int，单条超过 2^31-1 字节即溢出（完全分布式加载的紧凑包
+#: 在大网格高阶时可达数 GiB）。按块发送，同一对 rank 之间同 tag 的消息按发送顺序到达（MPI 不超车规则）。
+MESSAGE_CHUNK_BYTES = 1 << 30
+
+
+def send_pickled(obj: Any, dest: int, tags: Tuple[int, int]) -> None:
+    """把 `obj` 以 pickle 字节发给 `dest`：先发总长度（`tags[0]`），再按 `MESSAGE_CHUNK_BYTES` 分块发（`tags[1]`）。"""
+    comm = get_comm()
+    buf = np.frombuffer(pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL), dtype=np.uint8)
+    comm.Send(np.array([buf.size], dtype=np.int64), dest=dest, tag=tags[0])
+    for lo in range(0, buf.size, MESSAGE_CHUNK_BYTES):
+        comm.Send(buf[lo:lo + MESSAGE_CHUNK_BYTES], dest=dest, tag=tags[1])
+
+
+def recv_pickled(source: int, tags: Tuple[int, int]) -> Any:
+    """`send_pickled` 的接收端。"""
+    comm = get_comm()
+    size = np.empty(1, dtype=np.int64)
+    comm.Recv(size, source=source, tag=tags[0])
+    buf = np.empty(int(size[0]), dtype=np.uint8)
+    for lo in range(0, buf.size, MESSAGE_CHUNK_BYTES):
+        comm.Recv(buf[lo:lo + MESSAGE_CHUNK_BYTES], source=source, tag=tags[1])
+    return pickle.loads(memoryview(buf))

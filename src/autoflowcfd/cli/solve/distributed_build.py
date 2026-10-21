@@ -42,6 +42,7 @@ def build_distributed_solver(*, multi_gpu: bool, fully_distributed: bool, input_
         time_scheme: `TimeIntegrationScheme`
         physics: 来流、攻角 / 侧滑角、分子粘度、Tu / VR、人工粘性、近壁处理（`PHYSICS_KEYS`）
     """
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
     require_distributed_runtime(multi_gpu)
@@ -57,9 +58,11 @@ def build_distributed_solver(*, multi_gpu: bool, fully_distributed: bool, input_
 
         freestream = {k: physics[k] for k in ("rho_inf", "vel_inf", "p_inf", "aoa_deg", "aos_deg")}
         package, root_context = distributed_mesh_load_v2(
-            input_file, order, surface_mesh, n_ranks, freestream=freestream,
+            lambda: load_mesh_for_solver(input_file, order, surface_mesh=surface_mesh,
+                                         skip_quality_check=skip_quality_check),
+            order, n_ranks, freestream=freestream,
             mach_ref=resolve_mach_ref(physics["rho_inf"], physics["vel_inf"], physics["p_inf"]),
-            enable_viscous=True, skip_quality_check=skip_quality_check, turb_model_name=turbulence_model.upper(),
+            enable_viscous=True, turb_model_name=turbulence_model.upper(),
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter, **numerics)
         if multi_gpu:
             from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
@@ -73,7 +76,6 @@ def build_distributed_solver(*, multi_gpu: bool, fully_distributed: bool, input_
                 package, n_ranks=n_ranks, root_context=root_context, n_threads=threads)
         return solver, None
 
-    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
     from autoflowcfd.fr.operators import generate_fr_operators
 

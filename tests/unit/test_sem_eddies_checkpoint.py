@@ -104,19 +104,16 @@ def test_fully_distributed_package_carries_the_eddy_count():
 
 
 def test_fully_distributed_load_builds_the_synthetic_inlet(tmp_path):
-    """真实的完全分布式加载（root 用桩对象构造边界幽灵态）：LES + 速度入口构造出合成湍流入口、涡核数为用户值。
-    2026-10-20 以前桩上缺 `ops`，这里抛 AttributeError——LES/WMLES/DDES/IDDES 的完全分布式路径跑不起来。"""
-    from unittest.mock import patch
-
+    """真实的完全分布式加载：LES + 速度入口构造出合成湍流入口、涡核数为用户值。2026-10-20 以前 root 伪造的求解器
+    桩上缺 `ops`，这里抛 AttributeError——LES/WMLES/DDES/IDDES 的完全分布式路径跑不起来。"""
     from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
 
     mesh = _mesh()
-    with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(mesh, None)):
-        package, root_context = distributed_mesh_load_v2(
-            "m.pkl", 1, None, 1, freestream={"rho_inf": RHO_INF, "vel_inf": 10.0, "p_inf": P_INF},
-            mu_molecular=MU_MOLECULAR, mach_ref=0.05, enable_viscous=True,
-            **distributed_run_options(turb_model_name="LES", time_scheme=TimeIntegrationScheme.DUAL_TIME,
-                                      sem_num_eddies=55))
+    package, root_context = distributed_mesh_load_v2(
+        lambda: (mesh, None), 1, 1, freestream={"rho_inf": RHO_INF, "vel_inf": 10.0, "p_inf": P_INF},
+        mu_molecular=MU_MOLECULAR, mach_ref=0.05, enable_viscous=True,
+        **distributed_run_options(turb_model_name="LES", time_scheme=TimeIntegrationScheme.DUAL_TIME,
+                                  sem_num_eddies=55))
     provider = root_context["boundary_ghost_provider_global"]
     sem_states = [c["sem"] for c in provider.code_to_config.values() if c.get("sem") is not None]
     assert len(sem_states) == 1 and sem_states[0].sem.num_eddies == 55

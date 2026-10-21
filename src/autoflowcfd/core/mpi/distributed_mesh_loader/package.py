@@ -80,6 +80,14 @@ class PrecompactedMeshData:
         self.face_normal = face_normal
 
 
+#: 运行配置：`build_fully_distributed_rank_package` 仅限关键字、必传的那一组（root_context 里同名的键）
+RUN_OPTION_NAMES = (
+    "turb_model_name", "turbulence_intensity", "viscosity_ratio", "time_scheme", "dual_time_inner_iter",
+    "cfl_start", "cfl_max", "cfl_min", "time_accurate", "adaptive_cfl", "artificial_viscosity_enabled",
+    "artificial_viscosity_alpha", "wall_treatment", "low_mach_precond", "sem_num_eddies",
+)
+
+
 def build_fully_distributed_rank_package(
     mesh, ops, face_connectivity, cell_partition: np.ndarray,
     rank: int, n_ranks: int,
