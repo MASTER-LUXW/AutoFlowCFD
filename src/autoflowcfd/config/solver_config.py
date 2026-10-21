@@ -149,13 +149,8 @@ class SolverConfig:
         if self.checkpoint_interval < 1:
             raise ValueError(f"checkpoint_interval 必须 >= 1，得到 {self.checkpoint_interval}")
 
-        # 验证湍流参数
-        if not (0 < self.turbulence_intensity <= 1.0):
-            raise ValueError(f"湍流强度 Tu 必须在 (0, 1] 范围内，得到 {self.turbulence_intensity}")
-        if self.viscosity_ratio <= 0:
-            raise ValueError(f"粘性比 VR 必须为正数，得到 {self.viscosity_ratio}")
-        if self.mu_molecular <= 0:
-            raise ValueError(f"分子动力粘度 mu_molecular 必须为正数，得到 {self.mu_molecular}")
+        _raise_on_physical_ranges(turbulence_intensity=self.turbulence_intensity,
+                                  viscosity_ratio=self.viscosity_ratio, mu_molecular=self.mu_molecular)
         validate_wall_treatment(self.wall_treatment)
         if self.artificial_viscosity_alpha <= 0:
             raise ValueError(f"人工粘性强度 artificial_viscosity_alpha 必须为正数，得到 {self.artificial_viscosity_alpha}")
@@ -232,6 +227,30 @@ def cfl_triplet_errors(cfl_init: Optional[float], cfl_max: Optional[float],
     return errors
 
 
+#: 来流物理量的取值范围（配置类构造与 CLI 共用这一张表，`physical_range_errors`）
+_PHYSICAL_RANGES = {
+    "turbulence_intensity": (lambda v: 0.0 < v <= 1.0, "湍流强度 Tu 必须在 (0, 1] 区间"),
+    "viscosity_ratio": (lambda v: v > 0.0, "粘性比 VR 必须 > 0"),
+    "mu_molecular": (lambda v: v > 0.0, "分子动力粘度必须 > 0"),
+    "rho_inf": (lambda v: v > 0.0, "自由流密度必须 > 0"),
+    "vel_inf": (lambda v: v > 0.0, "自由流速度必须 > 0"),
+    "p_inf": (lambda v: v > 0.0, "自由流静压必须 > 0"),
+}
+
+
+def physical_range_errors(**values: float) -> list:
+    """来流物理量的范围校验，返回 `[(字段名, 说明), ...]`（全部合法时为空）。键取 `_PHYSICAL_RANGES` 的字段名。
+    2026-10-21（I-82）以前 `SolverConfig`、`SteadyConfig` / `TransientConfig` 与 CLI 各写一份同样的判据。"""
+    return [(name, f"{_PHYSICAL_RANGES[name][1]}，得到 {value}") for name, value in values.items()
+            if not _PHYSICAL_RANGES[name][0](value)]
+
+
+def _raise_on_physical_ranges(**values: float) -> None:
+    errors = physical_range_errors(**values)
+    if errors:
+        raise ValueError("; ".join(message for _, message in errors))
+
+
 def _raise_on_cfl_triplet(config) -> None:
     errors = cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min)
     if errors:
@@ -297,13 +316,7 @@ class SteadyConfig(SolverConfig):
         if self.convergence_tol <= 0:
             raise ValueError(f"收敛容差必须为正数，得到 {self.convergence_tol}")
 
-        # 验证自由流条件
-        if self.rho_inf <= 0:
-            raise ValueError(f"rho_inf 必须为正数，得到 {self.rho_inf}")
-        if self.vel_inf <= 0:
-            raise ValueError(f"vel_inf 必须为正数，得到 {self.vel_inf}")
-        if self.p_inf <= 0:
-            raise ValueError(f"p_inf 必须为正数，得到 {self.p_inf}")
+        _raise_on_physical_ranges(rho_inf=self.rho_inf, vel_inf=self.vel_inf, p_inf=self.p_inf)
 
 
 @dataclass
@@ -371,13 +384,7 @@ class TransientConfig(SolverConfig):
 
         _raise_on_cfl_triplet(self)
 
-        # 验证自由流条件
-        if self.rho_inf <= 0:
-            raise ValueError(f"rho_inf 必须为正数，得到 {self.rho_inf}")
-        if self.vel_inf <= 0:
-            raise ValueError(f"vel_inf 必须为正数，得到 {self.vel_inf}")
-        if self.p_inf <= 0:
-            raise ValueError(f"p_inf 必须为正数，得到 {self.p_inf}")
+        _raise_on_physical_ranges(rho_inf=self.rho_inf, vel_inf=self.vel_inf, p_inf=self.p_inf)
 
     @property
     def n_steps(self) -> int:

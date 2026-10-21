@@ -114,15 +114,12 @@ def config_file_overrides(callback):
 
 def check_physical_ranges(turbulence_intensity: float, viscosity_ratio: float, mu_molecular: float,
                           rho_inf: float, vel_inf: float, p_inf: float) -> None:
-    """来流物理量的范围校验（`solve steady`/`solve transient` 共用；CLI 路径不经过配置类的构造校验）。"""
-    checks = (
-        (0.0 < turbulence_intensity <= 1.0, "湍流强度 Tu 必须在 (0, 1] 区间", "--turbulence-intensity"),
-        (viscosity_ratio > 0.0, "粘性比 VR 必须 > 0", "--viscosity-ratio"),
-        (mu_molecular > 0.0, "分子动力粘度必须 > 0", "--mu-molecular"),
-        (rho_inf > 0.0, "自由流密度必须 > 0", "--rho-inf"),
-        (vel_inf > 0.0, "自由流速度必须 > 0", "--vel-inf"),
-        (p_inf > 0.0, "自由流静压必须 > 0", "--p-inf"),
-    )
-    for ok, message, hint in checks:
-        if not ok:
-            raise click.BadParameter(message, param_hint=hint)
+    """来流物理量的范围校验（`solve steady`/`solve transient` 共用；CLI 路径不经过配置类的构造校验）：判据与配置类
+    同一张表（`config/solver_config.py::physical_range_errors`），这里只把字段名换成命令行选项名。"""
+    from autoflowcfd.config.solver_config import physical_range_errors
+
+    errors = physical_range_errors(turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+                                   mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf)
+    if errors:
+        name, message = errors[0]
+        raise click.BadParameter(message, param_hint="--" + name.replace("_", "-"))

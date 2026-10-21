@@ -126,3 +126,30 @@ def test_multi_gpu_default_device_lets_each_rank_pick_its_own(tmp_path):
                                        "--n-ranks", "2"])
     assert res.exit_code == 0, res.output
     assert run.call_args.args[0].gpu_device is None
+
+
+@pytest.mark.parametrize("field, value, option", [
+    ("rho_inf", -1.0, "--rho-inf"), ("vel_inf", 0.0, "--vel-inf"), ("p_inf", -5.0, "--p-inf"),
+    ("turbulence_intensity", 0.0, "--turbulence-intensity"), ("viscosity_ratio", -2.0, "--viscosity-ratio"),
+    ("mu_molecular", 0.0, "--mu-molecular"),
+])
+def test_physical_ranges_have_one_source(field, value, option):
+    """来流物理量的范围判据只有一份（I-82）：配置类与 CLI 给出同一条说明，CLI 只换成选项名。此前 SolverConfig、
+    Steady/TransientConfig 与 CLI 各写一份（措辞已经各不相同）。"""
+    import click
+
+    from autoflowcfd.cli.solve.config_file import check_physical_ranges
+    from autoflowcfd.config.solver_config import physical_range_errors
+
+    [(name, message)] = physical_range_errors(**{field: value})
+    assert name == field
+    for cls in (SteadyConfig, TransientConfig):
+        with pytest.raises(ValueError) as err:
+            cls(**{field: value})
+        assert message in str(err.value)
+    good = dict(turbulence_intensity=0.01, viscosity_ratio=5.0, mu_molecular=1.8e-5, rho_inf=1.2, vel_inf=30.0,
+                p_inf=1.0e5)
+    good[field] = value
+    with pytest.raises(click.BadParameter) as err:
+        check_physical_ranges(**good)
+    assert err.value.message == message and err.value.param_hint == option
