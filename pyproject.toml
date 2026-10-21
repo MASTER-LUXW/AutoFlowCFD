@@ -91,6 +91,9 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     '^\s*pass\s*$',
     "raise ImportError",
+    # numba 编译的函数体以机器码执行，coverage 追踪不到（测试跑过也记为未覆盖）；排除装饰器行即排除整个函数，
+    # 这些内核的正确性由调用它们的单元测试核对数值结果
+    '^\s*@(numba\.)?njit\b',
 ]
 fail_under = 80
 show_missing = true
