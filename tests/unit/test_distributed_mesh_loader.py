@@ -43,6 +43,7 @@ from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import (
@@ -221,11 +222,7 @@ class TestDistributedFRSolverFromFullyDistributedPackage:
         freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "NONE")
 
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,

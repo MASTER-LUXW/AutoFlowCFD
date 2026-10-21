@@ -21,6 +21,7 @@ order` 的 Send/Recv 分支天然不会被触发（`range(1, 1)` 为空，root �
 """
 
 import numpy as np
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 import pytest
@@ -35,8 +36,6 @@ from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIE
 def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-    import types
 
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
@@ -49,11 +48,7 @@ def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
     mach_ref = 0.1
     enable_viscous = True
 
-    root_solver_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
-        wall_model=None,
-    )
-    boundary_ghost_provider_global = build_boundary_ghost_provider(root_solver_stub, bc_overrides={})
+    boundary_ghost_provider_global = ghost_provider(mesh, freestream, turb_model_name)
 
     wall_distance_source = synthetic_wall_source(mesh)
     h_max_global = h_wn_global = None

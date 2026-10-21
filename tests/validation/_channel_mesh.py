@@ -185,7 +185,7 @@ def wrap_inlet_with_profile(provider, solver, inlet_plane_name,
         raise ValueError(
             f"在 provider 里找不到 {inlet_plane_name} 对应的 group_code")
     is_target = np.asarray(provider.group_code) == code
-    positions = _compute_inlet_fp_positions(solver, is_target)
+    positions = _compute_inlet_fp_positions(solver.mesh, solver.ops, is_target)
     if not positions:
         raise ValueError(
             f"{inlet_plane_name} 组里没有边界面 —— "

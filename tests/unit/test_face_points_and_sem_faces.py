@@ -15,6 +15,7 @@ import pytest
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.face_points import flux_point_positions
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._boundary_groups import tag_wall_cells
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.validation._channel_mesh import build_channel_mesh_prism
@@ -66,16 +67,12 @@ def test_p0_wall_force_moment_arms_lie_on_the_wall():
 
 
 def _sem_provider(mesh):
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 
     fc = mesh.face_connectivity
     inlet_cells = np.unique(fc.owner_cell[fc.is_boundary])[:2]
     tag_wall_cells(mesh, inlet_cells, wall_type="VELOCITY_INLET", rest_type="FARFIELD")
-    stub = types.SimpleNamespace(mesh=mesh, ops=mesh.operators, turb_model_name="LES", wall_model=None,
-                                 freestream={"rho_inf": 1.2, "vel_inf": 20.0, "p_inf": 1e5},
-                                 _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
-                                 mu_molecular=1.8e-5)
-    return build_boundary_ghost_provider(stub, bc_overrides={})
+    return ghost_provider(mesh, {"rho_inf": 1.2, "vel_inf": 20.0, "p_inf": 1e5}, "LES", sem_num_eddies=40,
+                          turbulence_intensity=0.05)
 
 
 @pytest.mark.parametrize("rank", [0, 1])

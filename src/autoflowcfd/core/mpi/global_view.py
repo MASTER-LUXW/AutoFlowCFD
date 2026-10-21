@@ -24,23 +24,24 @@ class GlobalSolverView:
     边界配置与求解器相同（`bc_overrides`、WMLES 时壁面为滑移镜像）；不构造 SEM 入口。
     """
 
-    def __init__(self, mesh, ops, U, mu_t, mu_molecular: float, freestream: dict,
-                 bc_overrides: Optional[dict] = None, wall_model_active: bool = False):
+    def __init__(self, mesh, ops, U, mu_t, physics, bc_overrides: Optional[dict] = None):
+        """`physics`：求解器的 `BoundaryPhysics`（`core/fr_solver/boundary/ghost.py`）。"""
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
         self.mesh = mesh
         self.ops = ops
         self.state = SimpleNamespace(U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=U.shape[0], n_sps=U.shape[1])
-        self.mu_molecular = mu_molecular
-        self.freestream = freestream
+        self.mu_molecular = physics.mu_molecular
+        self.freestream = physics.freestream
         self._mu_t = mu_t
         self._reference_area = None
         self.turb_model_name = "NONE"                 # 不构造 SEM 入口（力积分不读入口幽灵态）
         from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 
-        self.wall_model = EquilibriumWallModel() if wall_model_active else None
+        self.wall_model = EquilibriumWallModel() if physics.wall_modelled else None
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        self.boundary_ghost_provider = build_boundary_ghost_provider(self, dict(bc_overrides or {}))
+        self.boundary_ghost_provider = build_boundary_ghost_provider(
+            mesh, ops, physics._replace(turb_model_name=self.turb_model_name), dict(bc_overrides or {}))
 
     def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
         """动力涡粘 rho * nu_t（湍流模型 + 亚格子），层流时 None（与单机同名方法同一约定）。"""
@@ -70,6 +71,7 @@ def gather_global_view(solver) -> Optional[GlobalSolverView]:
         mesh, ops = solver._root_context["mesh"], solver._root_context["ops"]
     else:
         mesh, ops = solver.mesh, solver.ops
-    return GlobalSolverView(mesh, ops, U_global, mu_t_global, float(solver.mu_molecular), solver.freestream,
-                            bc_overrides=getattr(solver, "bc_overrides", None),
-                            wall_model_active=getattr(solver, "wall_model", None) is not None)
+    from autoflowcfd.core.fr_solver.boundary import boundary_physics
+
+    return GlobalSolverView(mesh, ops, U_global, mu_t_global, boundary_physics(solver),
+                            bc_overrides=getattr(solver, "bc_overrides", None))

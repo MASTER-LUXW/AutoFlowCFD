@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 边界幽灵态 provider（含 SEM 入口 FP 位置）
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -12,7 +12,30 @@ from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, Inle
 from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh
 
 
-def _compute_inlet_fp_positions(solver, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
+class BoundaryPhysics(NamedTuple):
+    """构造边界条件用到的物理设置。
+
+    2026-10-21（I-106）以前构造函数接收整个求解器对象，完全分布式加载的 root 没有求解器，为此伪造一个
+    `SimpleNamespace` 桩（`wall_model=object()` 只为让"是否为 None"的判断走对分支）；桩上缺哪个属性，就在哪条
+    分支上崩溃或静默取错值（历史上缺过 turb_model_name、wall_model、ops、Tu / VR / 分子粘度 / SEM 涡数）。
+    """
+    freestream: dict               # rho_inf / vel_inf / p_inf 与攻角、侧滑角（`direction_from_freestream`）
+    mu_molecular: float
+    turb_model_name: str           # 规范化的大写模型名；决定速度入口是否注入合成湍流
+    wall_modelled: bool            # 壁面模型激活（`build_wall_model` 非 None）：WALL 组幽灵态改为滑移镜像
+    turbulence_intensity: float    # 合成湍流入口的雷诺应力与涡核尺度（与 RANS 来流同一组量）
+    viscosity_ratio: float
+    sem_num_eddies: Optional[int]  # None：按 Jarrin 密度判据自动取
+
+
+def boundary_physics(solver) -> BoundaryPhysics:
+    """求解器上的同名设置（各后端构造时设置）。"""
+    return BoundaryPhysics(solver.freestream, float(solver.mu_molecular), solver.turb_model_name,
+                           solver.wall_model is not None, solver._turbulence_intensity, solver._viscosity_ratio,
+                           solver._sem_num_eddies)
+
+
+def _compute_inlet_fp_positions(mesh, ops, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
     """一组边界面记录（全部记录，含拆分四边形的非主记录）各自通量点的物理坐标 `{面号: (n_fp, 3)}`。
 
     坐标取自唯一来源 `core/fr_operators/face_points.py::flux_point_positions`（P>=1 解点外插精确；P0 每面
@@ -21,38 +44,38 @@ def _compute_inlet_fp_positions(solver, is_target_face: np.ndarray) -> Dict[int,
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_operators.face_points import flux_point_positions
 
-    flat = get_flat_face_geometry(solver.mesh, solver.ops)
+    flat = get_flat_face_geometry(mesh, ops)
     faces = np.flatnonzero(np.asarray(is_target_face))
     n_fp = int(flat.n_fp)
-    xyz = flux_point_positions(solver.mesh, flat, np.repeat(faces, n_fp), np.tile(np.arange(n_fp), faces.size))
+    xyz = flux_point_positions(mesh, flat, np.repeat(faces, n_fp), np.tile(np.arange(n_fp), faces.size))
     xyz = xyz.reshape(faces.size, n_fp, 3)
     return {int(f): xyz[k] for k, f in enumerate(faces)}
 
 
-def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_direction: np.ndarray,
-                     Q_free) -> Optional[InletSEMGhostState]:
+def _build_sem_inlet(mesh, ops, physics: BoundaryPhysics, name: str, is_group_face: np.ndarray,
+                     flow_direction: np.ndarray, Q_free) -> Optional[InletSEMGhostState]:
     """一个速度入口组的合成湍流入口（`boundary/synthetic_inlet.py`）：涡核尺度、雷诺应力与来流湍流同一组量。"""
     from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, sem_length_scale, synthetic_inlet_seed
-    from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
+    from autoflowcfd.core.fr_solver.turbulence.init import freestream_k_omega
     from autoflowcfd.core.turbulence.sgs import les_filter_width
     from autoflowcfd.core.turbulence.sst.bounds import BETA_STAR
 
-    positions_by_face = _compute_inlet_fp_positions(solver, is_group_face)
+    positions_by_face = _compute_inlet_fp_positions(mesh, ops, is_group_face)
     if not positions_by_face:
         return None
-    mesh = solver.mesh
     faces = np.fromiter(positions_by_face, dtype=np.int64)
     n_fp = next(iter(positions_by_face.values())).shape[0]
     # 涡核尺度 sigma = max(k^(3/2)/epsilon, Delta)：Delta 取入口面所属单元的 LES 滤波宽度（计入阶数）
     n_cells = int(mesh.n_cells)
     delta = les_filter_width(mesh.cell_volumes, np.arange(n_cells) < int(mesh.n_prism_cells), int(mesh.order))
-    k_inf, omega_inf = _set_freestream_turbulence(solver)
+    k_inf, omega_inf = freestream_k_omega(physics.freestream, physics.mu_molecular, physics.turbulence_intensity,
+                                          physics.viscosity_ratio)
     sigma_face = sem_length_scale(k_inf, omega_inf, BETA_STAR, delta[mesh.face_connectivity.owner_cell[faces]])
     face_sigma = {int(f): np.full(n_fp, sigma_face[i]) for i, f in enumerate(faces)}
 
     all_positions = np.concatenate([positions_by_face[int(f)] for f in faces])
     sem = SyntheticEddyMethod(all_positions, np.repeat(sigma_face, n_fp), flow_direction,
-                              num_eddies=solver._sem_num_eddies, seed=synthetic_inlet_seed(name))
+                              num_eddies=physics.sem_num_eddies, seed=synthetic_inlet_seed(name))
     # 各向同性雷诺应力 R = (2/3) k I（k 由湍流强度给定，与 RANS 来流同一个量）
     reynolds_stress = (2.0 / 3.0) * k_inf * np.eye(3)
     logger.info(
@@ -63,29 +86,32 @@ def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_directio
                               reynolds_stress=reynolds_stress)
 
 
-def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]]) -> BoundaryGhostStateProvider:
-    """构建边界幽灵态提供者 (BD-01)。
+def build_boundary_ghost_provider(mesh, ops, physics: BoundaryPhysics,
+                                  bc_overrides: Dict[str, Dict[str, Any]]) -> BoundaryGhostStateProvider:
+    """构建边界幽灵态提供者 (BD-01)：`mesh` 的边界组按 `mesh.boundary_bc_types`（或 `bc_overrides`）给出条件；
+    `ops` 只用于合成湍流入口的通量点定位。求解器调用方传 `boundary_physics(self)`。
 
     Raises:
         ValueError: 网格没有面连接关系（尚未 `load_from_volume_mesh(build_faces=True)`），或边界面 / 边界组的
             条件不全（见下）。2026-10-19 以前没有面连接关系时只打警告、返回 None，残差核心函数再把 None 静默换成
             零梯度外插——边界条件对残差不可见（I-5）。
     """
-    if solver.mesh.face_connectivity is None:
+    if mesh.face_connectivity is None:
         raise ValueError("网格没有面连接关系（load_from_volume_mesh(build_faces=True)），无法施加边界条件")
 
-    rho_inf, vel_inf, p_inf = solver.freestream["rho_inf"], solver.freestream["vel_inf"], solver.freestream["p_inf"]
+    freestream = physics.freestream
+    rho_inf, vel_inf, p_inf = freestream["rho_inf"], freestream["vel_inf"], freestream["p_inf"]
     # 来流方向由攻角/侧滑角决定（此前这里把它硬编码成 +x，见
     # core/utils/flow_direction.py 模块文档列出的五处硬编码）。
     from autoflowcfd.core.utils.flow_direction import direction_from_freestream
-    _dir = direction_from_freestream(solver.freestream)
+    _dir = direction_from_freestream(freestream)
     _v_free = vel_inf * _dir
     Q_free = [rho_inf, float(_v_free[0]), float(_v_free[1]), float(_v_free[2]), p_inf]
 
-    bc_types = solver.mesh.boundary_bc_types or {}
+    bc_types = mesh.boundary_bc_types or {}
 
-    face_conn = solver.mesh.face_connectivity
-    group_code, name_to_code = tag_boundary_groups_for_mesh(solver.mesh, face_conn)
+    face_conn = mesh.face_connectivity
+    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, face_conn)
     # 每个边界面都必须属于一个边界组（2026-10-09 以前没有组的边界面静默当成远场：网格内部缺口的面因此在流场
     # 内部施加来流条件——cube_demo 生成网格的 86 个缺口面里有 20 个就是这样）
     boundary_idx = face_conn.get_boundary_face_indices()
@@ -137,7 +163,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # `SLIP_WALL`（物理滑移）在 WMLES 下**都**变成 `is_no_slip=False`，
     # 下游无从区分（壁面距离、壁面模型、气动力积分、湍流壁面条件都只认物理
     # 无滑移固壁，唯一判据 `boundary/wall_kind.py`）。
-    wall_is_no_slip = getattr(solver, "wall_model", None) is None
+    wall_is_no_slip = not physics.wall_modelled
     type_map: Dict[str, Tuple[str, Dict[str, Any]]] = {
         "WALL": ("WALL", {"is_no_slip": wall_is_no_slip,
                           "physical_no_slip": True}),
@@ -153,15 +179,14 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # BD-02：LES/DDES 模式下给 VELOCITY_INLET 组接入合成湍流入口 (SEM)，
     # 取代常量 Q_inlet——算法本身（boundary/synthetic_inlet.py）已在
     # V2.0 二次评审时修复正确（真实入口几何/雷诺应力 Cholesky 分解/
-    # 涡核时间演化），但此前从未被任何边界路径调用。solver._sem_instances
-    # 供 FRSolver.step() 每个物理步调用一次 advance()（见该列表的
-    # 消费点），不在这里（构造阶段）就调用，因为这里只跑一次。
+    # 涡核时间演化），但此前从未被任何边界路径调用。涡结构的时间推进由求解器每个物理步调用
+    # `advance_synthetic_inlets`，不在这里（构造阶段）推进。
     #
     # 解析湍流脉动的模型（LES、WMLES、DDES、IDDES）在速度入口注入合成湍流。壁面模型只给出近壁应力，不提供
     # 入口的湍流内容：2026-10-19（I-75）以前 WMLES 以"壁面模型已承担近壁湍流校正"为由被排除，发展流的入口是层流。
     from autoflowcfd.core.turbulence.registry import uses_synthetic_inlet
 
-    use_sem = uses_synthetic_inlet(solver.turb_model_name)
+    use_sem = uses_synthetic_inlet(physics.turb_model_name)
 
     # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
     # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的
@@ -170,7 +195,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     if periodic_names:
         periodic_face = (~face_conn.is_boundary) & np.any(face_conn.face_translation != 0.0, axis=1)
     for name in periodic_names:
-        cells = np.asarray((solver.mesh.boundary_groups or {}).get(name, ()), dtype=np.int64)
+        cells = np.asarray((mesh.boundary_groups or {}).get(name, ()), dtype=np.int64)
         paired = periodic_face & (np.isin(face_conn.owner_cell, cells) | np.isin(face_conn.neighbor_cell, cells))
         if not np.any(paired):
             raise ValueError(f"周期边界组 '{name}' 的面未配对（网格连接关系里没有它的周期面）：周期类型必须在"
@@ -202,7 +227,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         config: Dict[str, Any] = {"type": mapped_type, **default_params}
 
         if mapped_type == "INLET" and use_sem:
-            config["sem"] = _build_sem_inlet(solver, name, group_code == code, _dir, Q_free)
+            config["sem"] = _build_sem_inlet(mesh, ops, physics, name, group_code == code, _dir, Q_free)
 
         code_to_config[code] = config
 

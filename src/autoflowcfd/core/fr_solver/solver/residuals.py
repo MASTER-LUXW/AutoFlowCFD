@@ -31,7 +31,8 @@ class _SolverResidualMixin:
 
     def _build_boundary_ghost_provider(self, bc_overrides: Dict[str, Dict[str, Any]]):
         """构建边界幽灵态提供者 (BD-01)，委托给 fr_solver_boundary。"""
-        return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
+        return fr_solver_boundary.build_boundary_ghost_provider(self.mesh, self.ops,
+                                                                fr_solver_boundary.boundary_physics(self), bc_overrides)
 
     def compute_turbulence_source(self, dt) -> Optional[tuple]:
         """湍流场的一次更新（委托给 fr_solver_turbulence.compute_turbulence_source，参数含义见该函数）。"""

@@ -14,8 +14,8 @@ import pytest
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.core.fr_residual.inviscid_p0 import compute_inviscid_residual_fv_p0
-from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit.test_fr_residual_inviscid import _MockCells, _MockNodes
 
 FREESTREAM = {"rho_inf": 1.2, "vel_inf": 30.0, "p_inf": 1.0e5}
@@ -35,8 +35,7 @@ def _mixed_mesh(order, tri=(0, 1, 4)):
 
 
 def _provider(m):
-    return build_boundary_ghost_provider(SimpleNamespace(mesh=m, freestream=dict(FREESTREAM), turb_model_name="NONE",
-                                                         wall_model=None), bc_overrides={})
+    return ghost_provider(m, dict(FREESTREAM), "NONE")
 
 
 @pytest.mark.parametrize("tri", [(0, 1, 4), (0, 4, 3)])

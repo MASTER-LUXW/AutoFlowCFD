@@ -110,7 +110,6 @@ def test_tet_owned_wall_faces_integrate(order):
 
 def test_compute_inlet_fp_positions_on_native_tet_face():
     """SEM 合成湍流入口的通量点坐标在四面体拥有的边界面（原生面编码 >= 6）上能正常外插。"""
-    from types import SimpleNamespace
 
     from autoflowcfd.core.fr_solver.boundary import _compute_inlet_fp_positions
     from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -119,6 +118,6 @@ def test_compute_inlet_fp_positions_on_native_tet_face():
     fc = mesh.face_connectivity
     tet_boundary_faces = np.flatnonzero(fc.is_boundary & (fc.owner_cell >= mesh.n_prism_cells))
     assert tet_boundary_faces.size > 0
-    positions = _compute_inlet_fp_positions(SimpleNamespace(mesh=mesh, ops=mesh.operators), fc.is_boundary.copy())
+    positions = _compute_inlet_fp_positions(mesh, mesh.operators, fc.is_boundary.copy())
     assert set(positions) == set(np.flatnonzero(fc.is_boundary).tolist())
     assert all(np.all(np.isfinite(positions[f])) for f in tet_boundary_faces)

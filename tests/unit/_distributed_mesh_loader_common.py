@@ -7,6 +7,7 @@ from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.fr.operators import generate_fr_operators
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -49,12 +50,7 @@ def _build_all_packages(mesh, ops, n_ranks=2):
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
     freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
 
-    import types
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-    root_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
-    )
-    boundary_ghost_provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
+    boundary_ghost_provider_global = ghost_provider(mesh, freestream, "NONE")
 
     packages = [
         build_fully_distributed_rank_package(

@@ -57,6 +57,5 @@ def test_explicit_zero_gradient_provider_still_works(case):
 
 
 def test_building_a_provider_without_faces_is_an_error():
-    solver = SimpleNamespace(mesh=SimpleNamespace(face_connectivity=None))
     with pytest.raises(ValueError, match="面连接关系"):
-        build_boundary_ghost_provider(solver, {})
+        build_boundary_ghost_provider(SimpleNamespace(face_connectivity=None), None, None, {})

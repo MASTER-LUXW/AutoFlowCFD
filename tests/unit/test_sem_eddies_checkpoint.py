@@ -15,6 +15,7 @@ from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.registry import uses_synthetic_inlet
 from autoflowcfd.core.utils.checkpoint_physics import SEM_AUTO, physics_metadata
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.validation._channel_mesh import build_channel_mesh_prism
 
@@ -81,9 +82,6 @@ def test_distributed_checkpoint_records_the_user_eddy_count(tmp_path):
 
 
 def test_fully_distributed_package_carries_the_eddy_count():
-    import types
-
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
     from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
     from autoflowcfd.fr.operators import generate_fr_operators
@@ -91,12 +89,10 @@ def test_fully_distributed_package_carries_the_eddy_count():
     mesh = _mesh()
     ops = generate_fr_operators(1)
     freestream = {"rho_inf": RHO_INF, "vel_inf": 10.0, "p_inf": P_INF}
-    stub = types.SimpleNamespace(mesh=mesh, ops=ops, freestream=freestream, turb_model_name="LES", wall_model=None,
-                                 _turbulence_intensity=0.01, _viscosity_ratio=5.0, mu_molecular=MU_MOLECULAR,
-                                 _sem_num_eddies=55)
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), rank=0, n_ranks=1,
-        boundary_ghost_provider_global=build_boundary_ghost_provider(stub, bc_overrides={}),
+        boundary_ghost_provider_global=ghost_provider(mesh, freestream, "LES", ops=ops, mu_molecular=MU_MOLECULAR,
+                                                      sem_num_eddies=55),
         freestream=freestream, mu_molecular=MU_MOLECULAR, mach_ref=0.05, order=1, enable_viscous=True,
         **distributed_run_options(turb_model_name="LES", sem_num_eddies=55))
     assert package["sem_num_eddies"] == 55

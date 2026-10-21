@@ -85,7 +85,7 @@ def distributed_mesh_load_v2(
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.fr.operators import generate_fr_operators
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+    from autoflowcfd.core.fr_solver.boundary import BoundaryPhysics, build_boundary_ghost_provider
 
     rank = get_rank()
     comm = get_comm()
@@ -101,39 +101,12 @@ def distributed_mesh_load_v2(
 
         cell_partition = partition_mesh(fc, n_ranks, n_cells=mesh.n_cells)
 
-        # 边界幽灵态提供者只需要完整全局网格构建一次（root 独有）——用
-        # 一个最小鸭子类型对象满足 build_boundary_ghost_provider 的接口
-        # 要求（`.mesh`/`.freestream`/`.turb_model_name`/`.wall_model`，
-        # 见该函数文档），不需要构造真正的 FRSolver。
-        import types
-        # 真实 bug 修复（2026-09-02，接入 SST/DDES/IDDES 时发现）：此前
-        # 这里硬编码 `turb_model_name="NONE"`——`build_boundary_ghost_
-        # provider` 用它判断 `use_sem`（DDES/IDDES 应该在 VELOCITY_INLET
-        # 自动接入 BD-02 合成湍流入口，见 core/fr_solver/boundary.py
-        # 文档），硬编码 "NONE" 会让"完全分布式加载"模式下的 DDES/IDDES
-        # 永远拿不到 SEM 入口，与单机/CPU MPI 传统模式行为不一致。
-        # 真实 bug 修复（2026-09-02，接入 WMLES 时发现，与上面 DDES/IDDES
-        # 的 turb_model_name 硬编码是同一类问题）：`wall_model` 也硬编码
-        # None——`build_boundary_ghost_provider` 用 `getattr(solver,
-        # "wall_model",None) is None` 判断 WALL 组是否要切换
-        # `is_no_slip=False`（见该函数文档 #9 修复说明），WMLES 激活时
-        # 若这里恒为 None 会让"完全分布式加载"模式下的 WMLES 恒得到
-        # `is_no_slip=True`，与单机/CPU MPI 传统模式行为不一致（这里只
-        # 需要一个非 None 的哨兵值，不需要真正的 EquilibriumWallModel 实例——
-        # `build_boundary_ghost_provider` 只检查 is None）。
-        # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与来流湍流（湍流强度、涡粘比、分子粘度——
-        # 定涡核尺度与雷诺应力）必须取用户设置（此前桩上缺这些属性，边界构造的兜底让它们静默变成默认值）
-        # `ops`：合成湍流入口按面通量点几何定位（`boundary/ghost.py::_build_sem_inlet`），2026-10-20 以前桩上缺它，
-        # LES/WMLES/DDES/IDDES 带速度入口时这里抛 AttributeError
-        root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, ops=ops, freestream=freestream, turb_model_name=turb_model_name,
-            wall_model=(object() if needs_wall_model(turb_model_name, wall_treatment) else None),
-            _turbulence_intensity=turbulence_intensity, _viscosity_ratio=viscosity_ratio,
-            mu_molecular=mu_molecular, _sem_num_eddies=sem_num_eddies,
-        )
-        boundary_ghost_provider_global = build_boundary_ghost_provider(
-            root_solver_stub, bc_overrides=bc_overrides or {},
-        )
+        # 边界幽灵态提供者只需要完整全局网格构建一次（root 独有），物理设置全部取用户设置（湍流模型决定速度入口的
+        # 合成湍流，近壁处理决定 WALL 组是否为滑移镜像，Tu / VR / 分子粘度 / 涡核数定合成湍流的尺度与强度）
+        physics = BoundaryPhysics(freestream, mu_molecular, turb_model_name,
+                                  needs_wall_model(turb_model_name, wall_treatment), turbulence_intensity,
+                                  viscosity_ratio, sem_num_eddies)
+        boundary_ghost_provider_global = build_boundary_ghost_provider(mesh, ops, physics, bc_overrides or {})
 
         # 输运模型（SST 族、SA-neg）：wall_distance_source/h_max/h_wn 只依赖完整
         # 全局网格，只需要算一次（不随 rank 变化），见
@@ -409,13 +382,12 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
     那份 2026-09-15 修过的同一个问题）。
     """
     import pickle
-    import types
 
     from autoflowcfd.fr.operators import generate_fr_operators
 
     comm = get_comm()
     if root_context is not None:
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+        from autoflowcfd.core.fr_solver.boundary import BoundaryPhysics, build_boundary_ghost_provider
 
         mesh = root_context['mesh']
         for o in [o for o in list(mesh._order_geometry_cache) if o != target_p]:
@@ -425,15 +397,11 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
         root_context['ops'] = ops
 
         turb_model_name = root_context['turb_model_name']
-        root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, ops=ops, freestream=root_context['freestream'], turb_model_name=turb_model_name,
-            wall_model=(object() if needs_wall_model(turb_model_name, root_context['wall_treatment']) else None),
-            _turbulence_intensity=root_context['turbulence_intensity'],
-            _viscosity_ratio=root_context['viscosity_ratio'], mu_molecular=root_context['mu_molecular'],
-            _sem_num_eddies=root_context['sem_num_eddies'],
-        )
-        provider = build_boundary_ghost_provider(
-            root_solver_stub, bc_overrides=root_context['bc_overrides'])
+        physics = BoundaryPhysics(root_context['freestream'], root_context['mu_molecular'], turb_model_name,
+                                  needs_wall_model(turb_model_name, root_context['wall_treatment']),
+                                  root_context['turbulence_intensity'], root_context['viscosity_ratio'],
+                                  root_context['sem_num_eddies'])
+        provider = build_boundary_ghost_provider(mesh, ops, physics, root_context['bc_overrides'])
         root_context['boundary_ghost_provider_global'] = provider
 
         packages = [

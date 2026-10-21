@@ -6,6 +6,7 @@ y+ 极小，Spalding 律退化为 u+ = y+，tau_w = mu U / 1e-8，等于刚性�
 无滑移壁面，不需要壁距场。
 """
 
+from tests.unit._boundary_physics import ghost_provider
 import numpy as np
 import pytest
 
@@ -148,11 +149,8 @@ def test_residual_correction_is_conservative_momentum_only(order):
 
 def test_native_tet_wall_face():
     """四面体 owner 的壁面通量点：匹配点反解走原生四面体节点基，修正有限、只落在该单元。"""
-    import types
-
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
     from autoflowcfd.fr.operators import generate_fr_operators
     from tests.unit._boundary_groups import tag_wall_cells
@@ -165,9 +163,7 @@ def test_native_tet_wall_face():
     tet_faces = np.nonzero(fc.is_boundary & (fc.owner_cell >= mesh.n_prism_cells))[0]
     wall_cell = int(fc.owner_cell[tet_faces[0]])
     tag_wall_cells(mesh, [wall_cell])
-    stub = types.SimpleNamespace(mesh=mesh, freestream={"rho_inf": RHO, "vel_inf": U0, "p_inf": 101325.0},
-                                 turb_model_name="WMLES", wall_model=EquilibriumWallModel())
-    provider = build_boundary_ghost_provider(stub, bc_overrides={})
+    provider = ghost_provider(mesh, {"rho_inf": RHO, "vel_inf": U0, "p_inf": 101325.0}, "WMLES", wall_modelled=True)
     U = np.tile(primitive_to_conserved(np.array([RHO, U0, 5.0, -3.0, 101325.0])),
                 (mesh.n_cells, mesh.n_sps_per_cell, 1))
     model = EquilibriumWallModel()

@@ -31,7 +31,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
     from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
     from autoflowcfd.core.gpu.distributed.gpu_distributed import _CompactMeshDataView
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+    from autoflowcfd.core.fr_solver.boundary import boundary_physics, build_boundary_ghost_provider
 
     cp = get_cupy()
 
@@ -157,7 +157,8 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
 
     solver.boundary_ghost_provider = restrict_ghost_provider(
-        build_boundary_ghost_provider(solver, bc_overrides={}), solver.partition.local_faces)
+        build_boundary_ghost_provider(solver.mesh, solver.ops, boundary_physics(solver), {}),
+        solver.partition.local_faces)
 
     # WALL 边界面拓扑掩码（compact 索引空间，SST k/omega 输运 Dirichlet
     # BC 用）——与 __init__ 同一套构造，压缩面数已随上面的重建改变。

@@ -4,14 +4,13 @@
 很久（组名写成 y_min/y_max，而网格里叫 wall_bottom/wall_top）都没人发现。
 """
 
-import types
+from tests.unit._boundary_physics import ghost_provider
 
 import pytest
 
-from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-from autoflowcfd.fr.operators import generate_fr_operators
 from tests.validation._channel_mesh import build_channel_mesh_prism
 
+_FREESTREAM = {"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0}
 FULL = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
         "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
 
@@ -19,11 +18,7 @@ FULL = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "W
 def _provider(bc_types, bc_overrides=None):
     mesh = build_channel_mesh_prism(1, 2, 2, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(bc_types)
-    stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
-        freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
-        _sem_num_eddies=40, _turbulence_intensity=0.01)
-    return build_boundary_ghost_provider(stub, bc_overrides=bc_overrides or {})
+    return ghost_provider(mesh, _FREESTREAM, bc_overrides=bc_overrides)
 
 
 def test_complete_types_build():
@@ -57,12 +52,8 @@ def test_boundary_face_without_a_group_is_an_error():
     mesh.boundary_bc_types = dict(FULL)
     surf = mesh.boundary_surface_mesh["boundaries"]                  # z_max 的面在面网格里没有组
     del surf.groups["z_max"], surf.bc_types["z_max"]
-    stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
-        freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
-        _sem_num_eddies=40, _turbulence_intensity=0.01)
     with pytest.raises(ValueError, match="不属于任何边界组"):
-        build_boundary_ghost_provider(stub, bc_overrides={})
+        ghost_provider(mesh, _FREESTREAM)
 
 
 def test_paired_periodic_groups_need_no_ghost_state_and_do_not_claim_other_faces():
@@ -77,9 +68,5 @@ def test_paired_periodic_groups_need_no_ghost_state_and_do_not_claim_other_faces
     assert "x_min" not in name_to_code and "x_max" not in name_to_code
     assert (group_code[fc.get_boundary_face_indices()] >= 0).all()
 
-    stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
-        freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
-        _sem_num_eddies=40, _turbulence_intensity=0.01)
-    provider = build_boundary_ghost_provider(stub, bc_overrides={})
+    provider = ghost_provider(mesh, _FREESTREAM)
     assert {cfg["type"] for cfg in provider.code_to_config.values()} == {"SYMMETRY"}

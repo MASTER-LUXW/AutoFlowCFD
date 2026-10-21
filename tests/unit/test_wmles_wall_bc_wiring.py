@@ -19,7 +19,7 @@ WMLES 激活时 WALL 组的 ghost state 改用 is_no_slip=False。
 from unittest.mock import patch
 import numpy as np
 
-from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+from autoflowcfd.core.fr_solver.boundary import BoundaryPhysics, build_boundary_ghost_provider
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._boundary_groups import tag_wall_cells
@@ -45,16 +45,9 @@ class _FakeMesh:
         self.boundary_surface_mesh = None
 
 
-class _FakeSolver:
-    def __init__(self, wall_model):
-        self.mesh = _FakeMesh()
-        self.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
-        self.turb_model_name = "WMLES" if wall_model is not None else "SST"
-        self.wall_model = wall_model
-
-
 def _build_provider(wall_model):
-    solver = _FakeSolver(wall_model)
+    physics = BoundaryPhysics({"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}, MU_MOLECULAR,
+                              "WMLES" if wall_model is not None else "SST", wall_model is not None, 0.01, 5.0, None)
     group_code = np.array([0, 0, -1, -1], dtype=np.int32)
     name_to_code = {"wall_group": 0}
     # patch 目标必须是**真正持有调用点**的子模块：`boundary` 2026-09-24
@@ -65,7 +58,7 @@ def _build_provider(wall_model):
         "autoflowcfd.core.fr_solver.boundary.ghost.tag_boundary_groups_for_mesh",
         return_value=(group_code, name_to_code),
     ):
-        return build_boundary_ghost_provider(solver, bc_overrides={})
+        return build_boundary_ghost_provider(_FakeMesh(), None, physics, {})
 
 
 class TestWmlesWallBcNoDoubleCounting:
@@ -89,7 +82,7 @@ class TestWmlesWallBcNoDoubleCounting:
 
 class TestRealFRSolverWmlesConstructionOrder:
     """收尾集成测试：真正构造 `FRSolver(..., turb_model_name="wmles")`，
-    不像上面两个测试那样用手搭的 `_FakeSolver`（提前把 `wall_model`
+    不像上面两个测试那样直接给出 `BoundaryPhysics`（提前把 `wall_model`
     设好再调用 `build_boundary_ghost_provider`）。
 
     真实 bug（2026-09-02，排查分布式 WMLES 支持时发现，与分布式本身

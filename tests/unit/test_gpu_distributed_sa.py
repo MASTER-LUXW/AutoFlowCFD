@@ -25,6 +25,7 @@ from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.fr.operators import generate_fr_operators
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._fake_halo import ShapeKeyedFakeHalo
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
@@ -126,7 +127,6 @@ def test_fully_distributed_build_wires_sa(monkeypatch, gpu_shim):
     """多 GPU 完全分布式加载构造 SA-neg：模型来自与单机同一个工厂（来流值）、root 算好的壁距原样上传、
     本 rank local 壁面解点经壁距钩子置零。构造期依赖 CUDA 的数组管理/面几何/halo 用该文件同一组替身。"""
     import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as scalar_transport_mod
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
     from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
         build_multi_gpu_solver_from_fully_distributed_package,
@@ -144,10 +144,9 @@ def test_fully_distributed_build_wires_sa(monkeypatch, gpu_shim):
     mesh = _build_synthetic_mixed_mesh(1)
     ops = generate_fr_operators(1)
     freestream = {"rho_inf": RHO, "vel_inf": 33.33, "p_inf": 101325.0}
-    stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wall_model=None)
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
-        build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=MU, mach_ref=0.2,
+        ghost_provider(mesh, freestream, "SA"), freestream, mu_molecular=MU, mach_ref=0.2,
         order=mesh.order, enable_viscous=True, wall_distance_source=synthetic_wall_source(mesh),
         **distributed_run_options(turb_model_name="SA", viscosity_ratio=3.0))
     solver = build_multi_gpu_solver_from_fully_distributed_package(

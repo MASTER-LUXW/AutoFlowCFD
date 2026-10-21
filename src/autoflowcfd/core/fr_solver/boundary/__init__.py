@@ -12,10 +12,14 @@ BoundaryGhostStateProvider 接口上，供 core/fr_residual/inviscid.py 使用�
 """
 
 from .ghost import (  # noqa: F401
+    BoundaryPhysics,
     _compute_inlet_fp_positions,
+    boundary_physics,
     build_boundary_ghost_provider,
 )
 
 __all__ = [
+    "BoundaryPhysics",
+    "boundary_physics",
     "build_boundary_ghost_provider",
 ]

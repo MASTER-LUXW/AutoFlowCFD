@@ -22,6 +22,12 @@ def _freestream_turbulence_parameters(solver) -> tuple:
 
 
 def _set_freestream_turbulence(solver) -> tuple:
+    """求解器的来流 `(k_inf, omega_inf)`（`freestream_k_omega`，取求解器上的来流、分子粘度与 Tu / VR）。"""
+    return freestream_k_omega(solver.freestream, solver.mu_molecular, *_freestream_turbulence_parameters(solver))
+
+
+def freestream_k_omega(freestream: dict, mu_molecular: float, turbulence_intensity: float,
+                       viscosity_ratio: float) -> tuple:
     """根据来流条件从 Tu/VR 推导物理自洽的 k/omega 初值。
 
     工业 RANS 标准做法（Fluent 用户手册 Section 7.3.2、OpenFOAM 通用实践）：
@@ -42,12 +48,11 @@ def _set_freestream_turbulence(solver) -> tuple:
     # 一个（随模态滤波已删除的）测试一直传着键名全错的
     # `{"rho": 1.0, "u": 1.0, ...}`，作者想要单位量级，实际用的是兜底的
     # p_inf=101325 —— 没人发现，因为什么都没报错。
-    vel_inf = solver.freestream["vel_inf"]
-    rho_inf = solver.freestream["rho_inf"]
-    mu = solver.mu_molecular
-    nu = mu / max(rho_inf, 1e-10)
+    vel_inf = freestream["vel_inf"]
+    rho_inf = freestream["rho_inf"]
+    nu = mu_molecular / max(rho_inf, 1e-10)
 
-    Tu, VR = _freestream_turbulence_parameters(solver)
+    Tu, VR = turbulence_intensity, viscosity_ratio
 
     k_inf = 1.5 * (vel_inf * Tu) ** 2
     nu_t_inf = VR * nu

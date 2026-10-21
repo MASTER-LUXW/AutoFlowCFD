@@ -345,12 +345,11 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         return f" | GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
 
     def _build_boundary_ghost_provider(self, bc_overrides):
-        """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 复用同一套
-        构建逻辑（fr_solver/boundary/ghost.py::build_boundary_ghost_provider
-        只依赖 self.mesh/self.freestream/self.turb_model_name/
-        self.wall_model，在这个调用点之前均已设置好）。"""
+        """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 同一个构造（`boundary_physics` 读的属性在这个调用点
+        之前均已设置好）。"""
         from autoflowcfd.core.fr_solver import boundary as fr_solver_boundary
-        return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
+        return fr_solver_boundary.build_boundary_ghost_provider(self.mesh, self.ops,
+                                                                fr_solver_boundary.boundary_physics(self), bc_overrides)
 
     def _limit_prolongated_state(self) -> None:
         """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的

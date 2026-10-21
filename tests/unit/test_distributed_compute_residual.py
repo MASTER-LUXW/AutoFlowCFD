@@ -61,6 +61,7 @@ from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_f
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 from autoflowcfd.fr.operators import generate_fr_operators
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._boundary_groups import tag_wall_cells
 
@@ -226,7 +227,6 @@ class TestDistributedResidualMatchesSingleMachine:
         rho_inf = 1.225
 
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 
         # 真实 WALL 组：取一个真实边界面的 owner 单元打标签（与
@@ -236,12 +236,8 @@ class TestDistributedResidualMatchesSingleMachine:
         wall_cell = int(fc.owner_cell[boundary_face])
         tag_wall_cells(mesh, [wall_cell])
 
-        import types
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wall_model=object(),  # 触发 is_no_slip=False
-        )
-        provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        provider_global = ghost_provider(mesh, {"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0}, "WMLES",
+                                         wall_modelled=True)
 
         residual_single = compute_viscous_residual_fr(
             U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=provider_global,

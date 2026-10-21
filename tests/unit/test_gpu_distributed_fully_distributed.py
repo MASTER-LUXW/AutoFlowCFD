@@ -37,6 +37,7 @@ import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdf
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
 import autoflowcfd.core.gpu.gpu_face_geometry as gpu_face_geometry_mod
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -99,11 +100,7 @@ def _build_none_package(mesh, ops, rank=0, n_ranks=1):
     cell_partition = np.zeros(mesh.n_cells, dtype=np.int32)
     freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
 
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-    root_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
-    )
-    boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+    boundary_ghost_provider = ghost_provider(mesh, freestream, "NONE")
 
     return build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, rank, n_ranks,
@@ -118,11 +115,7 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
     cell_partition = np.zeros(mesh.n_cells, dtype=np.int32)
     freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
 
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-    root_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
-    )
-    boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+    boundary_ghost_provider = ghost_provider(mesh, freestream, "SST")
 
     return build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, rank, n_ranks,
@@ -136,7 +129,6 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
 def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, model):
     """I-111：WMLES 与单机一样 = 壁面模型 + WALE 亚格子模型（此前四条分布式路径只给 LES 构造 WALE，
     WMLES 在分布式上没有任何亚格子涡粘）；两者都不需要壁距。"""
-    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
     from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
         build_multi_gpu_solver_from_fully_distributed_package,
@@ -146,11 +138,10 @@ def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, mode
 
     mesh, ops = mesh_and_ops
     freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
-    stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name=model,
-                                 wall_model=EquilibriumWallModel() if model == "WMLES" else None)
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
-        build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=1.8e-5, mach_ref=0.2,
+        ghost_provider(mesh, freestream, model, wall_modelled=model == "WMLES"), freestream, mu_molecular=1.8e-5,
+        mach_ref=0.2,
         order=mesh.order, enable_viscous=True, **distributed_run_options(turb_model_name=model))
     solver = build_multi_gpu_solver_from_fully_distributed_package(
         MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
@@ -338,12 +329,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         fc = mesh.face_connectivity
         cell_partition = np.zeros(mesh.n_cells, dtype=np.int32)
         freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
-        import types as _types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = _types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
-        )
-        boundary_ghost_provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider_global = ghost_provider(mesh, freestream, "NONE")
         return {
             'mesh': mesh, 'ops': ops, 'fc': fc, 'cell_partition': cell_partition,
             'boundary_ghost_provider_global': boundary_ghost_provider_global,

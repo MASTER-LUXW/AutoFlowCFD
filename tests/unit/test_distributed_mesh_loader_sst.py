@@ -5,6 +5,7 @@ import pytest
 
 from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._distributed_run_options import distributed_run_options
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import _nonuniform_U, mesh_and_ops
@@ -33,11 +34,7 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "SST")
 
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
@@ -95,11 +92,7 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "SST")
 
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
@@ -136,13 +129,11 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.sa import SAModel
         from autoflowcfd.core.turbulence.sa.constants import chi_for_viscosity_ratio
-        root_stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wall_model=None)
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,
-            boundary_ghost_provider_global=build_boundary_ghost_provider(root_stub, bc_overrides={}),
+            boundary_ghost_provider_global=ghost_provider(mesh, freestream, "SA"),
             freestream=freestream, mu_molecular=mu, mach_ref=0.2, order=mesh.order, enable_viscous=True,
             wall_distance_source=synthetic_wall_source(mesh),
             **distributed_run_options(turb_model_name="SA", viscosity_ratio=3.0),
@@ -183,12 +174,8 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="DDES", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "DDES")
 
         # 缺少 h_max_global 时必须显式报错，不能静默退化——决定性验证
         # 这条 fail-fast 护栏本身。
@@ -253,12 +240,8 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="IDDES", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "IDDES")
         h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
         package = build_fully_distributed_rank_package(
@@ -318,11 +301,7 @@ class TestFullyDistributedSstTurbulence:
         tag_wall_cells(mesh, [wall_cell])
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="WMLES", wall_model=object(),
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "WMLES", wall_modelled=True)
 
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,
@@ -367,11 +346,7 @@ class TestFullyDistributedSstTurbulence:
         mu = 1.8e-5
 
         import types
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="LES", wall_model=None,
-        )
-        boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        boundary_ghost_provider = ghost_provider(mesh, freestream, "LES")
 
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks,

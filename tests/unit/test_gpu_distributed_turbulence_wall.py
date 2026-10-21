@@ -10,6 +10,7 @@ from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_fa
 from autoflowcfd.core.gpu.distributed.gpu_distributed_init import _GPUDistributedInitMixin
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
 
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -73,7 +74,6 @@ class TestWmlesDistributedGpu:
     @pytest.mark.parametrize("rank", [0, 1])
     def test_wmles_correction_matches_direct_cpu_call(self, rank, monkeypatch):
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.gpu.distributed.gpu_distributed.compact_view import _CompactMeshDataView
         from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
         import autoflowcfd.core.gpu.residual.gpu_viscous as gpu_viscous_mod
@@ -92,11 +92,8 @@ class TestWmlesDistributedGpu:
         wall_cell = int(fc.owner_cell[boundary_face])
         tag_wall_cells(mesh, [wall_cell])
 
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wall_model=object(),
-        )
-        provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        provider_global = ghost_provider(mesh, {"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0}, "WMLES",
+                                         wall_modelled=True)
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)

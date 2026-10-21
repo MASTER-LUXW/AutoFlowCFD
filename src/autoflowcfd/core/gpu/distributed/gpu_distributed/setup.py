@@ -313,14 +313,9 @@ class _MultiGPUSetupMixin:
         # 不一致。镜像 GPUFRSolver 的构造模式：真正构建一个反映边界条件
         # 的 ghost provider，而不是让调用方各自传 None 退化成
         # DefaultGhostProvider。
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        # self.wall_model 已在上面湍流模型初始化处构造好（WMLES 时为
-        # 真实 EquilibriumWallModel 实例，否则 None）——不在这里重置，
-        # build_boundary_ghost_provider 用 getattr(self,"wall_model",
-        # None) 判断 WALL 组 is_no_slip 取值，必须能读到真实值。
-        # self._turbulence_intensity/_viscosity_ratio 已在上面湍流模型
-        # 初始化处设置（构造参数，不再在这里用硬编码默认值覆盖）。
-        self.boundary_ghost_provider = build_boundary_ghost_provider(self, bc_overrides={})
+        from autoflowcfd.core.fr_solver.boundary import boundary_physics, build_boundary_ghost_provider
+        # `boundary_physics` 读的 wall_model（WMLES 时 WALL 组为滑移镜像）与 Tu / VR 已在上面湍流模型初始化处设置
+        self.boundary_ghost_provider = build_boundary_ghost_provider(self.mesh, self.ops, boundary_physics(self), {})
 
         # 真实 bug 修复（2026-09-02，实现分布式湍流模型时排查发现，与
         # 湍流本身无关——任何使用真实 WALL/INLET/OUTLET/FARFIELD/SYMMETRY

@@ -136,10 +136,9 @@ class TestGpuInterpolateToNewOrderCoreMath:
                 return {"cell_volumes": np.ones(n_local)}
         solver.array_mgr = _FakeArrayMgr()
 
-        monkeypatch.setattr(
-            "autoflowcfd.core.fr_solver.boundary.build_boundary_ghost_provider",
-            lambda solver_, bc_overrides=None: None,
-        )
+        monkeypatch.setattr("autoflowcfd.core.fr_solver.boundary.boundary_physics", lambda solver_: None)
+        monkeypatch.setattr("autoflowcfd.core.fr_solver.boundary.build_boundary_ghost_provider",
+                            lambda mesh, ops, physics, bc_overrides: None)
 
         class _FakeOps:
             n_sps = 6
@@ -205,10 +204,9 @@ class TestGpuInterpolateToNewOrderCoreMath:
                 return {"cell_volumes": np.ones(n_local)}
         solver.array_mgr = _FakeArrayMgr()
 
-        monkeypatch.setattr(
-            "autoflowcfd.core.fr_solver.boundary.build_boundary_ghost_provider",
-            lambda solver_, bc_overrides=None: None,
-        )
+        monkeypatch.setattr("autoflowcfd.core.fr_solver.boundary.boundary_physics", lambda solver_: None)
+        monkeypatch.setattr("autoflowcfd.core.fr_solver.boundary.build_boundary_ghost_provider",
+                            lambda mesh, ops, physics, bc_overrides: None)
 
         class _FakeOps:
             n_sps = 1

@@ -12,9 +12,9 @@ import pytest
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
-from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 from autoflowcfd.fr.operators import generate_fr_operators
+from tests.unit._boundary_physics import ghost_provider
 from tests.unit._boundary_groups import tag_wall_cells
 from tests.unit._numpy_as_cupy import NumpyAsCupy
 from tests.unit._patch_pkg import patch_pkg_attr
@@ -32,9 +32,7 @@ def _case(wall: bool):
         tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
     else:
         tag_wall_cells(mesh, [], rest_type="FARFIELD")
-    stub = types.SimpleNamespace(mesh=mesh, freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0},
-                                 turb_model_name="WMLES", wall_model=EquilibriumWallModel())
-    provider = build_boundary_ghost_provider(stub, bc_overrides={})
+    provider = ghost_provider(mesh, {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, "WMLES", wall_modelled=True)
     rng = np.random.default_rng(0)
     Q = np.zeros((mesh.n_cells, mesh.n_sps_per_cell, 5))
     Q[..., 0] = 1.225 * (1.0 + rng.uniform(-0.02, 0.02, Q.shape[:2]))
