@@ -171,9 +171,7 @@ class _DistributedFromPackageMixin:
         # 设成该值但 `self.turb_model`/`.wall_model`/`.sgs_model` 都
         # 留空——`step()` 会静默把它当成 'none' 跑（湍流物理完全缺失，
         # 不会有任何报错或警告）。
-        from autoflowcfd.core.turbulence.registry import (
-            has_transport_equations, is_sa_family, require_supported,
-        )
+        from autoflowcfd.core.turbulence.registry import has_transport_equations, require_supported
         if turb_model_name != require_supported(turb_model_name):
             raise NotImplementedError(
                 f"DistributedFRSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
@@ -198,59 +196,23 @@ class _DistributedFromPackageMixin:
         self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
         self._viscosity_ratio = package['viscosity_ratio']
         self._sem_num_eddies = package['sem_num_eddies']
-        self.turb_model = None
         self.wall_distance_compact = package['wall_distance_compact']
-        self.ddes_model = None
         self.iddes_h_max_compact = package['iddes_h_max_compact']
         self.iddes_h_wn_compact = package['iddes_h_wn_compact']
-        # `step()` 的 `residual_func` 无条件读取 `self.wall_model`/
-        # `self.sgs_model`（与主 `__init__` 同一个属性名约定），必须
-        # 存在这两个属性，否则任何 turb_model_name 都会在 step() 里
-        # AttributeError——两者默认 None，只在下面对应分支里真正构造。
-        self.wall_model = None
-        self.sgs_model = None
-
-        from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
-        if uses_algebraic_sgs(turb_model_name):
-            # LES / WMLES：WALE 纯代数 SGS 模型，不需要 root 预计算任何几何量
-            from autoflowcfd.core.turbulence.sgs import WALEModel
-            self.sgs_model = WALEModel()
+        # `step()` 无条件读取 turb_model / ddes_model / sgs_model / wall_model（与主 `__init__` 同一组属性），不适用的为 None
         self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
+        # 湍流模型对象与全部后端同一个构造处（`build_turbulence_models`）；DES 网格尺度由 root 算好随包下发——这里的
+        # `self.mesh` 是 `PrecompactedMeshData`，没有完整节点坐标，不能像 `init_turbulence_models` 那样现算
+        from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models
+
+        models = build_turbulence_models(self, turb_model_name, self.partition.n_local_cells, n_sps)
+        self.turb_model, self.ddes_model, self.sgs_model = models
 
         if has_transport_equations(turb_model_name):
-            n_local = self.partition.n_local_cells
-            # 直接复用单机路径同一套 Tu/VR 推导 k_inf/omega_inf +
-            # k_max/omega_max 物理上界公式（`_set_freestream_
-            # turbulence`/`_set_turbulence_bounds` 都是鸭子类型函数，
-            # 只需要 `.freestream`/`.mu_molecular`/`._turbulence_
-            # intensity`/`._viscosity_ratio`/`.turb_model`，`self` 此时
-            # 已经全部满足）——不直接调用 `init_turbulence_models`，
-            # 因为它的 IDDES 分支会用 `solver.mesh` 重新计算 h_max/
-            # h_wn（这里 `self.mesh` 是 `PrecompactedMeshData`，没有
-            # 完整节点坐标/连接关系，算不出来），而 h_max/h_wn 本来就
-            # 已经由 root 算好放进 package 了，不需要重算。
-            from autoflowcfd.core.fr_solver.turbulence import (
-                _set_freestream_turbulence, _set_turbulence_bounds,
-            )
-            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
-            if is_sa_family(turb_model_name):
-                self.turb_model = create_sa_model(self, n_local, n_sps)
-            else:
-                from autoflowcfd.core.turbulence.sst import SSTModelFR
-                k_inf, omega_inf = _set_freestream_turbulence(self)
-                self.turb_model = SSTModelFR(n_local, n_sps, k_inf=k_inf, omega_inf=omega_inf)
-                _set_turbulence_bounds(self)
             # 壁距交给模型（SST 的 omega 上界按 root 算好的壁距取全局最小、SA 的壁面解点），
             # 与传统模式同一函数
             from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
             apply_distributed_wall_distance(self.turb_model, self.wall_distance_compact, self)
-
-            if turb_model_name == 'DDES':
-                from autoflowcfd.core.turbulence.des import DDESModel
-                self.ddes_model = DDESModel()
-            elif turb_model_name == 'IDDES':
-                from autoflowcfd.core.turbulence.des import IDDESModel
-                self.ddes_model = IDDESModel()
 
         # 轻量级鸭子类型"local_solver"替身（不构造真正的 FRSolver——那
         # 需要完整全局网格重新生成 sps 几何/差分算子，在这条路径下既

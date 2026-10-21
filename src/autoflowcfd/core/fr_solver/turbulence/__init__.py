@@ -19,7 +19,7 @@ AutoFlowCFD V2.0 - FRSolver 湍流模型管理
 """
 
 from .init import (  # noqa: F401
-    _set_freestream_turbulence, _set_turbulence_bounds,
+    _set_freestream_turbulence, build_turbulence_models, describe_turbulence_models,
     init_turbulence_models,
 )
 from .wall_distance import (  # noqa: F401

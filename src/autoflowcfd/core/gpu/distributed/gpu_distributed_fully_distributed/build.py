@@ -57,7 +57,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     turb_model_name = package['turb_model_name']
     from autoflowcfd.core.turbulence.registry import require_supported
-    from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
     if turb_model_name != require_supported(turb_model_name):
         raise NotImplementedError(
             f"MultiGPUDistributedSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
@@ -124,11 +123,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.state = DistributedFRState(self.partition, n_sps)
 
     freestream_pkg = package['freestream']
-    # 不给兜底值（2026-09-24）：package 的 freestream 由
-    # `build_fully_distributed_rank_package` 从 CLI 的 freestream 字典原样
-    # 写入，三个键必然存在；此前 `.get('vel_inf', 33.33)` 这类兜底与 CLI
-    # 默认值是两份事实来源，缺字段时会静默用一个错的来流。
-    vel_inf = freestream_pkg['vel_inf']
     # `self.freestream`（含 mach_ref）在"传统模式" `__init__` 里是无条件
     # 设置的（AUSM+up Weiss-Smith 预处理在全部 turb_model_name 下都要
     # 读 `self.freestream["mach_ref"]`，不是只有 SST/DDES/IDDES 才需要
@@ -182,39 +176,14 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.wall_model = None
     self.wall_distance_gpu = None
 
-    if turb_model_name == 'SA':
-        from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
-        with cp.cuda.Device(device_id):
-            self.turb_model_gpu = create_sa_model(self, n_local, n_sps, xp=cp)
-        logger.info(f"Rank {self.rank}: GPU SA-neg model initialized (fully-distributed mode, "
-                    f"nu_tilde_inf={self.turb_model_gpu.nu_tilde_inf:.4e})")
+    from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models, describe_turbulence_models
+    from autoflowcfd.core.turbulence.registry import has_transport_equations
+
+    models = build_turbulence_models(self, turb_model_name, n_local, n_sps, cp=cp, device_id=device_id)
+    self.turb_model_gpu, self.ddes_model_gpu, self.sgs_model_gpu = models
+    if has_transport_equations(turb_model_name):
         _upload_wall_geometry_compact(self, package, cp, device_id)
-
-    elif is_sst_family(turb_model_name):
-        from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
-        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-        k_inf, omega_inf = _set_freestream_turbulence(self)     # 与 CPU 同一个函数
-        self.turb_model_gpu = GPUTurbulenceSST(
-            n_local, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
-        )
-        from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
-        configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)   # omega_max 算出壁距后重定
-        logger.info(f"Rank {self.rank}: GPU SST model initialized (fully-distributed mode, "
-                    f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-
-        _upload_wall_geometry_compact(self, package, cp, device_id)
-
-        if turb_model_name == 'DDES':
-            from autoflowcfd.core.turbulence.des import DDESModel
-            self.ddes_model_gpu = DDESModel()
-        elif turb_model_name == 'IDDES':
-            from autoflowcfd.core.turbulence.des import IDDESModel
-            self.ddes_model_gpu = IDDESModel()
-
-    if uses_algebraic_sgs(turb_model_name):
-        from autoflowcfd.core.turbulence.sgs import WALEModel
-        self.sgs_model_gpu = WALEModel()
-        logger.info(f"Rank {self.rank}: GPU {turb_model_name} with WALE SGS model initialized (fully-distributed mode)")
+    logger.info(f"Rank {self.rank}: GPU {describe_turbulence_models(turb_model_name, models)} (fully-distributed mode)")
     from autoflowcfd.core.turbulence.wall_model import build_wall_model
     self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
 

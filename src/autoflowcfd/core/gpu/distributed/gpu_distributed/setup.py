@@ -9,7 +9,6 @@
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy, gpu_available
-from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
@@ -252,46 +251,22 @@ class _MultiGPUSetupMixin:
         self.ddes_model_gpu = None
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
-        if str(turb_model).upper() == "SA":
-            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
-            with cp.cuda.Device(device_id):
-                self.turb_model_gpu = create_sa_model(self, self.partition.n_local_cells, n_sps, xp=cp)
-            logger.info(f"Rank {self.rank}: GPU SA-neg model initialized "
-                        f"(nu_tilde_inf={self.turb_model_gpu.nu_tilde_inf:.4e})")
-        elif is_sst_family(turb_model):
-            from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-            n_local_cells = self.partition.n_local_cells
-            k_inf, omega_inf = _set_freestream_turbulence(self)     # 与 CPU 同一个函数
-            self.turb_model_gpu = GPUTurbulenceSST(
-                n_local_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
-            )
-            from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
-            configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)   # omega_max 算出壁距后重定
-            logger.info(f"Rank {self.rank}: GPU SST model initialized "
-                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
+        from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models, describe_turbulence_models
 
+        models = build_turbulence_models(self, turb_model, self.partition.n_local_cells, n_sps, cp=cp,
+                                         device_id=device_id)
+        self.turb_model_gpu, self.ddes_model_gpu, self.sgs_model_gpu = models
+        if models.des is not None:
             # DDES/IDDES：逐单元网格尺度只依赖几何（`des/grid_scale.py::compute_h_max_and_h_wn`），
             # "传统模式"下 self.mesh 是完整全局网格，算一次、按 compact_global_ids 切片；全局结果
             # 保留供 Order Continuation 换阶数后重新切片（几何量与阶数无关）
-            if turb_model in ("DDES", "IDDES"):
-                from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
-                self.ddes_model_gpu = DDESModel() if turb_model == "DDES" else IDDESModel()
-                self._iddes_h_max_global, self._iddes_h_wn_global = compute_h_max_and_h_wn(mesh)
-                compact_global_ids = self.dist_flat_face.compact_global_ids
-                with cp.cuda.Device(device_id):
-                    self.iddes_h_max_compact = cp.asarray(self._iddes_h_max_global[compact_global_ids])
-                    self.iddes_h_wn_compact = cp.asarray(self._iddes_h_wn_global[compact_global_ids])
-                logger.info(f"Rank {self.rank}: GPU {turb_model} model initialized (based on SST)")
-
-        # LES（2026-09-02）：WALE 是纯代数模型（不像 SST 的 k/omega 有
-        # 跨步 ODE 积分状态），`_compute_turbulence_source_distributed`
-        # 用当前状态现算 mu_t，不需要任何跨步持久 halo 交换基础设施。
-        self.sgs_model_gpu = None
-        if uses_algebraic_sgs(turb_model):
-            from autoflowcfd.core.turbulence.sgs import WALEModel
-            self.sgs_model_gpu = WALEModel()
-            logger.info(f"Rank {self.rank}: GPU {turb_model} with WALE SGS model initialized")
+            from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
+            self._iddes_h_max_global, self._iddes_h_wn_global = compute_h_max_and_h_wn(mesh)
+            compact_global_ids = self.dist_flat_face.compact_global_ids
+            with cp.cuda.Device(device_id):
+                self.iddes_h_max_compact = cp.asarray(self._iddes_h_max_global[compact_global_ids])
+                self.iddes_h_wn_compact = cp.asarray(self._iddes_h_wn_global[compact_global_ids])
+        logger.info(f"Rank {self.rank}: GPU {describe_turbulence_models(turb_model, models)}")
 
         # WMLES：没有输运状态，只构造壁面模型（与单机同一份）。必须在下面 build_boundary_ghost_provider
         # 之前构造——该函数据 `wall_model` 是否为 None 决定物理无滑移壁面取滑移镜像幽灵态。

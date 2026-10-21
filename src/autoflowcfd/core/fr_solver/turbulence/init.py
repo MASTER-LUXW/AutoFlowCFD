@@ -1,5 +1,6 @@
 """AutoFlowCFD V2.0 - 湍流模型的构造与自由来流/边界值设定。"""
 
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 from loguru import logger
@@ -7,7 +8,6 @@ from loguru import logger
 from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
-from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
 from autoflowcfd.core.turbulence.sgs import WALEModel
 
 from .wall_distance import apply_wall_distance_to_model
@@ -67,33 +67,6 @@ def create_sa_model(owner, n_cells: int, n_sps: int, xp=np) -> SAModel:
     _, VR = _freestream_turbulence_parameters(owner)
     return SAModel(n_cells, n_sps, nu_ref=owner.mu_molecular / owner.freestream["rho_inf"],
                    viscosity_ratio=VR, xp=xp)
-
-
-def _set_turbulence_bounds(solver) -> None:
-    """根据来流条件设置 k/omega 物理上界。
-
-    k_max = 0.5 * vel_inf^2：湍动能不可能超过平均流动能（湍流强度 100% 的极限）。
-    omega_max：随最近壁面解点给定（`turbulence/sst/bounds.py` 模块文档"omega 上界随最近
-    壁面解点给定"）；壁距尚未设定时取 `OMEGA_MAX_FLOOR`，设定壁距时再按它重定。
-
-    不设上界时，SST 输运方程的源项+输运项正反馈会导致 k/omega 指数增长到
-    1e260+ 量级（实测 cube_demo 100 步内即达到），而平均流完全不受影响
-    （nu_t 被 SST a1 限幅保持合理），形成隐蔽的发散失效模式。
-    """
-    if not isinstance(getattr(solver, "turb_model", None), SSTModelFR):
-        return  # 只有 SST（及以它为基础的 DDES/IDDES）有 k/omega 上界
-    # 直接取键，理由见 `_set_freestream_turbulence` 同名注释
-    from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
-
-    vel_inf = solver.freestream["vel_inf"]
-    configure_sst_model(solver.turb_model, vel_inf, solver.wall_treatment)
-    if getattr(solver, "wall_distance", None) is not None:
-        apply_wall_distance_to_model(solver)
-    logger.debug(
-        f"Turbulence bounds set: k_max={solver.turb_model.k_max:.2f}, "
-        f"omega_max={solver.turb_model.omega_max:.0e} "
-        f"(vel_inf={vel_inf:.2f})"
-    )
 
 
 #: 显式格式的湍流产生项渐变步数：前这么多步内 production_factor 从 0 线性增加到 1，防止初始流场未发展时
@@ -207,57 +180,96 @@ def _update_production_ramp(solver) -> None:
     advance_production_ramp(solver, getattr(solver, 'turb_model', None))
 
 
+class TurbulenceModels(NamedTuple):
+    """`build_turbulence_models` 的结果：输运模型（SST 族 / SA-neg）、DES 长度尺度模型（DDES / IDDES）、
+    代数亚格子模型（LES / WMLES 的 WALE）；不适用的为 None。"""
+    transport: Any
+    des: Any
+    sgs: Any
+
+
+def build_turbulence_models(owner, name: str, n_cells: int, n_sps: int, cp: Any = None,
+                            device_id: Optional[int] = None) -> TurbulenceModels:
+    """按模型名构造湍流模型对象——CPU 单机、CPU 分布式两种加载、单 GPU、多 GPU 两种加载唯一的构造处。
+
+    SST 族：来流 k/omega 由 Tu/VR 推出（`_set_freestream_turbulence`），物理上界与近壁处理方式见
+    `turbulence/sst/bounds.py::configure_sst_model`（omega 上界在壁距设定后按最近壁面解点重定）；SA-neg 的来流由
+    涡粘比给定（`create_sa_model`）。网格尺度（DES 的 h_max / h_wn）与壁距由各后端按自己的单元编号给出。
+
+    Args:
+        owner: 求解器或其根桩（带 `freestream`、`mu_molecular`、`_turbulence_intensity`、`_viscosity_ratio`、
+            `wall_treatment`）
+        name: 湍流模型名（`turbulence/registry.py::SUPPORTED_MODELS`）
+        cp, device_id: GPU 后端给出自己的 cupy 模块与设备号，输运模型的场在该 GPU 上（`GPUTurbulenceSST` / cupy 版
+            SA-neg）；CPU 后端都不给
+
+    2026-10-21（I-82）以前五个后端各写一条按名字构造的 if/elif 链。
+    """
+    from autoflowcfd.core.turbulence.registry import (
+        is_sa_family, is_sst_family, normalized, require_supported, uses_algebraic_sgs,
+    )
+
+    require_supported(name)
+    name = normalized(name)
+    if (cp is None) != (device_id is None):
+        raise ValueError("GPU 构造须同时给出 cupy 模块与设备号")
+    transport: Any = None
+    des: Any = None
+    sgs: Any = None
+    if is_sa_family(name):
+        if cp is None:
+            transport = create_sa_model(owner, n_cells, n_sps)
+        else:
+            with cp.cuda.Device(device_id):
+                transport = create_sa_model(owner, n_cells, n_sps, xp=cp)
+    elif is_sst_family(name):
+        from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
+
+        k_inf, omega_inf = _set_freestream_turbulence(owner)
+        if device_id is None:
+            transport = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+        else:
+            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
+
+            transport = GPUTurbulenceSST(n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf)
+        configure_sst_model(transport, owner.freestream["vel_inf"], owner.wall_treatment)
+        if name == "DDES":
+            des = DDESModel()
+        elif name == "IDDES":
+            des = IDDESModel()
+    elif uses_algebraic_sgs(name):
+        sgs = WALEModel()
+    return TurbulenceModels(transport, des, sgs)
+
+
+def describe_turbulence_models(name: str, models: TurbulenceModels) -> str:
+    """启动日志里的一行湍流模型说明（各后端共用）。"""
+    m = models.transport
+    if isinstance(m, SAModel):
+        return (f"SA-neg（nu_tilde_inf={m.nu_tilde_inf:.4e}, chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, "
+                f"粘性比 {m.viscosity_ratio:g}）")
+    if isinstance(m, SSTModelFR):
+        base = f"k_inf={m.k_inf:.4e}, omega_inf={m.omega_inf:.4e}"
+        return f"{name}（基于 SST k-omega，{base}）" if models.des is not None else f"SST k-omega（{base}）"
+    if models.sgs is not None:
+        return f"{name}（WALE 亚格子模型）"
+    return "层流（无湍流模型）"
+
+
 def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
-    """初始化湍流模型（对应 FRSolver._init_turbulence_models）。产生项渐变计数器由构造点在时间格式确定后经
-    `init_production_ramp` 设置。"""
-
-    # 从 Tu/VR 推导物理自洽的 k/omega 初值（工业标准）
-    k_inf, omega_inf = _set_freestream_turbulence(solver)
-
-    if solver.turb_model_name == "SST":
-        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
-        _set_turbulence_bounds(solver)
-        print(f"   [OK] SST k-omega model initialized "
-              f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-
-    elif solver.turb_model_name == "DDES":
-        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
-        _set_turbulence_bounds(solver)
-        solver.ddes_model = DDESModel()
-        # 逐单元网格尺度只依赖几何，算一次缓存：DDES 的 LES 长度用最大边长 h_max（棱柱边界层
-        # 网格上 cube_root(V) 会系统性低估扁平单元的面内尺度）；h_wn 只有 IDDES 用
+    """CPU 求解器（单机与传统模式分布式）的湍流模型初始化（对应 FRSolver._init_turbulence_models）：对象由
+    `build_turbulence_models` 构造，这里补上 CPU 一侧按全局网格算的 DES 网格尺度与已设定的壁距。产生项渐变
+    计数器由构造点在时间格式确定后经 `init_production_ramp` 设置。"""
+    name = solver.turb_model_name
+    # WMLES 的壁面模型由 `FRSolver.__init__` 先于边界幽灵态构造（幽灵态据它取滑移镜像），这里不补建
+    if name == "WMLES" and getattr(solver, "wall_model", None) is None:
+        raise RuntimeError("WMLES 的壁面模型必须先于边界幽灵态构造（FRSolver.__init__），这里不补建")
+    models = build_turbulence_models(solver, name, n_cells, n_sps)
+    solver.turb_model, solver.ddes_model, solver.sgs_model = models
+    if models.des is not None:
+        # 逐单元网格尺度只依赖几何，算一次缓存：DDES 的 LES 长度用最大边长 h_max（棱柱边界层网格上 cube_root(V)
+        # 会系统性低估扁平单元的面内尺度），IDDES 另用壁法向尺度 h_wn
         solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
-        print(f"   [OK] DDES model initialized (based on SST, "
-              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-
-    elif solver.turb_model_name == "IDDES":
-        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
-        _set_turbulence_bounds(solver)
-        solver.ddes_model = IDDESModel()
-        # h_max/h_wn 只依赖网格几何（边长），与流场状态无关——mesh 在
-        # 整个求解过程中不变，初始化时算一次并缓存在 solver 上，避免
-        # 每步都重新调用 quality_metrics 的边长几何计算（见
-        # compute_turbulence_source 里 solver._iddes_h_max/_iddes_h_wn
-        # 的消费点）。
-        solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
-        print(f"   [OK] IDDES model initialized (based on SST, "
-              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-
-    elif solver.turb_model_name == "SA":
-        solver.turb_model = m = create_sa_model(solver, n_cells, n_sps)
-        print(f"   [OK] SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
-              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={m.viscosity_ratio:g})")
-
-    elif uses_algebraic_sgs(solver.turb_model_name):
-        # LES / WMLES：WALE 亚格子涡粘（全部后端同一判据，`turbulence/registry.py::uses_algebraic_sgs`）。
-        # WMLES 的壁面模型由 `FRSolver.__init__` 先于边界幽灵态构造（幽灵态据它取滑移镜像），这里不再补建
-        if solver.turb_model_name == "WMLES" and getattr(solver, "wall_model", None) is None:
-            raise RuntimeError("WMLES 的壁面模型必须先于边界幽灵态构造（FRSolver.__init__），这里不补建")
-        solver.sgs_model = WALEModel()
-        print(f"   [OK] {solver.turb_model_name} with WALE SGS model initialized")
-
-    elif solver.turb_model_name == "NONE":
-        print("   [OK] Laminar flow (no turbulence model)")
-
-    else:
-        raise ValueError(f"Unknown turbulence model: {solver.turb_model_name}")
+    if models.transport is not None and getattr(solver, "wall_distance", None) is not None:
+        apply_wall_distance_to_model(solver)
+    print(f"   [OK] {describe_turbulence_models(name, models)}")

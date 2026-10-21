@@ -16,7 +16,6 @@ from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
 from .residual import _GPUSolverResidualMixin
 from .timestep import _GPUSolverTimeStepMixin
 from .step import _GPUSolverStepMixin
-from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
 from autoflowcfd.core.turbulence.wall_model.treatment import (
     DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
@@ -145,7 +144,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             )
         # 合法模型名的唯一来源（`core/turbulence/registry.py`），GPU 与 CPU 支持同一组模型
         from autoflowcfd.core.turbulence.registry import require_supported
-        from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
         turb_model_upper = require_supported(turb_model_name)
         from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
         configure_numba_threads(n_threads)
@@ -255,43 +253,20 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 见 core/turbulence/des/ddes.py 模块文档；
         # WMLES/LES 不构造 SST，只构造 WALEModel，与 CPU 版
         # fr_solver/turbulence/init.py::init_turbulence_models 分支结构一致）。
-        if turb_model_upper == "SA":
-            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
+        from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models, describe_turbulence_models
+
+        models = build_turbulence_models(self, turb_model_upper, n_cells, n_sps, cp=cp, device_id=device_id)
+        self.turb_model_gpu, self.ddes_model_gpu, self.sgs_model_gpu = models
+        if models.des is not None:
+            from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
+            # 逐单元网格尺度只依赖几何：算一次常驻显存（DDES 只用 h_max，IDDES 还用 h_wn）
+            h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
             with cp.cuda.Device(device_id):
-                self.turb_model_gpu = m = create_sa_model(self, n_cells, n_sps, xp=cp)
-            print(f"   [OK] GPU SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
-                  f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g})")
-
-        elif is_sst_family(turb_model_upper):
-            from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-            # 从 Tu/VR 推导物理自洽的 k/omega 初值（与 CPU 同一个函数）
-            k_inf, omega_inf = _set_freestream_turbulence(self)
-            self.turb_model_gpu = GPUTurbulenceSST(
-                n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
-            )
-            # 物理上界与近壁处理方式与 CPU 同一个函数（`turbulence/sst/bounds.py::configure_sst_model`）；
-            # omega_max 算出壁距后按最近壁面解点重定（`_init_wall_distance_gpu`）
-            configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)
-            logger.info(f"GPU SST k-omega model initialized on device {device_id} "
-                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-            print(f"   [OK] GPU SST k-omega model initialized "
-                  f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
-
-            if turb_model_upper in ("DDES", "IDDES"):
-                from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
-                self.ddes_model_gpu = DDESModel() if turb_model_upper == "DDES" else IDDESModel()
-                # 逐单元网格尺度只依赖几何：算一次常驻显存（DDES 只用 h_max，IDDES 还用 h_wn）
-                h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
-                with cp.cuda.Device(device_id):
-                    self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
-                    self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
-                print(f"   [OK] GPU {turb_model_upper} model initialized (based on SST)")
-
-        elif uses_algebraic_sgs(turb_model_upper):
-            from autoflowcfd.core.turbulence.sgs import WALEModel
-            self.sgs_model_gpu = WALEModel()
-            print(f"   [OK] GPU {turb_model_upper} with WALE SGS model initialized")
+                self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
+                self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
+        logger.info(f"GPU turbulence model on device {device_id}: "
+                    f"{describe_turbulence_models(turb_model_upper, models)}")
+        print(f"   [OK] GPU {describe_turbulence_models(turb_model_upper, models)}")
 
         # 预计算壁面距离：只有输运湍流模型需要（`turbulence/registry.py::WALL_DISTANCE_MODELS`；WALE 不读壁距，
         # WMLES 的匹配点高度取自单元几何）

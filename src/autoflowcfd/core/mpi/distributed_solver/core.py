@@ -248,12 +248,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
         self.wall_model = None
-        # LES：WALE 是纯代数 SGS 模型，没有跨步状态，也不需要壁距——单独一个分支，不并入下面输运模型的构造块。
         self.sgs_model = None
-        from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
-        if uses_algebraic_sgs(turb_model_upper):
-            from autoflowcfd.core.turbulence.sgs import WALEModel
-            self.sgs_model = WALEModel()
         # 自由来流条件**无条件**设置（2026-09-18）：单机 FRSolver 的
         # `self.freestream` 从来就是无条件的（solver.py::__init__），这边
         # 却挂在湍流分支里——于是 `turbulence_model=none/les` 的分布式
@@ -285,12 +280,11 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         from autoflowcfd.core.turbulence.registry import has_transport_equations
         # 壁面模型：WMLES 或 RANS 自动壁面处理（与单机同一个构造函数）
         self.wall_model = build_wall_model(turb_model_upper, self.wall_treatment)
+        # 湍流模型对象（输运模型 / DES 长度尺度 / WALE）与单机同一个初始化；产生项渐变计数器在下面时间格式确定后由
+        # init_production_ramp 设置（每步重建的湍流适配器把计数器转发回本对象，见 distributed_turbulence.py）
+        from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
+        init_turbulence_models(self, n_local, n_sps)
         if has_transport_equations(turb_model_upper):
-            from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
-            init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；
-            # 产项渐变计数器在下面时间格式确定后由 init_production_ramp 设置（每步重建的湍流
-            # 适配器把计数器转发回本对象，见 distributed_turbulence.py）。
-
             # 壁面距离：与单机同一个来源（CLI 由体网格 WALL 边界面构造后以
             # `wall_distance_source=` 传入），在本 rank compact 解点上查询；
             # 换阶重建时用同一个来源重查（distributed_order_continuation）
