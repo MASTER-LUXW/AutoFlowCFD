@@ -1,6 +1,6 @@
 # AutoFlowCFD 安装
 
-依赖以 `pyproject.toml` 为准（`[tool.poetry.dependencies]` 与 `[tool.poetry.extras]`）；`autoflowcfd utils doctor` 按同一份
+依赖以 `pyproject.toml` 为准（`[project]` 的 `dependencies` 与 `optional-dependencies`）；`autoflowcfd utils doctor` 按同一份
 声明逐项核对已安装的版本。
 
 ---

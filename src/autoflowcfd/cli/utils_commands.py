@@ -99,7 +99,7 @@ def version(json_output: bool) -> None:
 
 
 def _dependency_report():
-    """按已安装包的依赖声明（pyproject 的 [tool.poetry.dependencies]，经包元数据读取，唯一来源）逐项核对。
+    """按已安装包的依赖声明（pyproject 的 [project] dependencies 与 optional-dependencies，经包元数据读取，唯一来源）逐项核对。
 
     Returns:
         (issues, warnings, versions)：必需依赖缺失 / 版本不符与 Python 版本不符进 issues；可选组（extra）的缺失进

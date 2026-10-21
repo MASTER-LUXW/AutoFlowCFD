@@ -2150,4 +2150,4 @@ perf = ["psutil"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.12"
-content-hash = "85a5804c32e37694ee4d875d8718666e4296fafecd3e82b648a12ab98962b1a6"
+content-hash = "b30323b4e98c259797633f1a3e4008662b1218c2e360d4123608a99f774c782e"
