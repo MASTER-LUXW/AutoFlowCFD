@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - 多 GPU 分布式湍流源项（SST/DDES/IDDES/SA-neg/LES/WMLES）
 
-从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_init.py` 的 `_GPUDistributedInitMixin` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+`_GPUDistributedInitMixin` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `_GPUDistributedInitMixin` 的 `__init__` 建立，
 这里通过 `self` 访问。

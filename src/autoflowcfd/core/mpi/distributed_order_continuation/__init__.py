@@ -40,7 +40,6 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 `MultiGPUDistributedSolver._interpolate_to_new_order` 里按构造方式
 分派到本模块对应的重建函数）。
 
-
 ## 文件分工
 
     rebuild.py           阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值

@@ -3,7 +3,6 @@
 `jfnk.py::step_newton_krylov` 求出方向之后，逐行给出允许的步长比例 `alpha`
 （守恒变量看 rho 与 p，湍流标量看 k/omega），同一单元的行取单元内最小
 （`rows_per_cell`）；被松弛的行下一步降局部 `dtau`（`update_local_dtau_scale`）。
-从 `jfnk.py` 拆出（2026-09-26，单文件 500 行规范），逻辑未改。
 """
 
 import numpy as np

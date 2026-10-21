@@ -62,8 +62,7 @@ def compute_inviscid_interface_correction_kernel(
 
     `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面的
     坍缩顶点槽位，`fr/operators/face_ops.py`），统一索引
-    `boundary_extrap_native`/`lift_native` 两张整表。`owner_axis`/`owner_side` 对
-    原生面存的是复用槽位，**不是** axis/side 语义，本函数不读它们。
+    `boundary_extrap_native`/`lift_native` 两张整表。
 
     (a) 自身面外插矩阵用 `boundary_extrap_native[op]`；(b) 方向定向系数固定为 +1
     （`fr/face_flux_points/exact_normal.py` 已经给出外向定向的 adj 行，再乘一次 side 会让 `side = -1` 的面

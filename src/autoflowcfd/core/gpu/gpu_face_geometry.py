@@ -54,10 +54,6 @@ class GPUFlatFaceGeometry:
             self.is_boundary = cp.asarray(flat_face.is_boundary)
 
             # ── 面角色信息 ──
-            self.owner_axis = cp.asarray(flat_face.owner_axis)
-            self.owner_side = cp.asarray(flat_face.owner_side)
-            self.neighbor_axis = cp.asarray(flat_face.neighbor_axis)
-            self.neighbor_side = cp.asarray(flat_face.neighbor_side)
             self.owner_is_primary = cp.asarray(flat_face.owner_is_primary)
             self.neighbor_is_primary = cp.asarray(flat_face.neighbor_is_primary)
 

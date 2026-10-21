@@ -224,7 +224,7 @@ def viscous_physical_flux_point_effective(
 @njit(cache=True, inline='always')
 def viscous_ip_penalty_tilde(
     Q_o: np.ndarray, Q_other: np.ndarray, mu_total: float, k_total: float,
-    h: float, adj_mag: float, side: float, c_ip: float,
+    h: float, adj_mag: float, c_ip: float,
 ) -> np.ndarray:
     """粘性 Interior Penalty (IP) 罚项，已转成 tilde（逆变）单位。
 
@@ -259,7 +259,7 @@ def viscous_ip_penalty_tilde(
 
     ## 能量分量的两项
 
-        pen[4] = -(eta_v*{u}.[[u]] + eta_T*[[T]]) * adj_mag * side
+        pen[4] = -(eta_v*{u}.[[u]] + eta_T*[[T]]) * adj_mag
 
     * `eta_T*[[T]]`：热传导那一支的罚项，系数按 IP 惯例用**热传导率**
       `k = mu*cp/Pr + mu_t*cp/Pr_t`（不是 mu）。
@@ -283,8 +283,7 @@ def viscous_ip_penalty_tilde(
         k_total: 热传导率 `mu*cp/Pr + mu_t*cp/Pr_t`；绝热类边界面传 0.0
             （见上面"调用方式"）
         h: 面法向的单元厚度 `ip_length`（见上面"长度尺度"一节）
-        adj_mag: 该 FP 处本侧逆变行范数（与本文件其余处一致的度量量）
-        side: 定向因子；原生面的 `adj_row` 已外向定向，调用方恒传 +1
+        adj_mag: 该 FP 处本侧逆变行范数（`adj_row` 已外向定向，不再乘定向因子）
         c_ip: 罚项常数，`resolve_viscous_ip_constant(order)`（随阶数增长，见该函数）
 
     Returns:
@@ -296,14 +295,14 @@ def viscous_ip_penalty_tilde(
     if h_safe < 1e-300:
         h_safe = 1e-300
     eta = c_ip * mu_total / h_safe
-    scale = eta * adj_mag * side
+    scale = eta * adj_mag
     for v in range(1, 4):
         pen[v] = -scale * (Q_o[v] - Q_other[v])
     work = 0.0
     for v in range(1, 4):
         work += 0.5 * (Q_o[v] + Q_other[v]) * (Q_o[v] - Q_other[v])
     eta_T = c_ip * k_total / h_safe
-    scale_T = eta_T * adj_mag * side
+    scale_T = eta_T * adj_mag
     T_o = Q_o[4] / (Q_o[0] * R_AIR)
     T_other = Q_other[4] / (Q_other[0] * R_AIR)
     pen[4] = -scale * work - scale_T * (T_o - T_other)

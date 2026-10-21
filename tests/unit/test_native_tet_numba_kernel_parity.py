@@ -92,7 +92,7 @@ def test_native_tet_tet_interface_kernel_matches_python_reference():
         area=area, normal=normal,
     )
     (nb_fc, nb_resid, ow_fc, ow_resid, nb_interp, ow_interp,
-     nb_cell_id, ow_cell_id, geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n) = result
+     nb_cell_id, ow_cell_id) = result
 
     assert nb_cell_id[0] == 1
     assert ow_cell_id[0] == 0
@@ -143,7 +143,7 @@ def test_native_tet_prism_interface_kernel_matches_python_reference():
         area=area, normal=normal,
     )
     (nb_fc, nb_resid, ow_fc, ow_resid, nb_interp, ow_interp,
-     nb_cell_id, ow_cell_id, geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n) = result
+     nb_cell_id, ow_cell_id) = result
 
     assert nb_cell_id[0] == 1
     assert ow_cell_id[0] == 0

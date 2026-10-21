@@ -104,9 +104,8 @@ def compute_viscous_interface_correction_p0_kernel(
     `lift_native[op]` 形状 `(1, n_fp)`，矩阵乘本身就是这里 P0 特化
     要的标量化形式。
 
-    度量伴随行逐 FP 读精确值 `owner_adj_row_exact`/`neighbor_adj_row_exact`（与 P>=1 核同一个来源）——
-    `owner_axis` 对原生面是复用槽位（四面体存 excluded_vertex ∈ {0,1,2,3}、棱柱存面序号 ∈ {0..4}），
-    不能拿来索引解点度量的轴维。
+    度量伴随行逐 FP 读精确值 `owner_adj_row_exact`/`neighbor_adj_row_exact`（与 P>=1 核同一个来源），不从解点
+    度量里取某个轴行。
     """
     n_fp = Q_ghost.shape[1]
 
@@ -114,10 +113,8 @@ def compute_viscous_interface_correction_p0_kernel(
         f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
-        # **罚项 side 因子恒为 +1**：原生面的 `owner_adj_row_exact` 已按 outward 定向（见
-        # `native_prism/face.py::native_prism_face_adj_rows` 与 `exact_normal.py::compute_exact_face_normals_and_weights`），
-        # 再乘 `owner_side` 会让 `owner_side = -1` 的面（棱柱 f0/f3/f4、四面体全部 4 个面）罚项反号——从耗散
-        # 变成往壁面单元注入动量。
+        # 原生面的 `owner_adj_row_exact` 已按 outward 定向（`native_prism/face.py::native_prism_face_adj_rows`、
+        # `exact_normal.py`），罚项不再乘任何定向因子。
 
         if owner_is_primary[f]:
             E_o = boundary_extrap_native[oc_op]  # (n_fp, 1)

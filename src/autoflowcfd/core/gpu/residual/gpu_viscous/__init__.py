@@ -21,7 +21,6 @@ AutoFlowCFD V2.0 - GPU 版粘性残差计算
 公式与 CPU 版完全一致，见 core/fr_residual/viscous_flux/ 和
 core/fr_residual/viscous_flux_kernel.py 模块文档。
 
-
 ## 文件分工
 
     extrap.py            面通量点外插与 tilde 通量配对(GPU 粘性)

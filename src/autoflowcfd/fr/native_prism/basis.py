@@ -155,17 +155,15 @@ def build_native_prism_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
 # 几何映射与雅可比（原生参考坐标版本）
 # ---------------------------------------------------------------------------
 #
-# 与坍缩版本（`grid/curved_mapping/curved_mapping.py::map_prism_to_physical`
-# 与 `curved_mapping_exact_jacobian.py::prism_exact_jacobian`）是**同一个
-# 几何映射**，只是自变量换成原生 `(r,s,t)`：
+# 与立方体坐标版本 `grid/curved_mapping/curved_mapping.py::map_prism_to_physical` 是**同一个几何映射**，
+# 只是自变量换成原生 `(r,s,t)`：
 #
 #     x(r,s,t) = (1-t)/2 * bottom(r,s) + (1+t)/2 * top(r,s)
 #     bottom   = l1 p0 + l2 p1 + l3 p2,   top = l1 p3 + l2 p4 + l3 p5
 #
 # 重心坐标 `l1 = -(r+s)/2`、`l2 = (1+r)/2`、`l3 = (1+s)/2` 是 `(r,s)` 的
-# **仿射**函数，所以 `d(bottom)/dr` 等是**常向量**。坍缩版本里对应的偏导
-# 带着 `(1-b)/4` 这个因子（因为 `(r,s)` 本身是 `(a,b)` 的多项式），它在
-# 退化边 `b -> 1` 上趋零 —— 这正是坍缩度量在那一带病态的来源。
+# **仿射**函数，所以 `d(bottom)/dr` 等是**常向量**（立方体坐标下对应的偏导带 `(1-b)/4` 因子，在退化边
+# `b -> 1` 上趋零）。
 #
 # 直棱柱（top = bottom + h，h 为常向量）在原生坐标下雅可比**逐单元恒定**：
 # `d/dr`、`d/ds` 两列的上下面贡献相同、与 t 无关，`d/dt = h/2`。于是均匀
@@ -215,10 +213,7 @@ def native_prism_exact_jacobian(ref_rst: np.ndarray,
         `r, s, t`。
 
     解析求导而不是用谱微分矩阵作用在 `sps_coords` 上：后者会把算子的
-    舍入放大进度量，而度量的误差直接进自由流保持性（坍缩棱柱那 ~1e-9
-    实测严格等于 `eps * max|D| / det(J)`）。与
-    `curved_mapping_exact_jacobian.py::prism_exact_jacobian` 同一条理由、
-    同一个几何映射，只是自变量是原生坐标（见本节顶部说明）。
+    舍入放大进度量，而度量的误差直接进自由流保持性（自由流误差实测严格等于 `eps * max|D| / det(J)`）。
     """
     from autoflowcfd.grid.curved_mapping.curved_mapping import tri_barycentric
 

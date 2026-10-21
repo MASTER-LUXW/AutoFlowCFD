@@ -23,7 +23,7 @@ from typing import Dict
 
 import numpy as np
 
-from .locate import newton_locate_on_face
+from .locate import newton_locate_on_prism_face
 from ..native_padding import sps_width
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
@@ -63,7 +63,7 @@ CUBE_FACE_AXIS_SIDE = {
     # 点、同一顺序**（坍缩面在 (r,s) 里的像恰好是原生的 5 个面：
     # a=-1 -> r=-1 边、a=+1 -> 斜边 r+s=0、b=-1 -> s=-1 边、c=∓1 -> 两个
     # 三角形封盖），所以"在目标单元里定位面点"这一步继续走坍缩的
-    # `newton_locate_on_face`，它需要真实的 (axis, side)。
+    # `newton_locate_on_prism_face`，它需要真实的 (axis, side)。
     # 实测等价性（P1~P3、右棱柱与不规则棱柱）：通量点 0.0~7.5e-17、
     # 法向 3.3e-16、物理面积权重 2.4e-15。
     #
@@ -169,9 +169,7 @@ def build_cross_interp(
     数组宽度一致——native 四面体的有效自由度更少，按 Part6/7"补位对齐"
     原则，插值矩阵多出的列恒为零，不改变全局数组统一形状这个既有假设，
     见下方 native 分支）。target_cell 的固定面由 `target_face_code`
-    给定（`grid.connectivity.face_connectivity.CUBE_FACE_CODES` 编码：
-    0~5 是坍缩坐标 6 个立方体面，6~9 是 native 四面体的 4 个真实面，
-    见该模块与 Part7 文档第一节完整设计说明）。
+    给定（原生面编码：四面体 6~9、棱柱 10~14，`grid/connectivity/face_connectivity.py`）。
 
     Args:
         translation: (3,) 或 None。周期边界配对面专用（见
@@ -222,8 +220,8 @@ def build_cross_interp(
     target_axis, target_side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[target_face_code]]
 
     search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
-    free_coords, final_resid = newton_locate_on_face(
-        is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
+    free_coords, final_resid = newton_locate_on_prism_face(
+        cell_nodes, target_axis, target_side, search_phys, char_length=char_length
     )
 
     other_axes = [a for a in range(3) if a != target_axis]

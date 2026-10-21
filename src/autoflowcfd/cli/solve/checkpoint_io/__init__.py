@@ -1,6 +1,5 @@
 """求解命令的结果/checkpoint 持久化（写出、续算重建、恢复到已有求解器）。
 
-
 ## 文件分工
 
     write.py             落盘：checkpoint 与最终结果

@@ -110,12 +110,12 @@ def viscous_common_flux_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, ad
     adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
     if bkind == VBC_INTERIOR:
         k_tot = mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t
-        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_avg, k_tot, h_ip, adj_mag, 1.0, c_ip)
+        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_avg, k_tot, h_ip, adj_mag, c_ip)
     elif bkind == VBC_DIRICHLET:
         k_tot = mu * CP_AIR / Pr + mut_s * CP_AIR / Pr_t
-        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_s, k_tot, h_ip, adj_mag, 1.0, c_ip)
+        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_s, k_tot, h_ip, adj_mag, c_ip)
     else:
-        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_s, 0.0, h_ip, adj_mag, 1.0, c_ip)
+        pen = viscous_ip_penalty_tilde(Q_s, Q_x, mu + mut_s, 0.0, h_ip, adj_mag, c_ip)
     for v in range(1, 5):
         jump[v] += pen[v]
     return jump

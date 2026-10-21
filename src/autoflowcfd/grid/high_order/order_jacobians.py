@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 按阶数计算 Jacobian 的函数族。
 
-文件不超 500 行"规范）：那边留的是参考点集生成、`build_order_geometry`
-总装与 Order Continuation 的按阶数几何缓存；这里是"在给定参考点集上
+`high_order_mesh_order.py` 是参考点集生成、`build_order_geometry` 总装与 Order Continuation 的按阶数
+几何缓存；这里是"在给定参考点集上
 算全部单元 Jacobian"这一族（原生四面体/棱柱、两段拼接与细点度量的恒定性校验）。
 """
 
@@ -38,19 +38,11 @@ def _require_positive_det(det_per_cell: np.ndarray, cell_offset: int, cell_kind:
 def compute_native_tet_jacobians(
     mesh: "HighOrderMesh", order: int, n_sps_per_cell: int, want_scaled_quality: bool
 ) -> Optional[Dict[str, np.ndarray]]:
-    """native 四面体（路径C）版本的 Jacobian 构造——见 Part8 文档"一、
-    核心不变量：零填充块对角"第3点：直边单元 Jacobian 是每单元一个
-    常数（`compute_native_tet_jacobian`，不依赖参考点位置），不像坍缩
-    坐标那样需要在 `ref_cube_sps` 上逐点求值；这个常数原样广播填满
-    该单元全部 `n_sps_per_cell` 槽位（真实 `n_native` 行与填充行一视
-    同仁，因为它们对应同一个 det_j——这也是本设计"填充行必须有限"这个
-    强制要求最容易满足的一种情形：native 直边单元根本没有"填充行专属
-    的合理值"这个问题，复用同一个真实常数即可，不需要另外编造占位值）。
+    """原生四面体的 Jacobian 构造：直边单元 Jacobian 是每单元一个常数（`compute_native_tet_jacobian`，不依赖参考
+    点位置），原样广播填满该单元全部 `n_sps_per_cell` 槽位（真实行与零填充槽位同值，填充行因此天然有限）。
 
-    `scaled_quality`（诊断量）用与坍缩坐标分支
-    `troubled_cell.py::compute_scaled_jacobian_quality` 完全相同的定义
-    （`det_j/prod(col_norms(J))`）手算——直边单元只有一个 J，不需要
-    调用那个批量/逐点版本。
+    `scaled_quality`（诊断量）与棱柱同一定义 `det_j/prod(col_norms(J))`
+    （`troubled_cell.py::compute_scaled_jacobian_quality`）；直边单元只有一个 J，直接手算。
     """
     from autoflowcfd.fr.native_tet.basis import compute_native_tet_jacobian
 
@@ -192,17 +184,14 @@ def compute_native_prism_jacobians(
     与四面体那条（`compute_native_tet_jacobians`）的**关键差别**：直边
     四面体的 Jacobian 是逐单元常数，而棱柱即便直边也一般**随点变化**
     （只有顶面是底面纯平移的右棱柱才恒定），所以这里必须在原生节点上
-    **逐点**求值，不能算一个常数广播。解析求导用
-    `native_prism_basis.native_prism_exact_jacobian`（不经过谱微分矩阵，
-    理由与坍缩档的 `prism_exact_jacobian` 相同：谱微分会把算子舍入带进
-    度量，而度量误差直接进自由流保持性）。
+    **逐点**求值，不能算一个常数广播。解析求导用 `fr/native_prism/basis.py::native_prism_exact_jacobian`
+    （不经过谱微分矩阵：谱微分会把算子舍入带进度量，而度量误差直接进自由流保持性）。
 
     填充槽位（`[n_native, n_sps_per_cell)`）复制真实 SP #0 的度量 ——
     与 `build_order_geometry` 里 `sps_coords` 的填充约定一致（有限、
     物理上合法的占位值）。**不能留 0**：`det_jacs` 是除数。
 
-    `scaled_quality`（诊断量）调用与坍缩分支**同一个**
-    `troubled_cell.py::compute_scaled_jacobian_quality`，不另写一份定义。
+    `scaled_quality`（诊断量）调用 `troubled_cell.py::compute_scaled_jacobian_quality`（与四面体同一定义）。
 
     Args:
         ref_native: `(n_native, 3)` 原生参考棱柱坐标 `(r,s,t)`。**由调用

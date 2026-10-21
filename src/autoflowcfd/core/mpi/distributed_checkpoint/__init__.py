@@ -11,7 +11,6 @@ AutoFlowCFD V2.0 - 分布式 Checkpoint 保存/加载 + 结果保存
 - 使用 partition.local_cells（全局索引）定位每个 rank 的数据在全局数组中的位置
 - 支持变 rank 数恢复（4 ranks 保存 → 8 ranks 恢复）
 
-
 ## 文件分工
 
     state.py             局部与全局逐单元数组之间的收集与分发

@@ -28,10 +28,8 @@ from .ref_geometry_nb import _cube_to_tri_rs_nb, _tri_barycentric_nb
 # `code>=6`，不需要额外的 is_prism 判据。
 # ============================================================================
 
-# excluded_vertex(0~3) -> 该真实面 3 个顶点的局部下标（升序），与
-# native_tet/basis.py::face_node_indices/face_flux_points.py::
-# native_tet_face_points_physical 的 `tuple(v for v in range(4) if v !=
-# excluded_vertex)` 完全一致。
+# excluded_vertex(0~3) -> 该真实面 3 个顶点的局部下标（升序），与 `locate.py::locate_native_tet_face_point`
+# 的 `tuple(v for v in range(4) if v != excluded_vertex)` 完全一致。
 _NATIVE_FACE_VI = np.array([1, 0, 0, 0], dtype=np.int32)
 _NATIVE_FACE_VJ = np.array([2, 2, 1, 1], dtype=np.int32)
 _NATIVE_FACE_VK = np.array([3, 3, 3, 2], dtype=np.int32)
@@ -119,18 +117,13 @@ def native_prism_cap_points_nb(n1d, cap, slot, cell_nodes, sps_1d):
 
 @njit(cache=True)
 def _tet_native_locate_nb(cell_nodes, excluded_vertex, targets_phys):
-    """`face_flux_points/locate.py::locate_native_tet_face_point` 逐行
-    移植：native 四面体某个真实面（`excluded_vertex` 给定）上一批目标
-    物理点的精确点位定位——与坍缩坐标版本 `_tet_exact_locate_nb` 共享
-    同一个重心坐标最小二乘解算（同样的 alpha/beta 公式），区别只在收尾：
-    直接换算 (r,s,t)，不经过含显式除法、在退化轴附近病态的 (a,b,c)
-    坍缩坐标转换——这正是 native 模式点位定位不会出现条件数病态的原因。
+    """`face_flux_points/locate.py::locate_native_tet_face_point` 逐行移植：native 四面体某个真实面
+    （`excluded_vertex` 给定）上一批目标物理点的精确点位定位，直接给出原生参考坐标 (r,s,t)。
 
     Returns:
         (free, rst, resid)：
-        `free` 形状 (n_pts,2)，(alpha,beta) 两个自由重心坐标分量
-        （与坍缩坐标版本的 2 个自由方向坐标同一存储宽度，供
-        `nb_fc`/`ow_fc` 复用同一个数组形状）；
+        `free` 形状 (n_pts,2)，(alpha,beta) 两个自由重心坐标分量（与棱柱面 Newton 的 2 个自由坐标同一存储
+        宽度，供 `nb_fc`/`ow_fc` 复用同一个数组形状）；
         `rst` 形状 (n_pts,3)，供调用方立即构造插值矩阵，不需要从
         `free` 反推（`excluded_vertex` 已知，反推是多余的重复计算）；
         `resid` 形状 (n_pts,)，每点物理残差（绝对长度单位），

@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - 后处理：气动系数、VTK 导出、收敛历史
 
-从 `src/autoflowcfd/api.py` 的 `AutoFlowCFDAPI` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+`AutoFlowCFDAPI` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `AutoFlowCFDAPI` 的 `__init__` 建立，
 这里通过 `self` 访问。

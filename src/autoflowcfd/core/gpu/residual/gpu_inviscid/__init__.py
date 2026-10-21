@@ -12,7 +12,6 @@ AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 实现
 - 校正分配使用图着色保证无冲突写入（同色面无 owner_cell 冲突）
 - 数据全部常驻 GPU，避免 CPU↔GPU 传输
 
-
 ## 文件分工
 
     flux.py              AUSM+up 批量通量(GPU, 与 kernels.py 逐字对应)

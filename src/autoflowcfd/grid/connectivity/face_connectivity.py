@@ -42,8 +42,8 @@ from ..curved_mapping.curved_mapping import TET_CUBE_FACES, PRISM_CUBE_FACES
 # `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6/7.md`）
 # 专用的面标识——不是新建一套并行枚举，是在现有 0~5（坍缩坐标 6 个
 # 立方体面）基础上追加 4 个新编码（四面体只有 4 个真实面，用"被排除
-# 的局部顶点下标 0~3"标识，与 fr/native_tet/basis.py::
-# face_node_indices 的约定一致）。这个推广让绝大部分消费这套编码的
+# 的局部顶点下标 0~3"标识，与 fr/face_flux_points/locate.py::locate_native_tet_face_point 的约定一致）。
+# 这个推广让绝大部分消费这套编码的
 # 下游代码（法向量/面积、周期边界配对、multi-source 分类、numba flat
 # 数组、界面残差核函数）不需要感知"这个面是坍缩坐标面还是 native 面"
 # 这个区别，只有真正需要区别对待的两处（点位定位、体积->面插值，见

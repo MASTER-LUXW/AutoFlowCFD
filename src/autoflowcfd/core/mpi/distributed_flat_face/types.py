@@ -101,22 +101,6 @@ class DistributedFlatFaceGeometry:
         return self.base_flat.n_prism
 
     @property
-    def owner_axis(self) -> np.ndarray:
-        return self.base_flat.owner_axis
-
-    @property
-    def owner_side(self) -> np.ndarray:
-        return self.base_flat.owner_side
-
-    @property
-    def neighbor_axis(self) -> np.ndarray:
-        return self.base_flat.neighbor_axis
-
-    @property
-    def neighbor_side(self) -> np.ndarray:
-        return self.base_flat.neighbor_side
-
-    @property
     def owner_is_primary(self) -> np.ndarray:
         return self.base_flat.owner_is_primary
 

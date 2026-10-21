@@ -91,9 +91,6 @@ def compute_viscous_interface_correction_kernel(
         f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
-        # 罚项 side 因子恒为 +1（与非 colored 版本同一条，见那边的完整
-        # 说明：原生面的 adj_row 已 outward 定向，此前误乘 `owner_side`
-        # 让一半的面把耗散变成注入）。
 
         if owner_is_primary[f]:
             E_o = boundary_extrap_native[oc_op]

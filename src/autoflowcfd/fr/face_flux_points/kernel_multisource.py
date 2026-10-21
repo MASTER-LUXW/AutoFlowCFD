@@ -209,7 +209,7 @@ def build_ms_interp_parallel(
             sec_axis = _FACE_AXIS[sec_code]
             sec_side = _FACE_SIDE[sec_code]
             sec_fc, sec_rs = _newton_locate_nb(
-                sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl
+                sec_nd, sec_axis, sec_side, search_sec, cl
             )
 
             abc_sec = np.empty((n_fp, 3))
@@ -346,7 +346,7 @@ def build_ms_interp_parallel(
             sec_axis = _FACE_AXIS[sec_code]
             sec_side = _FACE_SIDE[sec_code]
             sec_fc, sec_rs = _newton_locate_nb(
-                sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl_o
+                sec_nd, sec_axis, sec_side, search_sec, cl_o
             )
 
             abc_sec = np.empty((n_fp, 3))

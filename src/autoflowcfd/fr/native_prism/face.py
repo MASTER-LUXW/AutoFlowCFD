@@ -395,10 +395,7 @@ def native_prism_face_adj_rows(order: int, face_id: int,
                                cell_nodes: np.ndarray, slot: int = 0) -> np.ndarray:
     """某个面每个通量点的 `adj_row`，形状 `(n1d^2, 3)`。
 
-    与坍缩路径 `fr/face_flux_points/exact_normal.py::compute_exact_adj_rows`
-    产出的量**语义完全相同**（"物理外法向 × 面积微元"的未归一化形式，
-    已按 outward 定向），所以下游 `side_factor = 1.0` 的既有处理对原生
-    棱柱面同样正确 —— 不需要再乘 `owner_side`。
+    "物理外法向 × 面积微元"的未归一化形式，已按 outward 定向（下游不再乘任何定向因子）。
 
     两个三角形封盖的行里**已经乘好** Duffy 因子 `(1-s)/2`（见本节顶部
     说明），所以调用方配平凡张量积求积权重即可 —— 与 native 四面体三角形

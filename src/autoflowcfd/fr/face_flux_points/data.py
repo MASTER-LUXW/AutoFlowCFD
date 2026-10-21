@@ -66,9 +66,7 @@ _AXIS_SIDE_TO_COLLAPSED_NAME = {
 class _KernelFaceData:
     """numba kernel 输出的 flat 数组容器，替代 180 万个 FaceFluxPointGeometry 对象。
 
-    全部消费方（残差、边界条件、后处理）直接读 flat 数组。2026-10-19（I-36）删除按面构造兼容对象的
-    `__getitem__`（连同无上限的逐面缓存与 `FaceFluxPointGeometry` 类）：生产已无消费方，它依赖的
-    owner_axis/side 语义随坍缩基删除而失效。
+    全部消费方（残差、边界条件、后处理）直接读 flat 数组。
 
     混合分组字段（B-8，2026-08-25，见 face_flux_points/merge.py 同名段注释）：
     mixed_nb_partner/mixed_ow_partner：(n_faces,) int64，混合面内部记录 ->
@@ -84,7 +82,6 @@ class _KernelFaceData:
     """
     __slots__ = (
         'n_faces', 'n_fp', 'n_sps', 'n1d',
-        'owner_axis', 'owner_side', 'neighbor_axis', 'neighbor_side',
         'owner_is_primary', 'neighbor_is_primary',
         'true_normal', 'true_area_weight',
         'owner_adj_row_exact', 'neighbor_adj_row_exact',

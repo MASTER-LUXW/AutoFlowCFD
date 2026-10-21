@@ -28,17 +28,13 @@ def test_mesh_build_does_not_call_the_numpy_reference(order):
 def test_normals_and_weights_match_the_numpy_reference(order):
     mesh = _build_synthetic_mixed_mesh(order)
     fc, ffp = mesh.face_connectivity, mesh.face_flux_points
-    from autoflowcfd.fr.face_flux_points.geometry import CUBE_FACE_AXIS_SIDE
     from autoflowcfd.fr.quadrature_points import gauss_legendre
 
     sps_1d, w_1d = gauss_legendre(order + 1)
     codes = np.asarray(fc.owner_cube_face, dtype=np.int64)
-    axis = np.array([v[0] for v in CUBE_FACE_AXIS_SIDE.values()])[codes]
-    side = np.array([v[1] for v in CUBE_FACE_AXIS_SIDE.values()], dtype=float)[codes]
     ref_n, ref_w = exact_normal.compute_exact_face_normals_and_weights(
         n_faces=fc.n_faces, n1d=order + 1, sps_1d=sps_1d, weights_1d=w_1d, n_prism=mesh.n_prism_cells,
-        owner_cell=np.asarray(fc.owner_cell, dtype=np.int64), owner_axis=axis.astype(np.int64), owner_side=side,
-        owner_code=codes,
+        owner_cell=np.asarray(fc.owner_cell, dtype=np.int64), owner_code=codes,
         prism_conn=mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None else np.empty((0, 6), np.int64),
         tet_conn=mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None else np.empty((0, 4), np.int64),
         node_coords=mesh._node_coords)

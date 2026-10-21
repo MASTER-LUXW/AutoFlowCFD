@@ -20,9 +20,8 @@
     只是计算顺序从"批量 NumPy"改为"逐面 numba 并行"，浮点结果应逐位一致。
     tests/unit/test_face_flux_points_exact_normal.py 验证。
 
-逐点的 Jacobian / adj 行原语已拆到 `exact_normal_primitives.py`
-（2026-09-19，项目"单文件不超 500 行"规范），本文件只留 prange kernel
-与它的 Python 封装（面编码检查 + dtype 归一化）。
+逐点的 Jacobian / adj 行原语在 `exact_normal_primitives.py`，本文件是 prange kernel 与它的 Python 封装（面编码
+检查 + dtype 归一化）。
 """
 
 import numpy as np

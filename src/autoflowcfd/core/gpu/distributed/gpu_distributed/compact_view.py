@@ -1,7 +1,4 @@
 """AutoFlowCFD V2.0 - 全局网格几何到 local+halo 压缩索引空间的只读视图。
-
-从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25，项目「单文件不超
-500 行」规范）。
 """
 
 import numpy as np

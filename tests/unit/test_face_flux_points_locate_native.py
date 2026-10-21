@@ -1,14 +1,8 @@
-"""AutoFlowCFD V2.0 - `face_flux_points/locate.py` 重构(共享重心坐标
-求解) + 新增 `locate_native_tet_face_point` 单元测试（Part7 阶段2
-第二节）。
-"""
+"""AutoFlowCFD V2.0 - `face_flux_points/locate.py::locate_native_tet_face_point` 单元测试。"""
 
 import numpy as np
 
-from autoflowcfd.fr.face_flux_points.locate import (
-    _tet_exact_locate_on_face,
-    locate_native_tet_face_point,
-)
+from autoflowcfd.fr.face_flux_points.locate import locate_native_tet_face_point
 from autoflowcfd.grid.curved_mapping.curved_mapping import tet_barycentric, cube_to_tet_rst
 
 TET_NODES = np.array([[0.1, -0.3, 0.2], [1.2, 0.0, -0.1], [-0.1, 1.1, 0.0], [0.0, 0.1, 1.3]], dtype=float)
@@ -19,26 +13,6 @@ def _random_targets_on_face(cell_nodes, face_vertex_idx, rng, n=5):
     p_i, p_j, p_k = cell_nodes[face_vertex_idx[0]], cell_nodes[face_vertex_idx[1]], cell_nodes[face_vertex_idx[2]]
     w = rng.dirichlet([1, 1, 1], size=n)
     return w @ np.array([p_i, p_j, p_k])
-
-
-def test_tet_exact_locate_on_face_unchanged_after_refactor():
-    """回归判据：拆分出共享函数之后，`_tet_exact_locate_on_face` 的
-    行为必须与拆分前逐位相同——用真实面（fixed_axis=0,fixed_val=-1.0，
-    对应局部顶点 (0,2,3)）上的随机目标点验证往返一致性（这是拆分前后
-    都必须满足的性质，用来间接确认拆分没有改变数值结果）。
-    """
-    rng = np.random.default_rng(0)
-    targets = _random_targets_on_face(TET_NODES, (0, 2, 3), rng)
-    free_coords = _tet_exact_locate_on_face(TET_NODES, fixed_axis=0, fixed_val=-1.0, targets_phys=targets)
-
-    from autoflowcfd.grid.curved_mapping.curved_mapping import map_tet_to_physical
-
-    full = np.zeros((len(targets), 3))
-    full[:, 0] = -1.0
-    full[:, 1] = free_coords[:, 0]
-    full[:, 2] = free_coords[:, 1]
-    phys_back = map_tet_to_physical(full, TET_NODES)
-    np.testing.assert_allclose(phys_back, targets, atol=1e-9)
 
 
 def test_locate_native_tet_face_point_recovers_target_physical_points():

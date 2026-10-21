@@ -1,8 +1,7 @@
 """
 AutoFlowCFD V2.0 - HighOrderMesh 的阶数相关几何构建 (G-01/G-03, CL-02)
 
-从 high_order_mesh.py 拆出来（控制单文件行数，>400 行需拆分的项目
-规范）：参考点集生成、（含体积项去混叠用的 fine 网格）Jacobian
+参考点集生成、（含体积项去混叠用的 fine 网格）Jacobian
 批量计算、Order Continuation 的按阶数几何缓存/切换。签名以
 `mesh: HighOrderMesh` 为第一参数，HighOrderMesh 上保留同名薄委托
 方法，调用方式不变。
@@ -17,7 +16,7 @@ from autoflowcfd.fr.operators import generate_fr_operators
 if TYPE_CHECKING:
     from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
-# Jacobian 计算函数族在 `order_jacobians.py`（2026-09-19 拆出，项目"单文件不超 500 行"规范）
+# Jacobian 计算函数族在 `order_jacobians.py`
 from .order_jacobians import (
     _combine_prism_and_tet_jacobians,
     build_fine_metrics,

@@ -29,7 +29,6 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
       54% 单元贴下界 1e-12、38% 贴上界，之后冻结、残差停滞），2026-08-25 修复。
     更新: phi += dt * (transport_residual + source/rho)
 
-
 ## 文件分工
 
     face_frames.py  两侧坐标系的面外插、质量通量与 DG 提升（numba kernel）

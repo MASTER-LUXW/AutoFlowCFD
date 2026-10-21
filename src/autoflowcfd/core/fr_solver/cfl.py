@@ -1,7 +1,6 @@
 """
-AutoFlowCFD V2.0 - FRSolver 局部时间步长计算 (从 fr_solver.py 拆分)
+AutoFlowCFD V2.0 - FRSolver 局部时间步长计算
 
-从 fr_solver.py 拆出来（控制单文件行数，>400 行需拆分的项目规范）。
 签名以 `solver: FRSolver` 为第一参数，FRSolver 上保留同名薄委托方法，
 调用方式不变。
 """

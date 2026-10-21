@@ -26,7 +26,6 @@ order`（`distributed_mesh_loader.py`）同一套协议——root 用持续持�
 `gpu_distributed_order_continuation.py::gpu_interpolate_to_new_order`
 按 `solver._is_fully_distributed` 分派到这里。
 
-
 ## 文件分工
 
     upload.py            把紧凑索引空间的壁面几何上传到设备

@@ -1,28 +1,16 @@
 """
-AutoFlowCFD - FR Flux Points 精确点位定位 (V2.0 Tier-0)
+AutoFlowCFD - FR Flux Points 精确点位定位（numpy 版；生产构造用 numba 版 `ref_geometry_nb.py`/`native_geometry_nb.py`）。
 
-从 face_flux_points.py 拆出来（控制单文件行数，>400 行需拆分的项目
-规范）：对 owner 的每个 FP 物理坐标，在 neighbor 的对应局部面上反解出
-neighbor 的精确切向坐标，使曲边映射恰好给出该物理点——四面体走解析
-闭式解，棱柱走向量化批量 Newton 迭代（棱柱侧面是真双线性曲面，没有
-闭式解）。不假设两侧网格对齐（见 face_flux_points.py 模块文档）。
+对 owner 的每个 FP 物理坐标，在 neighbor 的对应局部面上反解出 neighbor 的精确参考坐标，使映射恰好给出该
+物理点——四面体面走原生参考坐标下的解析闭式解（`locate_native_tet_face_point`），棱柱面走向量化批量 Newton
+迭代（棱柱侧面是真双线性曲面，没有闭式解；在立方体坐标里定位，与原生映射逐位恒等）。不假设两侧网格对齐。
 """
 
 from typing import Tuple
 
 import numpy as np
 
-from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
-
-# 四面体 (fixed_axis, fixed_val) -> 该真实面 3 个顶点的局部索引（不在面上的
-# 第 4 个顶点重心坐标恒为 0），与 curved_mapping.TET_CUBE_FACES 完全一致，
-# 供 _tet_exact_locate_on_face 直接在物理空间解重心坐标使用。
-_TET_FIXED_TO_FACE_VERTICES = {
-    (0, -1.0): (0, 2, 3),
-    (0, 1.0): (1, 2, 3),
-    (1, -1.0): (0, 1, 3),
-    (2, -1.0): (0, 1, 2),
-}
+from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical
 
 _NEWTON_MAX_ITER = 50
 _NEWTON_TOL_REL = 1e-10  # 收敛判据：相对局部面特征尺度（不是绝对长度单位）
@@ -44,25 +32,14 @@ _NEWTON_TOL_REL = 1e-10  # 收敛判据：相对局部面特征尺度（不是�
 _ACCEPT_WARN_REL = 0.15
 
 
-def map_ref_points(is_prism: bool, ref_pts: np.ndarray, cell_nodes: np.ndarray) -> np.ndarray:
-    return map_prism_to_physical(ref_pts, cell_nodes) if is_prism else map_tet_to_physical(ref_pts, cell_nodes)
-
-
 def _tet_solve_barycentric_on_face(
     cell_nodes: np.ndarray, face_vertex_idx: Tuple[int, int, int], targets_phys: np.ndarray
 ) -> np.ndarray:
-    """共享核心：给定四面体某个真实面（由 3 个局部顶点下标确定，第 4 个
-    顶点的重心坐标恒为 0），在物理空间解出一批目标点的重心坐标 L1..L4。
+    """给定四面体某个真实面（由 3 个局部顶点下标确定，第 4 个顶点的重心坐标恒为 0），在物理空间解出一批目标点
+    的重心坐标 L1..L4。
 
-    "3 点确定一个平面，求平面内一点的重心坐标"恒为良态的 3×2 最小二乘
-    问题——条件数只取决于这 3 点自身构成的三角形的边长比（与三角形本身
-    的几何形状绑定，不会像参考坐标系下的雅可比那样被坍缩坐标变换的
-    非线性放大到接近奇异）。这一步对坍缩坐标（Part7 阶段2设计文档
-    `_tet_exact_locate_on_face`）与 native 路径C（`locate_native_tet_
-    face_point`）完全通用，两者的区别只在于"解出重心坐标之后要不要
-    转换成 (a,b,c) 坍缩坐标"这一步（收尾，见调用方）——这一点正是
-    native 模式点位定位不会出现退化轴附近病态的原因：native 模式压根
-    不需要走这一步转换。
+    "3 点确定一个平面，求平面内一点的重心坐标"恒为良态的 3×2 最小二乘问题——条件数只取决于这 3 点自身构成的
+    三角形的边长比。
 
     Returns:
         L: (n_pts, 4) 重心坐标
@@ -73,8 +50,7 @@ def _tet_solve_barycentric_on_face(
     e2 = P_k - P_i
     rhs = targets_phys - P_i[None, :]  # (n_pts,3)
 
-    # 与 Newton 迭代内部同一套 Jacobi 预条件手法：这里条件数天然良态，
-    # 只取决于三角形自身边长比，与坍缩坐标参考系的局部雅可比无关。
+    # 与 Newton 迭代内部同一套 Jacobi 预条件手法（条件数只取决于三角形自身边长比）。
     e1_norm = max(float(np.linalg.norm(e1)), 1e-300)
     e2_norm = max(float(np.linalg.norm(e2)), 1e-300)
     e1_hat = e1 / e1_norm
@@ -97,64 +73,16 @@ def _tet_solve_barycentric_on_face(
     return L
 
 
-def _tet_exact_locate_on_face(
-    cell_nodes: np.ndarray, fixed_axis: int, fixed_val: float, targets_phys: np.ndarray
-) -> np.ndarray:
-    """四面体某个真实面（fixed_axis=fixed_val）上一批目标物理点的精确点位
-    定位——直接在物理空间解重心坐标（`_tet_solve_barycentric_on_face`），
-    不用 Newton 迭代（原因见 `newton_locate_on_face` 文档）；再用
-    `cube_to_tet_rst` 的解析逆（t=c 直接已知；s=(1+b)(1-c)/2-1 与
-    r=-(1+a)(s+t)/2-1 都是关于单个未知量的线性方程，顺序回代求解，
-    不需要迭代）换算回立方体坐标里的两个自由方向——**这一步转换含显式
-    除以 `1-c`/`s+t`，是坍缩坐标退化轴病态的来源（Part1 3.1节），
-    native 模式（`locate_native_tet_face_point`）没有这一步，见该函数
-    文档。
-
-    Returns:
-        free_coords: (n_pts, 2)，两个自由方向的坐标（顺序 = other_axes 升序）
-    """
-    other_axes = [a for a in range(3) if a != fixed_axis]
-    key = (fixed_axis, float(fixed_val))
-    face_vertex_idx = _TET_FIXED_TO_FACE_VERTICES.get(key)
-    if face_vertex_idx is None:
-        raise RuntimeError(f"Not a valid tet face: fixed_axis={fixed_axis}, fixed_val={fixed_val}")
-
-    L = _tet_solve_barycentric_on_face(cell_nodes, face_vertex_idx, targets_phys)
-
-    r = 2.0 * L[:, 1] - 1.0
-    s = 2.0 * L[:, 2] - 1.0
-    t = 2.0 * L[:, 3] - 1.0
-
-    c = t
-    b_coord = 2.0 * (s + 1.0) / np.where(np.abs(1.0 - c) > 1e-300, 1.0 - c, 1e-300) - 1.0
-    a_coord = -2.0 * (r + 1.0) / np.where(np.abs(s + t) > 1e-300, s + t, 1e-300) - 1.0
-
-    full = {0: a_coord, 1: b_coord, 2: c}
-    return np.column_stack([full[other_axes[0]], full[other_axes[1]]])
-
-
 def locate_native_tet_face_point(
     cell_nodes: np.ndarray, excluded_vertex: int, targets_phys: np.ndarray, char_length: float = 1.0
 ) -> Tuple[np.ndarray, float]:
-    """路径C（native basis，见 `fr/native_tet/basis.py`）版本的精确
-    点位定位：四面体某个真实面（对面被排除的局部顶点 `excluded_vertex`
-    给定，编码约定与 `native_tet/basis.py::face_node_indices` 一致）
-    上一批目标物理点，直接给出它们在四面体**自己的原生参考坐标**
-    `(r,s,t)` 里的位置。
-
-    与 `_tet_exact_locate_on_face`（坍缩坐标版本）共享同一个核心解算
-    （`_tet_solve_barycentric_on_face`），区别只在收尾：native 模式的
-    "目标坐标系"就是 `(r,s,t)` 本身，解出重心坐标 L1..L4 后直接换算
-    `r=2*L2-1, s=2*L3-1, t=2*L4-1` 即可，不需要（也不应该）再转换到
-    `(a,b,c)` 坍缩坐标——这正是 native 模式点位定位不会在退化轴附近
-    出现条件数变差问题的根本原因：它压根不经过 `_tet_exact_locate_
-    on_face` 那个含显式除法的转换公式。
+    """四面体某个真实面（对面被排除的局部顶点 `excluded_vertex` 给定）上一批目标物理点的精确点位定位，直接给出
+    它们在四面体**原生参考坐标** `(r,s,t)` 里的位置：解出重心坐标 L1..L4 后 `r=2*L2-1, s=2*L3-1, t=2*L4-1`
+    （不经过立方体坐标 `(a,b,c)`，没有含显式除法的退化轴转换）。
 
     Returns:
-        (rst, final_resid)：rst 形状 (n_pts, 3)；final_resid 是该批点的
-        最大物理残差（绝对长度单位），与 `newton_locate_on_face`/
-        `_tet_exact_locate_on_face` 的调用惯例一致，供调用方按
-        `char_length` 分级处理。
+        (rst, final_resid)：rst 形状 (n_pts, 3)；final_resid 是该批点的最大物理残差（绝对长度单位），与
+        `newton_locate_on_prism_face` 同一惯例，供调用方按 `char_length` 分级处理。
     """
     from ...grid.curved_mapping.curved_mapping import tet_barycentric
 
@@ -183,31 +111,16 @@ def locate_native_tet_face_point(
     return rst, final_resid
 
 
-def newton_locate_on_face(
-    is_prism: bool,
+def newton_locate_on_prism_face(
     cell_nodes: np.ndarray,
     fixed_axis: int,
     fixed_val: float,
     targets_phys: np.ndarray,
     char_length: float = 1.0,
 ) -> Tuple[np.ndarray, float]:
-    """在 cell 的某个固定 fixed_axis=fixed_val 局部面上，为一批目标物理点
-    (n_pts,3) 精确定位对应的另外两个自由计算坐标，使映射结果与目标重合。
-
-    四面体（is_prism=False）走精确闭式解（`_tet_exact_locate_on_face`）：
-    四面体的真实面恒为 3 点确定的平面，直接在物理空间解重心坐标，不需要
-    也不应该用 Newton 迭代——`cube_to_tet_rst` 对固定某一轴而言另外两个
-    自由方向仍含交叉项（不是仿射的），迭代法在该映射参考坐标局部雅可比
-    接近奇异处（两个自由方向映射到物理空间的方向接近平行，真实网格上
-    偏斜/细长的四面体会触发）可能被"阻尼线搜索要求残差单调下降"这一
-    稳健性措施本身困住，即使目标点物理上精确可达（与该面共面，验证到
-    ~1e-17）也可能收敛失败——已在真实网格上复现并确认闭式解可靠收敛到
-    机器精度，见 `_tet_exact_locate_on_face` 文档。
-
-    棱柱（is_prism=True）没有解析闭式解（棱柱侧面是真双线性曲面），
-    走向量化批量 Newton 迭代（有限差分雅可比）——对该映射在给定面上光滑
-    且（对非退化单元）局部可逆，Newton 收敛快（通常 <5 次迭代到机器
-    精度），已数值验证，见模块文档。
+    """在棱柱单元立方体坐标的固定 fixed_axis=fixed_val 局部面上，为一批目标物理点 (n_pts,3) 定位另外两个
+    自由坐标，使映射结果与目标重合。棱柱侧面是真双线性曲面，没有闭式解，走向量化批量 Newton 迭代（有限差分
+    雅可比）——映射在给定面上光滑且（对非退化单元）局部可逆，通常 <5 次迭代到机器精度。
 
     Returns:
         (free_coords, final_resid): free_coords 形状 (n_pts, 2)（两个自由
@@ -225,36 +138,22 @@ def newton_locate_on_face(
         pts[:, other_axes[1]] = xy[:, 1]
         return pts
 
-    if not is_prism:
-        x = _tet_exact_locate_on_face(cell_nodes, fixed_axis, fixed_val, targets_phys)
-        resid_norm = np.linalg.norm(map_ref_points(is_prism, full_points(x), cell_nodes) - targets_phys, axis=1)
-        final_resid = np.max(resid_norm)
-        warn_tol = max(1e-9, _ACCEPT_WARN_REL * scale)
-        if final_resid > warn_tol:
-            raise RuntimeError(
-                f"Tet face exact point-location failed to converge: max residual {final_resid:.3e} "
-                f"({100 * final_resid / scale:.2f}% of local face scale {scale:.3e}). "
-                f"This indicates a genuinely non-conforming mesh face (target point not actually "
-                f"coplanar with this tet's face) rather than a numerical precision issue."
-            )
-        return x, final_resid
-
     x = np.zeros((n_pts, 2))  # 初值取面中心 (0,0)
     eps = 1e-6
-    resid_norm = np.linalg.norm(map_ref_points(is_prism, full_points(x), cell_nodes) - targets_phys, axis=1)
+    resid_norm = np.linalg.norm(map_prism_to_physical(full_points(x), cell_nodes) - targets_phys, axis=1)
     tol_converge = max(1e-13, _NEWTON_TOL_REL * scale)
 
     for _ in range(_NEWTON_MAX_ITER):
         if np.max(resid_norm) < tol_converge:
             break
 
-        phys = map_ref_points(is_prism, full_points(x), cell_nodes)
+        phys = map_prism_to_physical(full_points(x), cell_nodes)
         residual = phys - targets_phys  # (n_pts,3)
 
         x_p0 = x.copy(); x_p0[:, 0] += eps
         x_p1 = x.copy(); x_p1[:, 1] += eps
-        phys_p0 = map_ref_points(is_prism, full_points(x_p0), cell_nodes)
-        phys_p1 = map_ref_points(is_prism, full_points(x_p1), cell_nodes)
+        phys_p0 = map_prism_to_physical(full_points(x_p0), cell_nodes)
+        phys_p1 = map_prism_to_physical(full_points(x_p1), cell_nodes)
         J0 = (phys_p0 - phys) / eps  # (n_pts,3) d(phys)/d(x0)
         J1 = (phys_p1 - phys) / eps  # (n_pts,3) d(phys)/d(x1)
 
@@ -294,7 +193,7 @@ def newton_locate_on_face(
         for _ls in range(20):
             x_trial = x + step[:, None] * dx
             resid_trial = np.linalg.norm(
-                map_ref_points(is_prism, full_points(x_trial), cell_nodes) - targets_phys, axis=1
+                map_prism_to_physical(full_points(x_trial), cell_nodes) - targets_phys, axis=1
             )
             improved = resid_trial < resid_best
             x_best = np.where(improved[:, None], x_trial, x_best)

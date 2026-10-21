@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - CPU MPI 分布式的单步推进与局部时间步长（求解循环在 solve_loop.py）
 
-从 `src/autoflowcfd/core/mpi/distributed_solver.py` 的 `DistributedFRSolver` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+`DistributedFRSolver` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `DistributedFRSolver` 的 `__init__` 建立，
 这里通过 `self` 访问。

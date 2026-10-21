@@ -1,6 +1,4 @@
 """AutoFlowCFD V2.0 - 应变率/涡量张量模的 numba kernel 与其封装
-
-从 `src/autoflowcfd/core/turbulence/sst.py` 拆出（2026-09-24，项目「单文件不超 500 行」规范）。
 """
 
 import numpy as np

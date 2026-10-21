@@ -62,8 +62,7 @@ def build_fp_newton_parallel(
     棱柱四边形面 (multi-source) 的插值矩阵由 Python 端重新构建。
 
     Returns: (nb_fc, nb_resid, ow_fc, ow_resid,
-              nb_interp, ow_interp, nb_cell_id, ow_cell_id,
-              geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n)
+              nb_interp, ow_interp, nb_cell_id, ow_cell_id)
     nb_resid/ow_resid 形状 (n_faces, n_fp)：逐 Flux Point 的 Newton 精确
     点位定位残差（绝对长度单位，未按面特征尺度归一化，未按容差分级）——
     调用方 face_flux_points/merge.py 负责归一化、按 ACCEPT_STRICT_REL/
@@ -109,27 +108,12 @@ def build_fp_newton_parallel(
     ow_interp = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     nb_cell_id = np.full(n_faces, -1, dtype=np.int32)
     ow_cell_id = np.full(n_faces, -1, dtype=np.int32)
-    geom_oa = np.empty(n_faces, dtype=np.int32)
-    geom_os = np.empty(n_faces)
-    geom_na = np.empty(n_faces, dtype=np.int32)
-    geom_ns = np.empty(n_faces)
-    geom_aw = np.empty((n_faces, n_fp))
-    geom_n = np.empty((n_faces, n_fp, 3))
 
     for f in prange(n_faces):
         oc = owner_cell[f]
         oc_code = owner_cube_face[f]
-        # code>=6 只可能是 native 四面体真实面（见函数文档），此时 axis/
-        # side 语义不适用——_FACE_AXIS/_FACE_SIDE 长度只有 6，不能对
-        # code>=6 索引（numba 不做边界检查，会读到未定义内存）。o_axis/
-        # o_side 在 native 分支下只是未使用的占位值（真正用到的是下面
-        # o_is_native 分支各自独立处理），仍然写入 geom_oa/geom_os 但那
-        # 两个数组本身在下游（face_flux_points/merge.py）已确认从不被
-        # 消费（owner 侧 axis/side 改用 CUBE_FACE_AXIS_SIDE 字典查表）。
-        # 两类原生面必须**分开**判（2026-09-19）：`code >= 6` 原本等价于
-        # "是原生四面体面"，加了原生棱柱编码 [10,15) 之后它变成了"是任意
-        # 原生面"，而两者要分派到**不同**的算子组；按 `code - 6` 去取四面体
-        # 的表会拿到 4~8 行，而那些数组只有 4 行（numba 不做边界检查）。
+        # 两类原生面分开判：四面体面 [6,10) 与棱柱面 [10,15) 分派到不同的算子组（按 `code - 6` 去取四面体的表
+        # 会拿到 4~8 行，而那些数组只有 4 行，numba 不做边界检查）。
         o_is_nat_tet = _NATIVE_TET_LO <= oc_code < _NATIVE_TET_HI
         if o_is_nat_tet:
             # 四面体原生面没有 (axis,side) 语义（axis 槽位复用成
@@ -145,18 +129,9 @@ def build_fp_newton_parallel(
             o_side = _FACE_SIDE[oc_code]
 
         a_val = area[f]
-        for fp in range(n_fp):
-            geom_aw[f, fp] = a_val
-            geom_n[f, fp, 0] = normal[f, 0]
-            geom_n[f, fp, 1] = normal[f, 1]
-            geom_n[f, fp, 2] = normal[f, 2]
-        geom_oa[f] = o_axis
-        geom_os[f] = o_side
 
         # 边界面
         if is_boundary[f]:
-            geom_na[f] = -1
-            geom_ns[f] = 0.0
             continue
 
         nc = neighbor_cell[f]
@@ -168,8 +143,6 @@ def build_fp_newton_parallel(
         else:
             n_axis = _FACE_AXIS[nc_code]
             n_side = _FACE_SIDE[nc_code]
-        geom_na[f] = n_axis
-        geom_ns[f] = n_side
 
         # 获取 owner 节点
         o_is_prism = oc < n_prism
@@ -251,7 +224,7 @@ def build_fp_newton_parallel(
                     n_nd, nc_code - _NATIVE_TET_LO, search)
             else:
                 # 原生棱柱面：坍缩立方体面的 Newton 定位（几何映射逐位恒等）。
-                fc, rs = _newton_locate_nb(n_is_prism, n_nd, n_axis, n_side, search, cl)
+                fc, rs = _newton_locate_nb(n_nd, n_axis, n_side, search, cl)
             for p in range(n_fp):
                 nb_fc[f, p, 0] = fc[p, 0]
                 nb_fc[f, p, 1] = fc[p, 1]
@@ -314,7 +287,7 @@ def build_fp_newton_parallel(
                 fc_o, rst_o_nb, rs_o = _tet_native_locate_nb(
                     o_nd, oc_code - _NATIVE_TET_LO, search_o)
             else:
-                fc_o, rs_o = _newton_locate_nb(o_is_prism, o_nd, o_axis, o_side, search_o, cl_o)
+                fc_o, rs_o = _newton_locate_nb(o_nd, o_axis, o_side, search_o, cl_o)
             for p in range(n_fp):
                 ow_fc[f, p, 0] = fc_o[p, 0]
                 ow_fc[f, p, 1] = fc_o[p, 1]
@@ -347,5 +320,4 @@ def build_fp_newton_parallel(
                 ow_cell_id[f] = oc
 
     return (nb_fc, nb_resid, ow_fc, ow_resid,
-            nb_interp, ow_interp, nb_cell_id, ow_cell_id,
-            geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n)
+            nb_interp, ow_interp, nb_cell_id, ow_cell_id)

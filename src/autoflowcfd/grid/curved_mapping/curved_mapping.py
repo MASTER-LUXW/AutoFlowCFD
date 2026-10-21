@@ -7,7 +7,7 @@ AutoFlowCFD - 参考单元几何与等参映射。
 2. 参考坐标到物理四面体 / 棱柱的映射（重心坐标形函数，单位分解在机器精度上成立）。
 3. 批量 3x3 行列式 / 伴随（`batched_det_inv_3x3`）与几何守恒律度量恒等式检验（`CurvedMapping`）。
 
-单元朝向修正在 `curved_mapping_orientation.py`，解析精确雅可比在 `curved_mapping_exact_jacobian.py`。
+单元朝向修正在 `curved_mapping_orientation.py`；原生单元的解析精确雅可比在 `fr/native_tet/basis.py`、`fr/native_prism/basis.py`。
 
 参考文献：Hesthaven & Warburton, "Nodal Discontinuous Galerkin Methods" (2008), Chapter 6；Karniadakis & Sherwin,
 "Spectral/hp Element Methods for CFD"（单纯形 / 棱柱的坍缩坐标）。
@@ -212,16 +212,6 @@ def map_prism_to_physical(ref_cube_sps: np.ndarray, cell_nodes: np.ndarray) -> n
     )
     z = c[:, np.newaxis]
     return 0.5 * (1.0 - z) * bottom + 0.5 * (1.0 + z) * top
-
-
-# ---------------------------------------------------------------------------
-# 解析精确雅可比（直边四面体/棱柱专用，绕开谱微分矩阵）
-# ---------------------------------------------------------------------------
-#
-# tet_exact_jacobian / prism_exact_jacobian 已拆分到
-# curved_mapping_exact_jacobian.py（原文件超过 400 行的项目约定上限），
-# 在本文件顶部原样重新导出（见 import 语句）。设计动机（为什么用解析求导
-# 替代谱微分矩阵几何求导）的完整说明见该文件的模块 docstring。
 
 
 # ---------------------------------------------------------------------------

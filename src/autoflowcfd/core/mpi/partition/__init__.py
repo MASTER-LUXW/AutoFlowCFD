@@ -24,7 +24,6 @@ AutoFlowCFD V2.0 - 网格分区（METIS 接口）
     物理边界又是分区边界，它被归类为 physical_boundary（因为 neighbor=-1，
     不需要 halo 交换）。
 
-
 ## 文件分工
 
     types.py             分区结果的数据结构

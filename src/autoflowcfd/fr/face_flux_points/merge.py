@@ -13,7 +13,6 @@ FP 外插，FP 按对角线解析分类分别匹配到正确的相邻单元。
 import numpy as np
 from loguru import logger
 
-from .geometry import CUBE_FACE_AXIS_SIDE
 from .basis_inverses import build_basis_inverses
 from ..native_padding import sps_width
 from .face_metrics import build_face_metrics
@@ -156,8 +155,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> _KernelFaceDa
     (
         _nb_fc, _nb_resid, _ow_fc, _ow_resid,
         _nb_interp, _ow_interp, _nb_cell_id, _ow_cell_id,
-        _geom_oa, _geom_os, _geom_na, _geom_ns,
-        _geom_aw, _geom_n,
     ) = kernel(
         n_faces, n_prism, n1d, n_fp, n_sps,
         np.ascontiguousarray(sps_1d.astype(np.float64)),
@@ -181,18 +178,12 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> _KernelFaceDa
     )
     logger.info("Numba parallel kernel completed.")
 
-    # ---- 预计算 axis/side 数组（消除逐面字典查找） ----
-    _CF_AXIS = np.array([v[0] for v in CUBE_FACE_AXIS_SIDE.values()], dtype=np.int32)
-    _CF_SIDE = np.array([v[1] for v in CUBE_FACE_AXIS_SIDE.values()])
-    _o_axis_arr = _CF_AXIS[np.asarray(face_conn.owner_cube_face, dtype=np.int32)]
-    _o_side_arr = _CF_SIDE[np.asarray(face_conn.owner_cube_face, dtype=np.int32)]
     # 缓存常用数组引用
     _is_bnd = face_conn.is_boundary
     _op = owner_primary
     _np_ = neighbor_primary
     fm = build_face_metrics(
-        face_conn, mesh, n_faces, n1d, n_prism, sps_1d, weights_1d,
-        _o_side_arr, _is_bnd)
+        face_conn, mesh, n_faces, n1d, n_prism, sps_1d, weights_1d, _is_bnd)
     _all_normals = fm.true_normal
     _all_area_w = fm.true_area_weight
     _owner_adj_row_exact = fm.owner_adj_row_exact
@@ -441,10 +432,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> _KernelFaceDa
     logger.info("Flux Points geometry built (flat array format).")
     return _KernelFaceData(
         n_faces=n_faces, n_fp=n_fp, n_sps=n_sps, n1d=n1d,
-        owner_axis=_o_axis_arr.astype(np.int64),
-        owner_side=_o_side_arr.astype(np.float64),
-        neighbor_axis=_geom_na.astype(np.int64),
-        neighbor_side=_geom_ns.astype(np.float64),
         owner_is_primary=_op,
         neighbor_is_primary=_np_,
         true_normal=_all_normals,

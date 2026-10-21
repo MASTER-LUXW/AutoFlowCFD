@@ -44,8 +44,8 @@ def validate_face_flux_point_residuals(
     parallel/build_ms_interp_parallel 只把 Newton 残差写进数组就返回，从未
     与任何阈值比较——真正不相容的网格拓扑（T-junction、BL 挤出产生的
     非协调面等）会被 Newton 跑满迭代次数后返回一个可能远超容差的"最优
-    逼近"插值矩阵，且没有任何警告或报错。旧的纯 Python 慢速路径
-    （face_flux_points/locate.py::newton_locate_on_face）里这个校验是完整的：
+    逼近"插值矩阵，且没有任何警告或报错。纯 Python 版
+    （face_flux_points/locate.py::newton_locate_on_prism_face）里这个校验是完整的：
     残差相对局部面特征尺度 char_length=sqrt(area) 超过 _ACCEPT_WARN_REL
     （15%）直接 raise；未超但超过 ACCEPT_STRICT_REL（1e-6，即非机器精度）
     记入 _tolerated 仅做日志。这里用向量化 numpy 操作复现同一套判据，

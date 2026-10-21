@@ -150,12 +150,10 @@ def troubled_cell_mask(det_jacs: np.ndarray, threshold: float = TROUBLED_CELL_HA
 @njit(cache=True)
 def _cell_face_misalignment_kernel(
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
-    owner_side: np.ndarray, owner_is_primary: np.ndarray,
-    neighbor_side: np.ndarray, neighbor_is_primary: np.ndarray,
+    owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     true_normal: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     n_faces: int, n_fp: int, n_cells: int,
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
 ) -> np.ndarray:
     """`precompute_cell_face_misalignment` 的数值核心：`own_dir_outward`
     与 `true_normal` 逐行归一化后点积，取 `1-dot` 的单元内最大值。
@@ -193,8 +191,6 @@ def _cell_face_misalignment_kernel(
     for f in range(n_faces):
         if owner_is_primary[f]:
             oc = owner_cell[f]
-            oc_code = owner_cube_face[f]
-            side_factor_o = 1.0 if oc_code >= 6 else owner_side[f]
             worst = 0.0
             for i in range(n_fp):
                 rx = owner_adj_row_exact[f, i, 0]
@@ -202,9 +198,9 @@ def _cell_face_misalignment_kernel(
                 rz = owner_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
-                dx = (rx / mag) * side_factor_o
-                dy = (ry / mag) * side_factor_o
-                dz = (rz / mag) * side_factor_o
+                dx = rx / mag
+                dy = ry / mag
+                dz = rz / mag
                 dot = dx * true_normal[f, i, 0] + dy * true_normal[f, i, 1] + dz * true_normal[f, i, 2]
                 m = 1.0 - dot
                 if m > worst:
@@ -213,8 +209,6 @@ def _cell_face_misalignment_kernel(
                 cell_misalign[oc] = worst
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            side_factor_n = 1.0 if nc_code >= 6 else neighbor_side[f]
             worst = 0.0
             for i in range(n_fp):
                 rx = neighbor_adj_row_exact[f, i, 0]
@@ -222,9 +216,9 @@ def _cell_face_misalignment_kernel(
                 rz = neighbor_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
-                dx = (rx / mag) * side_factor_n
-                dy = (ry / mag) * side_factor_n
-                dz = (rz / mag) * side_factor_n
+                dx = rx / mag
+                dy = ry / mag
+                dz = rz / mag
                 dot = dx * (-true_normal[f, i, 0]) + dy * (-true_normal[f, i, 1]) + dz * (-true_normal[f, i, 2])
                 m = 1.0 - dot
                 if m > worst:
@@ -277,12 +271,10 @@ def precompute_cell_face_misalignment(mesh) -> np.ndarray:
 
     return _cell_face_misalignment_kernel(
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_side, flat.owner_is_primary,
-        flat.neighbor_side, flat.neighbor_is_primary,
+        flat.owner_is_primary, flat.neighbor_is_primary,
         flat.true_normal,
         flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.n_faces, flat.n_fp, mesh.n_cells,
-        flat.owner_cube_face, flat.neighbor_cube_face,
     )
 
 

@@ -213,66 +213,6 @@ def map_native_tet_to_physical(ref_rst: np.ndarray, cell_nodes: np.ndarray) -> n
     return L1[:, None] * p0 + L2[:, None] * p1 + L3[:, None] * p2 + L4[:, None] * p3
 
 
-def face_node_indices(ref_rst: np.ndarray, excluded_vertex: int, tol: float = 1e-9) -> np.ndarray:
-    """给定体积节点集合，返回落在"排除掉 `excluded_vertex` 的那个面"上
-    的节点下标（该面对应的重心坐标分量 `L_{excluded_vertex}≈0`）。
-
-    Warp & Blend（GLL 型）节点集合天然包含每个面的边界节点子集——数量
-    精确等于该阶数二维三角形节点数 `(order+1)(order+2)/2`（已实测验证，
-    P1~P4 全部吻合，见 `tests/unit/test_native_tet_real_mesh_geometry.py`
-    与 Part6 文档阶段2 相关小节）。这与现有坍缩坐标方案（张量积 Gauss
-    点，严格内部、不含边界）不同——**四面体-四面体共享面之间，路径C
-    不需要任何插值/外插矩阵**，两侧各自按这个函数取出自己的面节点子集
-    后，物理坐标点集合本身就精确重合（已用真实相邻单元数值验证，最大
-    误差 1.24e-16），只需要一次性求出两侧下标之间的对应排列（见
-    `match_face_nodes_by_physical_position`），不是像坍缩坐标方案那样
-    需要解 Vandermonde 系统构造外插矩阵。
-
-    Args:
-        ref_rst: (n_native_sps, 3) 体积节点参考坐标
-        excluded_vertex: 0~3，对应 `tet_barycentric` 的 L1~L4 中被排除
-            （恒为0）的那个分量下标
-
-    Returns:
-        (n_face_nodes,) 整数下标数组
-    """
-    from ...grid.curved_mapping.curved_mapping import tet_barycentric
-
-    r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
-    L = np.column_stack(tet_barycentric(r, s, t))
-    return np.where(L[:, excluded_vertex] < tol)[0]
-
-
-def match_face_nodes_by_physical_position(phys_a: np.ndarray, phys_b: np.ndarray) -> np.ndarray:
-    """两侧面节点物理坐标集合理论上精确重合（见 `face_node_indices`
-    文档），只是各自的局部下标顺序不同（取决于各自单元的局部顶点
-    编号）——用最近邻匹配求出排列，使 `phys_b[perm] ≈ phys_a`。
-
-    这与现有 `FaceExtractor` 用真实物理坐标匹配 owner/neighbor 面几何
-    是同一个原理（物理空间几何匹配，不依赖参考坐标系是否一致），这里
-    单独提供一个轻量版本，供孤立验证/未来接入 face_flux_points.py 时
-    复用，不依赖完整的 Newton 迭代曲面搜索机制（那是为处理弯曲面设计
-    的更通用机制，对本文件这种"两侧节点物理坐标精确重合"的简单情形
-    是不必要的开销，但如果未来要接入现有生产管线，直接复用现有机制
-    也是正确的，二者不冲突）。
-
-    Returns:
-        perm: (n,) 整数数组，`phys_b[perm]` 与 `phys_a` 一一对应（在
-        误差容限内）
-    """
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(phys_b)
-    dists, perm = tree.query(phys_a)
-    if dists.max() > 1e-8:
-        raise ValueError(
-            f"两侧面节点物理坐标匹配失败，最大误差 {dists.max():.3e}——"
-            "这不应该发生在真正共享同一个面的两个单元之间，说明连接关系"
-            "或几何数据有问题，不应该静默继续。"
-        )
-    return perm
-
-
 def native_tet_face_points(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
     """排除顶点 `excluded_vertex` 的那个面上 `(order+1)^2` 个通量点的**参考**坐标
     `(r,s,t)`：坍缩三角形采样（`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上，

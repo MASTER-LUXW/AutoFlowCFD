@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - 自适应 CFL 的逐步更新（放大/收缩判据与步拒绝）
 
-从 `src/autoflowcfd/core/time_integration/adaptive_cfl.py` 的 `AdaptiveCFLController` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+`AdaptiveCFLController` 的一组方法（mixin）。
 
 **只含方法，没有状态**：全部属性由 `AdaptiveCFLController` 的 `__init__` 建立，
 这里通过 `self` 访问。

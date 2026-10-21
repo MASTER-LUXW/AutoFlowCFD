@@ -1,10 +1,8 @@
 """
-AutoFlowCFD V2.0 - FRSolver 湍流模型管理 (从 fr_solver.py 拆分)
+AutoFlowCFD V2.0 - FRSolver 湍流模型管理
 
-本文件把 FRSolver 里与湍流模型初始化/壁面距离/源项计算/涡粘度耦合相关
-的逻辑拆出来，避免 fr_solver.py 单文件过长（>400行需拆分的项目规范）。
-函数签名都以 `solver: FRSolver` 为第一参数，FRSolver 里保留同名的薄
-委托方法，调用方式不变——与 order_continuation.py 已经在用的委托模式一致。
+湍流模型初始化 / 壁面距离 / 源项计算 / 涡粘度耦合。函数签名都以 `solver: FRSolver` 为第一参数，FRSolver 里保留同名的薄
+委托方法。
 
 ## 文件分工
 

@@ -1,6 +1,4 @@
 """AutoFlowCFD V2.0 - 求解器的线程配置：BLAS 运行时限线程、numba 线程池。
-
-从 `core/fr_solver/solver.py` 拆出（2026-09-25，项目「单文件不超 500 行」规范）。
 """
 
 import ctypes

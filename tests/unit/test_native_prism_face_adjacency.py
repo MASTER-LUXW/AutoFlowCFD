@@ -48,74 +48,26 @@ class TestTwoPrismMapsAreTheSameGeometry:
             f"{float(np.abs(p_col - p_nat).max()):.3e} —— 复用定位层的依据"
             f"不成立")
 
-    def test_metric_relation_is_the_duffy_jacobian(self):
-        """`det_collapsed = det_native * (1-b)/2`。
-
-        `(r,s,t) <- (a,b,c)` 的雅可比是三角阵，行列式恰好
-        `(dr/da)(ds/db)(dt/dc) = (1-b)/2`。这条同时交叉验证两个解析雅可比
-        实现（任一处抄错公式都会让比值偏离）。
-        """
+    def test_native_jacobian_matches_finite_differences_of_the_mapping(self):
+        """解析雅可比 `native_prism_exact_jacobian` 与几何映射 `map_native_prism_to_physical` 的中心差分一致
+        （两者独立实现，任一处抄错公式都会让差值远超差分截断量级）。"""
         from autoflowcfd.fr.native_prism.basis import (
-            native_prism_exact_jacobian,
-        )
-        from autoflowcfd.grid.curved_mapping.curved_mapping import (
-            cube_to_tri_rs,
-        )
-        from autoflowcfd.grid.curved_mapping.curved_mapping_exact_jacobian import (
-            prism_exact_jacobian,
+            map_native_prism_to_physical, native_prism_exact_jacobian,
         )
 
-        abc = self._sample(n=500, seed=5)
-        # 避开退化边附近（那里 (1-b)/2 -> 0，比值本身失去意义）
-        abc = abc[abc[:, 1] < 0.9]
-        r, s = cube_to_tri_rs(abc[:, 0], abc[:, 1])
-        rst = np.column_stack([r, s, abc[:, 2]])
-        d_col = np.linalg.det(prism_exact_jacobian(abc, self._NODES))
-        d_nat = np.linalg.det(native_prism_exact_jacobian(rst, self._NODES))
-        expect = d_nat * (1.0 - abc[:, 1]) / 2.0
-        rel = np.abs(d_col / expect - 1.0)
-        assert float(rel.max()) < 1e-12, (
-            f"度量关系不成立，最大相对偏差 {float(rel.max()):.3e}")
-
-    def test_collapsed_metric_degenerates_where_native_does_not(self):
-        """同一批点上，坍缩度量在 `b -> 1` 附近趋零，原生几乎不变。
-
-        这就是"坍缩棱柱在退化边一带病态"的直接来源：`1/det(J)` 在残差里
-        是个因子，度量趋零处它被放大。
-
-        判据是**两者的散布之比**，不是"原生恒定"：本测试单元刻意取得不
-        规则（顶面不是底面的纯平移），原生度量本来就会随点小幅变化 ——
-        逐点恒定只对右棱柱成立，那条由
-        `TestNativePrismGeometry::test_right_prism_metric_is_constant_
-        through_production_geometry` 单独覆盖。
-        """
-        from autoflowcfd.fr.native_prism.basis import (
-            native_prism_exact_jacobian,
-        )
-        from autoflowcfd.grid.curved_mapping.curved_mapping import (
-            cube_to_tri_rs,
-        )
-        from autoflowcfd.grid.curved_mapping.curved_mapping_exact_jacobian import (
-            prism_exact_jacobian,
-        )
-
-        b_vals = np.array([-0.9, 0.0, 0.9, 0.99, 0.999])
-        abc = np.column_stack([np.zeros_like(b_vals), b_vals,
-                               np.zeros_like(b_vals)])
-        r, s = cube_to_tri_rs(abc[:, 0], abc[:, 1])
-        rst = np.column_stack([r, s, abc[:, 2]])
-        d_col = np.abs(np.linalg.det(prism_exact_jacobian(abc, self._NODES)))
-        d_nat = np.abs(np.linalg.det(
-            native_prism_exact_jacobian(rst, self._NODES)))
-        assert d_col[-1] / d_col[0] < 1e-2, (
-            f"坍缩度量没有在退化边附近趋零：{d_col}")
-        spread_col = d_col.max() / d_col.min()
-        spread_nat = d_nat.max() / d_nat.min()
-        assert spread_nat < 1.1, (
-            f"原生度量散布 {spread_nat:.4f} 过大（这批点在同一个单元里）")
-        assert spread_col / spread_nat > 100.0, (
-            f"坍缩散布 {spread_col:.1f} 相对原生 {spread_nat:.4f} 只差 "
-            f"{spread_col / spread_nat:.1f} 倍，两条基区分不开")
+        rng = np.random.default_rng(7)
+        r = rng.uniform(-1.0, 0.0, 200)
+        s_ = rng.uniform(-1.0, 0.0, 200)
+        keep = r + s_ <= 0.0
+        rst = np.column_stack([r[keep], s_[keep], rng.uniform(-1.0, 1.0, int(keep.sum()))])
+        J = native_prism_exact_jacobian(rst, self._NODES)
+        h = 1e-6
+        for m in range(3):
+            d = np.zeros(3)
+            d[m] = h
+            fd = (map_native_prism_to_physical(rst + d, self._NODES)
+                  - map_native_prism_to_physical(rst - d, self._NODES)) / (2.0 * h)
+            np.testing.assert_allclose(J[:, :, m], fd, rtol=0, atol=1e-8)
 
 
 class TestFaceAdjRowsAndWeights:

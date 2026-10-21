@@ -14,9 +14,7 @@ AutoFlowCFD V2.0 - SST k-omega 湍流模型 FR 离散 (T-01, T-02)
 此前的问题也均已在 V2.0 评审中修复。
 """
 
-# 本模块 2026-09-24 按职责拆成子包（项目「单文件不超 500 行」规范）。
-# 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
-# `from autoflowcfd.core.turbulence.sst import ...` 一个字都不用改。
+# 包根 re-export 各子模块的公开名与测试在用的私有名。
 
 from .kernels import compute_strain_and_vorticity_magnitude  # noqa: F401
 from .model import (  # noqa: F401

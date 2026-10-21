@@ -11,7 +11,6 @@ AutoFlowCFD V2.0 - FR 粘性物理通量与界面耦合（S-03）。
 
 本函数不对残差做任何异常抑制：退化单元的对策是求解前的网格质量门（`grid/validation/solve_gate.py`）。
 
-
 ## 文件分工
 ## 文件分工
 

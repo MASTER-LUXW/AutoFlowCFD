@@ -126,78 +126,8 @@ _NEWTON_TOL_REL = 1e-10
 
 
 @njit(cache=True)
-def _tet_exact_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys):
-    """四面体面解析闭式解。"""
-    if fixed_axis == 0 and fixed_val < 0.0:
-        vi, vj, vk = 0, 2, 3
-    elif fixed_axis == 0 and fixed_val > 0.0:
-        vi, vj, vk = 1, 2, 3
-    elif fixed_axis == 1 and fixed_val < 0.0:
-        vi, vj, vk = 0, 1, 3
-    else:
-        vi, vj, vk = 0, 1, 2
-
-    Pi = cell_nodes[vi]
-    Pj = cell_nodes[vj]
-    Pk = cell_nodes[vk]
-    e1 = Pj - Pi
-    e2 = Pk - Pi
-
-    n_pts = targets_phys.shape[0]
-    e1_n = np.sqrt(max(e1[0] ** 2 + e1[1] ** 2 + e1[2] ** 2, 1e-300))
-    e2_n = np.sqrt(max(e2[0] ** 2 + e2[1] ** 2 + e2[2] ** 2, 1e-300))
-    e1h = e1 / e1_n
-    e2h = e2 / e2_n
-
-    a11 = e1h[0] ** 2 + e1h[1] ** 2 + e1h[2] ** 2
-    a12 = e1h[0] * e2h[0] + e1h[1] * e2h[1] + e1h[2] * e2h[2]
-    a22 = e2h[0] ** 2 + e2h[1] ** 2 + e2h[2] ** 2
-
-    free = np.empty((n_pts, 2))
-    for p in range(n_pts):
-        r0 = targets_phys[p, 0] - Pi[0]
-        r1 = targets_phys[p, 1] - Pi[1]
-        r2 = targets_phys[p, 2] - Pi[2]
-        b1 = r0 * e1h[0] + r1 * e1h[1] + r2 * e1h[2]
-        b2 = r0 * e2h[0] + r1 * e2h[1] + r2 * e2h[2]
-        det = a11 * a22 - a12 * a12
-        ds = det if abs(det) > 1e-300 else 1e-300
-        alpha = (b1 * a22 - b2 * a12) / ds / e1_n
-        beta = (a11 * b2 - a12 * b1) / ds / e2_n
-
-        L = np.zeros(4)
-        L[vi] = 1.0 - alpha - beta
-        L[vj] = alpha
-        L[vk] = beta
-
-        r = 2.0 * L[1] - 1.0
-        s = 2.0 * L[2] - 1.0
-        t = 2.0 * L[3] - 1.0
-        c_v = t
-        db = 1.0 - c_v
-        if abs(db) < 1e-300:
-            db = 1e-300
-        b_c = 2.0 * (s + 1.0) / db - 1.0
-        da = s + t
-        if abs(da) < 1e-300:
-            da = 1e-300
-        a_c = -2.0 * (r + 1.0) / da - 1.0
-
-        full = np.empty(3)
-        full[0] = a_c
-        full[1] = b_c
-        full[2] = c_v
-        ix = 0
-        for ax in range(3):
-            if ax != fixed_axis:
-                free[p, ix] = full[ax]
-                ix += 1
-    return free
-
-
-@njit(cache=True)
-def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys, char_length):
-    """在单元面上 Newton 迭代定位目标物理点。四面体走闭式解，棱柱走迭代。
+def _newton_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys, char_length):
+    """在棱柱单元立方体坐标的固定面上 Newton 迭代定位目标物理点（四面体面走 `native_geometry_nb._tet_native_locate_nb`）。
 
     Returns:
         (free_coords, resid_per_point)：resid_per_point 形状 (n_pts,)，
@@ -223,22 +153,6 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
 
     n_pts = targets_phys.shape[0]
     scale = char_length if char_length > 1e-300 else 1e-300
-
-    if not is_prism:
-        x = _tet_exact_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys)
-        full = np.empty((n_pts, 3))
-        for p in range(n_pts):
-            full[p, fixed_axis] = fixed_val
-            full[p, o0] = x[p, 0]
-            full[p, o1] = x[p, 1]
-        phys = _map_ref_nb(False, full, cell_nodes)
-        resid_arr = np.empty(n_pts)
-        for p in range(n_pts):
-            dx = phys[p, 0] - targets_phys[p, 0]
-            dy = phys[p, 1] - targets_phys[p, 1]
-            dz = phys[p, 2] - targets_phys[p, 2]
-            resid_arr[p] = np.sqrt(dx * dx + dy * dy + dz * dz)
-        return x, resid_arr
 
     # 棱柱 Newton
     x = np.zeros((n_pts, 2))
@@ -327,7 +241,7 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
         # 但对刚在第一段改进过的点，rb[p] 此时已经等于这次算出的 rt，
         # rt<rb[p] 恒为 False，导致刚成功改进的点在本轮也被错误地减半
         # 步长。与 Python 参考实现（face_flux_points/locate.py::
-        # newton_locate_on_face）不一致——那里每次迭代只算一次试探残差，
+        # newton_locate_on_prism_face）不一致——那里每次迭代只算一次试探残差，
         # 用同一次结果同时驱动 xb/rb 更新与 step 调整决策。这里改成同一
         # 结构：不影响最终收敛结果（历史最优 xb/rb 不会被撤销），但消除
         # 了对已改进点的多余步长收缩，在偏斜/退化单元上收敛更稳健。

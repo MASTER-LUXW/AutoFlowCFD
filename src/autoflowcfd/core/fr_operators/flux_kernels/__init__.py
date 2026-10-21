@@ -17,7 +17,6 @@ nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须
 `core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux` 严格一致，改动前者时必须
 同步检查后者是否也要改。
 
-
 ## 文件分工
 
     euler.py             欧拉物理通量与熵稳定体积散度

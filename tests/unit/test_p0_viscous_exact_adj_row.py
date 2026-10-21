@@ -69,14 +69,23 @@ def _flat_and_adj(order):
     return mesh, flat, compute_adj_j(det, inv)
 
 
+def _axis_slots(codes):
+    """旧做法读的"轴槽位"：`CUBE_FACE_AXIS_SIDE` 的 axis 列（原生四面体面存 excluded_vertex）。展平面几何已不再
+    携带这一列，这里按面编码查表重建，只为量化旧做法的错误。"""
+    from autoflowcfd.fr.face_flux_points.geometry import CUBE_FACE_AXIS_SIDE
+
+    table = np.array([v[0] for v in CUBE_FACE_AXIS_SIDE.values()], dtype=np.int64)
+    return table[np.asarray(codes, dtype=np.int64)]
+
+
 def test_owner_axis_exceeds_the_adj_j_axis_dimension():
     """旧表达式 `adj_j[oc, 0, owner_axis[f]]` 可达越界（判据 1）。"""
     mesh, flat, adj_j = _flat_and_adj(0)
     assert adj_j.shape[-2:] == (3, 3), (
         f"adj_j 末两维应当是 (3,3)，实际 {adj_j.shape[-2:]}")
 
-    oax = np.asarray(flat.owner_axis)
     codes = np.asarray(flat.owner_cube_face)
+    oax = _axis_slots(codes)
     # 只看原生**四面体**面（[6,10)）：那里 owner_axis 存的是
     # excluded_vertex，取值可达 3。
     tet_faces = np.nonzero((codes >= 6) & (codes < 10))[0]
@@ -89,7 +98,7 @@ def test_owner_axis_exceeds_the_adj_j_axis_dimension():
 def test_the_two_metric_sources_are_not_interchangeable():
     """两个量在每个面上都差 O(1)（判据 2）。"""
     mesh, flat, adj_j = _flat_and_adj(0)
-    oax = np.asarray(flat.owner_axis)
+    oax = _axis_slots(flat.owner_cube_face)
     oc = np.asarray(flat.owner_cell)
     exact = np.asarray(flat.owner_adj_row_exact)      # (n_faces, n_fp, 3)
     primary = np.nonzero(np.asarray(flat.owner_is_primary))[0]
@@ -198,8 +207,10 @@ def test_old_metric_source_changes_the_residual():
     R_fixed = run(np.ascontiguousarray(flat.owner_adj_row_exact),
                   np.ascontiguousarray(flat.neighbor_adj_row_exact))
     nc_safe = np.maximum(np.asarray(flat.neighbor_cell), 0)
-    R_old = run(old_style(flat.owner_cell, flat.owner_axis),
-                old_style(nc_safe, flat.neighbor_axis))
+    nb_codes = np.where(np.asarray(flat.is_boundary), np.asarray(flat.owner_cube_face),
+                        np.asarray(flat.neighbor_cube_face))
+    R_old = run(old_style(flat.owner_cell, _axis_slots(flat.owner_cube_face)),
+                old_style(nc_safe, _axis_slots(nb_codes)))
 
     scale = max(float(np.abs(R_fixed).max()), 1e-300)
     assert scale > 1e-30, "装置失效：修复后的残差本身就是零，判据空转"

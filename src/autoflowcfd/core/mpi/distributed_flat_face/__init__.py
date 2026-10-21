@@ -15,7 +15,6 @@ AutoFlowCFD V2.0 - 分布式面几何
 - [n_local_cells, n_total_cells): halo cells
 - FlatFaceGeometry 中的 owner_cell/neighbor_cell 使用扩展索引
 
-
 ## 文件分工
 
     types.py             分布式扁平面几何的数据类与紧凑 src1 展开

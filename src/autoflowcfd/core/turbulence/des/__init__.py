@@ -9,7 +9,6 @@ AutoFlowCFD V2.0 - DDES/IDDES 混合湍流模型 (T-04)
 2. IDDES 改进型延迟分离涡模拟（Shur et al. 2008）
 3. 与 SST k-omega 模型的集成：长度尺度在 SST 源项求值里按当前状态算出（`DESLengthScale`）
 
-
 ## 文件分工
 
     grid_scale.py        DES 网格尺度(h_max / h_wn)

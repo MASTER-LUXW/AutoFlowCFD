@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - 面记录分组与"混合边界/内部分组"检测。
 
-规范）。整段**原样搬运**，逻辑一字未改 —— 原来是
-`build_face_flux_points` 里的一段内联代码，与后续步骤之间只通过下面这
-个 `FaceGroups` 里的量耦合，本身自成体系。
+`build_face_flux_points` 的一个步骤，与后续步骤之间只通过 `FaceGroups` 里的量耦合。
 
 ## 这一段在做什么
 

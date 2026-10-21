@@ -47,10 +47,6 @@ class FlatFaceGeometry:
     owner_cell: np.ndarray       # int64 (n_faces,)
     neighbor_cell: np.ndarray    # int64 (n_faces,)，边界面为 -1
     is_boundary: np.ndarray      # bool (n_faces,)
-    owner_axis: np.ndarray       # int64 (n_faces,)
-    owner_side: np.ndarray       # float64 (n_faces,)
-    neighbor_axis: np.ndarray    # int64 (n_faces,)
-    neighbor_side: np.ndarray    # float64 (n_faces,)
     owner_is_primary: np.ndarray     # bool (n_faces,)
     neighbor_is_primary: np.ndarray  # bool (n_faces,)
     true_normal: np.ndarray      # float64 (n_faces, n_fp, 3)
@@ -60,8 +56,6 @@ class FlatFaceGeometry:
     owner_adj_row_exact: np.ndarray     # float64 (n_faces, n_fp, 3)
     neighbor_adj_row_exact: np.ndarray  # float64 (n_faces, n_fp, 3)
     # 面编码（四面体面 6~9、原生棱柱面 10~14，`grid/connectivity/face_connectivity.py`）。
-    # `owner_axis`/`owner_side`（上面两个字段）对原生面存的是复用的 excluded_vertex / 哑值，不能当
-    # axis/side 语义使用——面的类别一律按这两个编码字段判断。
     owner_cube_face: np.ndarray     # int64 (n_faces,)
     neighbor_cube_face: np.ndarray  # int64 (n_faces,)
     # 物理面积权重（`fr/face_flux_points/exact_normal.py::compute_exact_face_normals_and_weights`），
@@ -219,9 +213,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     n_sps = mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
 
-    # 原始 cube face 编码：`fc` 本身就带着，native 分支据此判断（四面体
-    # native 面是 [6,10)，见 FlatFaceGeometry.owner_cube_face 文档），
-    # 不依赖 owner_axis/owner_side 那套可能有歧义的复用槽位。
+    # 原生面编码（四面体 [6,10)、棱柱 [10,15)），面算子索引据此给出。
     owner_cube_face = fc.owner_cube_face.astype(np.int64)
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
 
@@ -237,10 +229,6 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
             f"flux_points 构造方式，需要先补上对应的展平逻辑，不能假装"
             f"可以正确产出结果。"
         )
-    owner_axis = ffp_data.owner_axis
-    owner_side = ffp_data.owner_side
-    neighbor_axis = ffp_data.neighbor_axis
-    neighbor_side = ffp_data.neighbor_side
     owner_is_primary = ffp_data.owner_is_primary
     neighbor_is_primary = ffp_data.neighbor_is_primary
     true_normal = ffp_data.true_normal
@@ -325,8 +313,6 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_cell=fc.owner_cell.astype(np.int64),
         neighbor_cell=fc.neighbor_cell.astype(np.int64),
         is_boundary=fc.is_boundary.astype(np.bool_),
-        owner_axis=owner_axis, owner_side=owner_side,
-        neighbor_axis=neighbor_axis, neighbor_side=neighbor_side,
         owner_is_primary=owner_is_primary, neighbor_is_primary=neighbor_is_primary,
         true_normal=true_normal,
         owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,

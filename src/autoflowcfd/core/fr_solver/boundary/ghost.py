@@ -1,6 +1,4 @@
 """AutoFlowCFD V2.0 - 边界幽灵态 provider（含 SEM 入口 FP 位置）
-
-从 `core/fr_solver/boundary.py` 拆出（2026-09-24，单文件不超 500 行规范）。
 """
 
 from typing import Any, Dict, Optional
