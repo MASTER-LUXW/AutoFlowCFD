@@ -10,22 +10,20 @@ import numpy as np
 from autoflowcfd.core.thermo import sound_speed
 
 
+def _require_state_shape(field: np.ndarray, state_shape: tuple, what: str) -> None:
+    """逐解点量必须与当前状态同形 `(n_cells, n_sps)`（同一组解点）。"""
+    if tuple(field.shape) != tuple(state_shape):
+        raise ValueError(f"CFL 步长计算：{what} 的形状 {tuple(field.shape)} 与当前状态 {tuple(state_shape)} 不符"
+                         "——几何与状态不在同一组解点上（换阶时须同步切换）")
+
+
 def compute_local_time_step(solver, return_physical_too: bool = False):
     """
     计算局部时间步长（基于CFL条件）。
 
-    真正的稳定性限制取三个独立机制中更严格的一个：
-
-    （历史记录，第四次评审核实并更正：本节曾经短暂记录过一次
-    "CFL 改用 Weiss-Smith 预处理声速 c_precond 替代物理声速 a" 的尝试，
-    但这个改动在 2026-08-24 就已撤销——见下方 `wave_speed` 计算处
-    "物理声速用于 CFL 估计（2026-08-24 修复）" 的完整说明：显式 SSP-RK3
-    积分的是物理通量，稳定性由物理通量谱半径 |u_n|+a 决定，用预处理声速
-    反而会把 dt 高估约 10 倍、导致失稳。此前这里的文档没有同步更新，
-    仍描述着已经被撤销的设计，容易误导后来者"重新接入" c_precond 而
-    复现同一个真实发生过的失稳——`low_mach_cfl_ausm_inconsistency` 项目
-    记忆记录的正是这次事故。Weiss-Smith 预处理本身仍然在用，但只用于
-    AUSM+up 通量本身的低马赫数耗散修正，不影响这里的 CFL 步长估计。）
+    真正的稳定性限制取三个独立机制中更严格的一个。波速用物理声速 |u_n|+a：显式积分的是物理通量，稳定性由
+    物理通量的谱半径决定（只把 Weiss-Smith 预处理声速塞进 CFL、不改被积方程会把 dt 高估约 10 倍并失稳；
+    AUSM+up 里的 Weiss-Smith 只修正低马赫数耗散，见 `wave_speed` 处说明）。启用伪时间低马赫预处理时的情形见下文。
 
     1. 对流 CFL（已升级为基于面的谱半径）：dt = CFL * V / sum_f(wave_speed_f * A_f)，
        替代此前的 dt = CFL * V^(1/3) / wave_speed。旧公式假设各向同性单元，
@@ -38,20 +36,17 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
        从 `V^(2/3)` 改；立方体上两者逐位相同，见下方 `Lc2` 处的完整推导）
        /mu_eff（抛物型稳定性条件），与上面的对流限制是完全独立的
        机制——粘性主导流动（低速层流、边界层内部）下这个限制可能
-       严格得多，此前完全没有被施加过，真实复现：Couette 层流验证
-       算例里这正是导致发散的根本原因之一（另一个是上面 0 提到的
-       低马赫数刚性）。
+       严格得多（Couette 层流验证算例曾因缺这一项而发散）。
     3. 几何/度量 CFL：逐解点用该 SP 自己的 det(J) 当作局部"体积"、sum_m ||adj(J)[SP,m,:]|| 当作局部"总通量
        面积"——标准有限体积 CFL `dt=CFL*V/Σ(A_f*(|u·n|+a))` 的逐点类比。按面的对流 CFL 用的是单元平均量，
        单元内度量逐点变化（棱柱有双线性侧面、曲边几何）时由这一项取单元内最严者；无粘残差
        `-div_comp/det(J)` 在 det(J) 小的点上被放大，单元平均步长感知不到。
 
-    低马赫数伪时间预处理（2026-09-14 新增，见 `core/utils/preconditioning.py`
+    低马赫数伪时间预处理（见 `core/utils/preconditioning.py`
     模块末尾"伪时间预处理矩阵 Gamma"一节完整推导）：`solver.
     low_mach_precond_enabled` 为真时，平均流的 dt 改用**预处理后**的波速
-    (|un| + c_precond) 而不是物理波速 (|un| + a)。这与上面第 0 条记录的
-    2026-08-24 事故**不是同一件事**：那次只把 c_precond 塞进 CFL、没有改
-    被积分的方程，必然失稳；现在 `step.py` 会把同一套 beta^2 定义下的
+    (|un| + c_precond) 而不是物理波速 (|un| + a)。这与上面"只改 CFL 不改方程"
+    的失稳情形不同：`step.py` 会把同一套 beta^2 定义下的
     预处理矩阵 Gamma 作用到平均流残差上（`dU/dtau = -Gamma R`），
     Jacobian 谱半径本身就变成了 (|un| + c_precond)，两者成对出现才成立。
     M=0.1 的外流场下这一对改动让平均流 dt 放大约 5 倍（(33+340)/(33+36)）。
@@ -166,12 +161,10 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # dt_visc = 0.25*CFL*rho*Lc2/mu_eff，Lc2 见下方（各向异性正确的
     # `6*V^2/sum_f A_f^2`，立方体上等于 V^(2/3)）。
     # 湍流涡粘 + 人工粘性（rho*nu_av），见 `_get_cfl_viscosity_field` 文档
-    mu_t_field = solver._get_cfl_viscosity_field()  # None 或 (n_cells,n_sps)/(n_cells,mesh_n_sps)
+    mu_t_field = solver._get_cfl_viscosity_field()  # None 或 (n_cells, n_sps)
     mu_molecular = solver.mu_molecular
     if mu_t_field is not None:
-        if mu_t_field.shape[1] != n_sps:
-            rep = int(np.ceil(n_sps / mu_t_field.shape[1]))
-            mu_t_field = np.tile(mu_t_field, (1, rep))[:, :n_sps]
+        _require_state_shape(mu_t_field, rho.shape, "涡粘 / 人工粘性场")
         mu_eff = mu_molecular + mu_t_field
     else:
         mu_eff = np.full_like(rho, mu_molecular)
@@ -238,13 +231,10 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
 
     metric_flux_scale = solver._get_metric_flux_scale()  # (n_cells,n_sps)
     det_jacs = solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell)
-    # Order Continuation 期间当前状态 n_sps 可能与网格 n_sps 不同——
-    # 度量场是网格固有量，跟当前解阶数无关，按需重复/裁剪到当前
-    # n_sps（与上面 h_expanded 对体积的处理是同一原则）。
-    if det_jacs.shape[1] != n_sps:
-        rep = int(np.ceil(n_sps / det_jacs.shape[1]))
-        det_jacs = np.tile(det_jacs, (1, rep))[:, :n_sps]
-        metric_flux_scale = np.tile(metric_flux_scale, (1, rep))[:, :n_sps]
+    # 度量与状态必须在同一组解点上（换阶时 `mesh.set_order` 与状态同步切换）。2026-10-21（I-76）以前不一致时
+    # 把度量平铺 / 裁剪到状态宽度：不同阶数的解点下标互不对应，那样拼出的度量没有意义
+    _require_state_shape(det_jacs, rho.shape, "网格 det(J)")
+    _require_state_shape(metric_flux_scale, rho.shape, "度量通量尺度")
     dt_geometric = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed, 1e-300)
 
     # 一个单元一个步长：对流、粘性、几何三项限制逐解点求出后，在单元的**真实**解点上取最小值再广播回全部
