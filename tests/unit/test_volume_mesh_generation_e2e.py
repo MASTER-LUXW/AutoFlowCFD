@@ -48,6 +48,8 @@ def test_box_in_box_volume_mesh(tunnel_type):
 
 @pytest.mark.parametrize("body_type, module", [
     ("WALL", "autoflowcfd.grid.mesh_gen.background.mesh_background_merge_with_bl"),
+    # 没有任何组挤出边界层：无 BL 路径；SLIP_WALL 物面是不挤出的闭合实体，须标 tetgen 孔洞（I-209）
+    ("SLIP_WALL", "autoflowcfd.grid.mesh_gen.background.mesh_background_merge_no_bl"),
 ])
 def test_max_cell_size_region_seed_lies_in_the_fluid(monkeypatch, body_type, module):
     """tetgen 最大单元尺寸约束的区域种子点必须在流体域内（I-208）。此前取 PLC / 面网格点均值：物面点远多于远场点时
@@ -73,3 +75,13 @@ def test_max_cell_size_region_seed_lies_in_the_fluid(monkeypatch, body_type, mod
     for seed in seeds:
         assert np.abs(seed).max() > 0.5 + 0.05                      # 不在物体（含边界层）里
         assert np.all(seed > [-3.0, -2.0, -2.0]) and np.all(seed < [5.0, 2.0, 2.0])
+
+
+def test_slip_wall_body_is_a_hole_without_boundary_layer():
+    """不挤出边界层的闭合物面（无粘计算的 SLIP_WALL）也要标 tetgen 孔洞（I-209）：此前只给挤出边界层的分量标孔洞，
+    tetgen 把物体内部也填满四面体，物面成了内部面，生成末尾的外表面覆盖校验报错。"""
+    surface = box_in_box_surface()
+    surface.boundaries.bc_types["body"] = "SLIP_WALL"
+    vm = generate_volume_mesh_from_surface(surface, {"max_cell_size": 1.0, "min_cell_size": 0.05})
+    assert vm.prism_cells is None or vm.prism_cells.count == 0
+    np.testing.assert_allclose(vm.total_volume, _FLUID_VOLUME, rtol=1e-9)

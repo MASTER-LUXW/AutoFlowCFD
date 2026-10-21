@@ -76,11 +76,15 @@ def _build_merged_mesh_no_bl(
         proc_nodes, proc_faces = surface_nodes, surface_faces
         background_points = None
 
+    # 边界保持（tetgen -Y）：边界面在上面已细分到目标尺寸，不需要 tetgen 再动；不保持时 tetgen 会合并共面的相邻
+    # 边界面并重新三角化，外表面三角形跨过输入三角形的边，生成末尾的外表面覆盖校验报错（平直的远场 / 洞壁上
+    # 必然出现）。2026-10-21（I-209）以前只有 BL 路径保持边界
     def _fill(extra_points):
         return fill_core_volume(
             proc_nodes, proc_faces, holes=hole_points,
             regions=regions,
             background_points=extra_points,
+            force_preserve_boundary=True,
         )
 
     if regions:

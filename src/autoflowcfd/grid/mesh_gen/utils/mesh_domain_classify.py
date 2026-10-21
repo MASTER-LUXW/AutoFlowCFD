@@ -47,6 +47,41 @@ _CLOSED_OPEN_EDGE_FRACTION = 0.01
 _BBOX_TOUCH_RTOL = 1e-6
 
 
+#: 闭合分量的节点中落在计算域包围盒表面上的比例不低于此值时，它是计算域外壳本身（例如整个外框单独成一组），
+#: 不是内嵌实体
+_SHELL_ON_BBOX_FRACTION = 0.9
+
+
+def _core_only_embedded_holes(nodes: np.ndarray, group_faces: np.ndarray, bbox_min: np.ndarray,
+                              bbox_max: np.ndarray, tol: float, name: str, bc_type) -> List[np.ndarray]:
+    """不挤出边界层的组里的闭合内嵌实体（例如无粘计算的 SLIP_WALL 物面）各给一个 tetgen 孔洞种子。
+
+    开放分量是外壳的一部分（进出口、侧壁）；闭合且大部分节点落在包围盒表面上的分量是外壳本身。其余闭合分量是
+    实体：不标孔洞时 tetgen 把实体内部也填满四面体（实体表面成了内部面，生成末尾的外表面覆盖校验报错）。
+    2026-10-21（I-209）以前只给挤出边界层的分量标孔洞。
+    """
+    inverse, _, face_of_edge = _face_edges(group_faces)
+    labels = _connected_components(group_faces, inverse, face_of_edge)
+    holes = []
+    for comp_id in np.unique(labels):
+        comp_faces = group_faces[labels == comp_id]
+        _, sub_counts, _ = _face_edges(comp_faces)
+        if np.count_nonzero(sub_counts == 1) / max(len(sub_counts), 1) >= _CLOSED_OPEN_EDGE_FRACTION:
+            continue
+        pts = nodes[np.unique(comp_faces)]
+        on_bbox = np.any((np.abs(pts - bbox_min) <= tol) | (np.abs(pts - bbox_max) <= tol), axis=1)
+        if np.mean(on_bbox) >= _SHELL_ON_BBOX_FRACTION:
+            continue
+        hole_pt = find_point_inside_closed_shell(nodes, comp_faces)
+        if hole_pt is None:
+            raise ValueError(
+                f"边界组 '{name}'（{bc_type}）的闭合分量（{len(comp_faces)} 个面，{_component_extent(nodes, comp_faces)}）"
+                "找不到可靠的内部点，无法给 tetgen 标记孔洞——不标记时核心填充会在实体内部生成四面体。请检查该分量"
+                "是否自相交、法向不一致或存在极薄的部位。")
+        holes.append(hole_pt)
+    return holes
+
+
 def _component_extent(nodes: np.ndarray, faces: np.ndarray) -> str:
     """报错用：分量的坐标范围。"""
     pts = nodes[np.unique(faces)]
@@ -105,6 +140,7 @@ def classify_boundary_groups(
 
         if bc_type not in BL_EXTRUDE_BC_TYPES:
             core_face_rows.append(group_faces)
+            hole_points.extend(_core_only_embedded_holes(nodes, group_faces, bbox_min, bbox_max, tol, name, bc_type))
             continue
 
         inverse, counts, face_of_edge = _face_edges(group_faces)
