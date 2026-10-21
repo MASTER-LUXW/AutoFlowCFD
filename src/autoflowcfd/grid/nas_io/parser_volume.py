@@ -19,19 +19,13 @@ def generate_volume_mesh_from_surface(
     surface_grid: GridData,
     volume_mesh_params: Optional[Dict] = None,
 ) -> 'VolumeMeshData':
-    """从已解析的表面 GridData 生成体网格。
-
-    从 parse() 的 generate_volume_mesh=True 路径中提取出来，
-    使已有解析好的 surface_grid 的调用方（例如对其运行了
-    GridValidator 做生成前质量检查后）可以直接送入体网格
-    生成，不需要第二次冗余的原始 NAS 文件重新解析——
-    parse() 本身现在只构建表面 GridData 并委托到这里。
+    """从已解析的表面 GridData（`NASParser.parse` 的输出，可先经 `GridValidator` 做生成前质量检查）生成体网格。
 
     Args:
-        surface_grid: 已解析的表面网格（nodes/cells/
-            boundaries/metadata.bounding_box）
-        volume_mesh_params: 体网格生成参数（见 parse() 的
-            volume_mesh_params）
+        surface_grid: 已解析的表面网格（nodes/cells/boundaries/metadata.bounding_box）；每个边界组都必须有确定的
+            边界条件类型（决定哪些组挤出边界层）
+        volume_mesh_params: 体网格生成参数，键取 growth_rate / min_cell_size / max_cell_size / bl_layers / bl_only /
+            core_only / first_layer_height（含义与默认值见 `VolumeMeshGenerator` 构造参数）；未知键报 TypeError
 
     Returns:
         VolumeMeshData
