@@ -82,10 +82,6 @@ class HighOrderMesh:
         self.n_prism_cells = 0
         self.face_connectivity: Optional[FRFaceConnectivity] = None
         self.face_flux_points: Optional[list] = None
-        # 每个单元自身连接的面中，与相邻单元自己方向的最大失配量
-        # 1-cos(夹角)，见 core/fr_operators/troubled_cell.py::precompute_cell_face_misalignment；
-        # 只在 load_from_volume_mesh(build_faces=True) 后才会被填充。
-        self.cell_face_misalignment: Optional[np.ndarray] = None
         self.boundary_groups: Optional[Dict[str, np.ndarray]] = None
         self.boundary_bc_types: Optional[Dict[str, str]] = None
         self.boundary_surface_mesh: Optional[Dict[str, object]] = None
@@ -218,24 +214,19 @@ class HighOrderMesh:
                 volume_mesh_data.cells.connectivity[:] = fixed_tet_conn
 
             if self.jacobians is not None:
-                from autoflowcfd.core.fr_operators.troubled_cell import (
-                    log_degenerate_cell_report,
+                from autoflowcfd.core.fr_operators.metric_diagnostics import (
+                    log_mesh_metric_report,
                     precompute_cell_face_misalignment,
                 )
 
-                self.cell_face_misalignment = precompute_cell_face_misalignment(self)
-                log_degenerate_cell_report(
-                    self.jacobians["det_jacs"].reshape(self.n_cells, self.n_sps_per_cell),
-                    self.cell_face_misalignment,
+                log_mesh_metric_report(
                     self.jacobians["scaled_quality"].reshape(self.n_cells, self.n_sps_per_cell),
+                    precompute_cell_face_misalignment(self),
                 )
         elif self.jacobians is not None:
-            from autoflowcfd.core.fr_operators.troubled_cell import log_degenerate_cell_report
+            from autoflowcfd.core.fr_operators.metric_diagnostics import log_mesh_metric_report
 
-            log_degenerate_cell_report(
-                self.jacobians["det_jacs"].reshape(self.n_cells, self.n_sps_per_cell),
-                scaled_quality=self.jacobians["scaled_quality"].reshape(self.n_cells, self.n_sps_per_cell),
-            )
+            log_mesh_metric_report(self.jacobians["scaled_quality"].reshape(self.n_cells, self.n_sps_per_cell))
 
         # 把刚构建好的这个阶数的完整几何缓存起来——顺序 Continuation 结束时
         # 切回目标阶数应直接复用这份（本来就是目标阶数），不应该重新触发一次

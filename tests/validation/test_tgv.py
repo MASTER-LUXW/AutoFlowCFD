@@ -214,9 +214,8 @@ def test_tgv_kinetic_energy_decays_monotonically():
     # 它在两个前提下才成立，而两个前提都已不再成立：
     #   (a) `FILTER_MODE=legacy`（每个 RK stage 清掉一整阶），默认值已于
     #       2026-09-17 改成 `sensor`；
-    #   (b) P2 四面体残差被机制3 **整体清零**（零填充槽位把中位数拖到 0，
-    #       见 `core/fr_operators/troubled_cell.py::_outlier_ref_and_flag_
-    #       kernel` 文档），也就是说当时根本没有物理演化 —— 那 15~50% 的
+    #   (b) P2 四面体残差被当时的残差离群抑制**整体清零**（零填充槽位把中位数拖到 0；该机制已删除），
+    #       也就是说当时根本没有物理演化 —— 那 15~50% 的
     #       "粘性衰减"记录的是滤波器的人工耗散。
     # 而本测试因为一处测试桩腐化（`_global_dt` 没跟上 `return_physical_too`
     # 契约）长期 TypeError、跑都跑不起来，所以这个过时一直没暴露。

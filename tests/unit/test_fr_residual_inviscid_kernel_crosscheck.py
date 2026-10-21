@@ -257,7 +257,7 @@ def test_parallel_nt1_matches_nt16_nonuniform_flow(order):
 def test_parallel_degenerate_cell_no_blowup():
     """退化/近共面单元场景（人为把 _build_synthetic_mixed_mesh 里第二个
     四面体的顶点推到与其余三点接近共面，复现"退化 Jacobian 单元舍入
-    误差被放大"的已知机制，见 core/fr_troubled_cell.py 与
+    误差被放大"的已知机制，见
     ProjectFiles/V2.0/5_重大问题修复-黎曼求解器法向.md）：并行化引入的
     多线程重结合误差在这类单元上不应该比正常单元的量级差异更离谱——
     不要求逐位相等，只要求有限（非 NaN/Inf）且相对差异保持在机器精度

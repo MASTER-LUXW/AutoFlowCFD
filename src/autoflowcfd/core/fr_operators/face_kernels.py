@@ -152,7 +152,7 @@ class FlatFaceGeometry:
     n_colors: int
 
     # 逐通量点的单位外法向（adj 行归一化，与 `true_normal` 那个面平面法向不是一回事：扭曲面上
-    # 两者最多差 37°，见 `troubled_cell.py`）。只依赖几何，每个几何对象算一次（湍流对流/扩散
+    # 两者最多差 37°，见 `metric_diagnostics.py`）。只依赖几何，每个几何对象算一次（湍流对流/扩散
     # 残差与其解析 Jacobian 每次求值都要用；此前每次现算，plate P1 每次湍流速率约 0.2 s）。
     @cached_property
     def owner_unit_normal(self) -> np.ndarray:

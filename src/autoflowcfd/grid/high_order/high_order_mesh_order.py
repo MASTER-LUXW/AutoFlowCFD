@@ -146,7 +146,7 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
 
 
 _ORDER_FIELDS = ("n_points_1d", "n_sps_per_cell", "sps_coords", "jacobians", "operators", "face_flux_points",
-                 "cell_face_misalignment", "jacobians_fine", "n_sps_per_cell_fine")
+                 "jacobians_fine", "n_sps_per_cell_fine")
 
 
 def cache_active_order(mesh: "HighOrderMesh") -> None:
@@ -173,8 +173,7 @@ def set_order(mesh: "HighOrderMesh", order: int) -> None:
     if order not in mesh._order_geometry_cache:
         geom = build_order_geometry(mesh, order)
 
-        # 临时切到新阶数的基础几何量：build_face_flux_points /
-        # precompute_cell_face_misalignment 直接读取 mesh.n_points_1d /
+        # 临时切到新阶数的基础几何量：build_face_flux_points 直接读取 mesh.n_points_1d /
         # mesh.jacobians / mesh.operators，必须先落地才能调用。
         mesh.order = order
         mesh.n_points_1d = order + 1
@@ -186,18 +185,12 @@ def set_order(mesh: "HighOrderMesh", order: int) -> None:
         mesh.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
 
         mesh.face_flux_points = None
-        mesh.cell_face_misalignment = None
         if mesh.face_connectivity is not None:
             from autoflowcfd.fr.face_flux_points.merge import build_face_flux_points
 
             logger.info(f"Order continuation: building Flux Points geometry for P{order}...")
             mesh.face_flux_points = build_face_flux_points(mesh.face_connectivity, mesh)
             logger.info(f"Order continuation: Flux Points geometry built for P{order}")
-
-            if mesh.jacobians is not None:
-                from autoflowcfd.core.fr_operators.troubled_cell import precompute_cell_face_misalignment
-
-                mesh.cell_face_misalignment = precompute_cell_face_misalignment(mesh)
 
         cache_active_order(mesh)
         return

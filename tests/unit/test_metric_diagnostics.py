@@ -1,40 +1,18 @@
-"""core/fr_operators/troubled_cell.py 的几何退化诊断单元测试。
-
-本文件原先还覆盖"机制3"（`suppress_residual_outliers` 与它内部的
-`_median_abs_over_sps_kernel` 中位数 kernel）。**机制3 已于 2026-09-19
-整体删除**（真实网格消融对照证明它触发了但只把残差轨迹改变 ~1e-10
-相对量、不改变发散结局，完整记录见 `core/fr_residual/inviscid.py`），
-对应的两个测试类随之删除。
-
-留下的是 `precompute_cell_face_misalignment`（机制2 的面法向失配
-诊断量）的独立 oracle 对照 —— 机制1/2 只产出诊断量与日志，不干预
-残差，所以它们的测试与机制3 的删除无关。
-"""
+"""core/fr_operators/metric_diagnostics.py：面法向失配（与独立逐面参照实现对照）与网格度量报告的计数。"""
 
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_operators.troubled_cell import (
+from autoflowcfd.core.fr_operators.metric_diagnostics import (
+    SHAPE_QUALITY_WARN_THRESHOLD,
+    log_mesh_metric_report,
     precompute_cell_face_misalignment,
 )
 
 
 def _reference_cell_face_misalignment(mesh):
-    """`precompute_cell_face_misalignment` 的 numba 核的独立逐面 Python 循环
-    参照实现（它防的真实性能缺陷：对每个面取 `mesh.face_flux_points[f]` 每次
-    访问都会惰性*构造*一个完整的 FaceFluxPointGeometry 对象——生产网格上
-    188 万次这样的构造实测要几分钟，修法见
-    `_cell_face_misalignment_kernel` 的文档）。
-
-    2026-08-23 更新（见 fr/face_flux_points/exact_normal.py 模块文档）：
-    `own_dir_outward` 此前在这里由自己独立的一份解点网格 Lagrange 外插从
-    `adj_j` 算出——是真实局部度量方向的*近似*，有真实的截断误差（低阶更差）。
-    生产核现在读取网格加载时预先算好的逐通量点精确 adj(J) 行，不再外插——
-    这份参照实现必须用同样的精确值（仍在这里独立计算，经
-    `compute_exact_adj_rows` 而不是核自己预先算好的数组，所以对*归约循环*
-    的逻辑它仍是真正的参照而不是同义反复），否则就是拿新核去和一个过时、
-    精度更低、算的还是另一个量的近似比较。
-    """
+    """`precompute_cell_face_misalignment` 的独立逐面 Python 循环参照实现：两侧 adj 行经 numpy 参照实现
+    `compute_exact_adj_rows` 独立求出（不读核自己预先算好的数组），对归约循环是真正的参照。"""
     from autoflowcfd.fr.face_flux_points.exact_normal import compute_exact_adj_rows
 
     fc = mesh.face_connectivity
@@ -89,3 +67,18 @@ class TestPrecomputeCellFaceMisalignment:
         actual = precompute_cell_face_misalignment(mesh)
         expected = _reference_cell_face_misalignment(mesh)
         np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+
+class TestMeshMetricReport:
+    def test_counts_shape_and_misalignment_independently(self):
+        q = np.full((5, 4), 0.8)
+        q[1, 2] = 0.5 * SHAPE_QUALITY_WARN_THRESHOLD     # 单元 1 有一个解点形状质量低
+        mis = np.zeros(5)
+        mis[3] = 1.0 - np.cos(np.radians(5.0))           # 单元 3 法向失配 5°
+        stats = log_mesh_metric_report(q, mis)
+        assert stats == {"n_cells": 5, "n_shape_warn": 1, "n_misaligned": 1}
+
+    def test_no_absolute_jacobian_size_criterion(self):
+        """判据只看缩放雅可比（与单元物理尺寸无关）：贴壁薄单元形状正常就不报。"""
+        stats = log_mesh_metric_report(np.full((3, 4), 0.7))
+        assert stats["n_shape_warn"] == 0 and stats["n_misaligned"] == 0

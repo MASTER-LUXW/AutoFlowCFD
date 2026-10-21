@@ -42,7 +42,7 @@ def compute_native_tet_jacobians(
     点位置），原样广播填满该单元全部 `n_sps_per_cell` 槽位（真实行与零填充槽位同值，填充行因此天然有限）。
 
     `scaled_quality`（诊断量）与棱柱同一定义 `det_j/prod(col_norms(J))`
-    （`troubled_cell.py::compute_scaled_jacobian_quality`）；直边单元只有一个 J，直接手算。
+    （`core/fr_operators/metric_diagnostics.py::compute_scaled_jacobian_quality`）；直边单元只有一个 J，直接手算。
     """
     from autoflowcfd.fr.native_tet.basis import compute_native_tet_jacobian
 
@@ -191,7 +191,7 @@ def compute_native_prism_jacobians(
     与 `build_order_geometry` 里 `sps_coords` 的填充约定一致（有限、
     物理上合法的占位值）。**不能留 0**：`det_jacs` 是除数。
 
-    `scaled_quality`（诊断量）调用 `troubled_cell.py::compute_scaled_jacobian_quality`（与四面体同一定义）。
+    `scaled_quality`（诊断量）调用 `metric_diagnostics.py::compute_scaled_jacobian_quality`（与四面体同一定义）。
 
     Args:
         ref_native: `(n_native, 3)` 原生参考棱柱坐标 `(r,s,t)`。**由调用
@@ -203,7 +203,7 @@ def compute_native_prism_jacobians(
             `overintegration_order.prism_n_fine(over_order)`，原生档下后者
             恰好等于 `ref_native.shape[0]`、不产生填充槽位）。
     """
-    from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
+    from autoflowcfd.core.fr_operators.metric_diagnostics import compute_scaled_jacobian_quality
     from autoflowcfd.fr.native_prism.basis import native_prism_exact_jacobian
 
     n_prisms = mesh.n_prism_cells
