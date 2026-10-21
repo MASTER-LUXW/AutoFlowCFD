@@ -266,7 +266,7 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     """等价于 `np.einsum("fjm,cjmv->cfv", D, X)`。
 
     Args:
-        D: (F, J, M) —— 不依赖 cell 的共享算子（如 D_3d_tet/prism、D_fine）
+        D: (F, J, M) —— 不依赖 cell 的共享算子（如原生四面体 / 棱柱微分算子、细层微分算子）
         X: (C, J, M, V) —— 逐 cell 的场
 
     Returns:

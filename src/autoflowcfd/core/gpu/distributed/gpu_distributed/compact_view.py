@@ -19,7 +19,7 @@ class _CompactMeshDataView:
     的同一套索引空间一致），否则用压缩索引去查全局尺寸的 jacobians/
     cell_volumes 会读到完全不相关单元的几何数据。
 
-    FR 算子（D_3d_tet/prism、over-integration 算子）与单元数量无关、
+    FR 算子（原生四面体 / 棱柱微分算子、过积分算子）与单元数量无关、
     只与阶数有关，`upload_mesh_data` 是从 `ops` 参数单独读取的，不受
     这层限制影响，本类不需要处理它们。
     """

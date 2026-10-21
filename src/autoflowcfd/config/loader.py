@@ -322,18 +322,3 @@ def load_config(config_path: Union[str, Path]) -> Union[SteadyConfig, TransientC
     """
     loader = ConfigLoader()
     return loader.load(config_path)
-
-
-def save_config_template(output_path: Union[str, Path], mode: str = 'steady'):
-    """保存配置模板的便捷函数。
-
-    Args:
-        output_path: 输出文件路径
-        mode: 仿真模式（'steady' 或 'transient'）
-
-    示例:
-        >>> from autoflowcfd.config import save_config_template
-        >>> save_config_template("config.yaml", mode="steady")
-    """
-    loader = ConfigLoader()
-    loader.save_template(output_path, mode)

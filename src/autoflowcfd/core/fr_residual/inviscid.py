@@ -18,7 +18,6 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.boundary.fr_ghost_state import require_ghost_provider
-from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 from autoflowcfd.core.fr_operators.volume_contract import (
     cell_blocks, contract_local, contravariant_point, get_overintegration_context, lifted_segments,
@@ -99,25 +98,6 @@ def euler_physical_flux(Q: np.ndarray) -> np.ndarray:
     return F
 
 
-def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray,
-                       mach_ref: float = 0.1) -> np.ndarray:
-    """对一批 Flux Points 逐点调用 Numba 版 AUSM+up (标量法向通量密度)。
-
-    Args:
-        Q_L, Q_R: (n_fp, 5)
-        normal: (n_fp, 3) 单位法向量（由 L 指向 R）
-        mach_ref: 见 kernels.py::compute_ausm_up_flux 文档
-
-    Returns:
-        flux: (n_fp, 5)，F*·n （每单位面积的物理通量密度）
-    """
-    n_fp = Q_L.shape[0]
-    flux = np.zeros((n_fp, 5))
-    for i in range(n_fp):
-        flux[i] = compute_ausm_up_flux(Q_L[i], Q_R[i], normal[i], mach_ref)
-    return flux
-
-
 class MeanFlowPrimitives(NamedTuple):
     """一次平均流残差求值里无粘与粘性两项共用的原始变量与边界幽灵态（`mean_flow_primitives`）。"""
     Q: np.ndarray          # (n_cells, n_sps, 5)
@@ -189,7 +169,7 @@ def compute_inviscid_residual_fr(
         U: 守恒变量，形状 (n_cells, n_sps, n_vars)；只使用前5个欧拉变量
         mesh: HighOrderMesh 实例，需要已调用 load_from_volume_mesh
             （提供 face_connectivity, face_flux_points, jacobians）
-        ops: FROperators（D_3d_prism/D_3d_tet 等体积算子）
+        ops: FROperators（原生基体积 / 过积分 / 提升算子）
         boundary_ghost_provider: 可调用对象 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp，
             用于给出边界面的幽灵态，必须显式给出（`require_ghost_provider`；零梯度外插传 DefaultGhostProvider()）
         mach_ref: AUSM+up Weiss-Smith 预处理用的参考（自由来流）马赫数
