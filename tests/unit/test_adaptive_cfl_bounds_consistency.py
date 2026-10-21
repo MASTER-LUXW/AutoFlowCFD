@@ -260,19 +260,24 @@ class TestEveryBackendConstructsAController:
         from autoflowcfd.core.gpu.distributed import (
             gpu_distributed_fully_distributed as fd,
         )
-        # 这个模块 2026-09-24 拆成子包；`inspect.getsource(包)` 只返回
-        # `__init__.py`，控制器构造点在 `build.py` 里。
-        src = module_source(fd)
-        # 控制器统一经 `time_integration/time_accurate.py::configure_time_stepping`（内部调
-        # `adaptive_cfl/policy.py::build_cfl_policy`）构造。这里查这条路径确实调用它、并从 package 按键取三个边界值
-        # （打包端恒写这三个键、值可为 None；缺键即报错，I-190）；兜底默认值只能来自控制器签名（结构守卫见
-        # test_cfl_policy_single_source.py）。
-        assert 'configure_time_stepping(' in src
-        for key in ('cfl_start', 'cfl_max', 'cfl_min'):
-            assert f"package['{key}']" in src, f"{key} 没有从 package 里取"
-        assert "('cfl_start', 0.1)" not in src, (
-            "又把兜底默认值硬编码回去了——默认值只能有一个事实来源"
-            "（AdaptiveCFLController 的签名）")
+        # 控制器统一经 `configure_time_stepping` 构造（`adaptive_cfl/policy.py::build_cfl_policy`），完全分布式路径经
+        # 两条构造路径共用的 `_setup_time_integration`、设置取自 `settings_from_package`（按键取，缺键即报错）
+        from autoflowcfd.core.gpu.distributed.gpu_distributed import setup
+        from autoflowcfd.core.mpi.distributed_solver.assembly import settings_from_package
+
+        assert "_setup_time_integration(settings_from_package(package))" in module_source(fd)
+        assert "configure_time_stepping(" in module_source(setup)
+        package = {"turb_model_name": "NONE", "freestream": {"rho_inf": 1.0, "vel_inf": 2.0, "p_inf": 3.0},
+                   "mach_ref": 0.1, "mu_molecular": 1e-5, "turbulence_intensity": 0.01, "viscosity_ratio": 5.0,
+                   "sem_num_eddies": None, "artificial_viscosity_enabled": False, "artificial_viscosity_alpha": 1.0,
+                   "wall_treatment": "resolved", "time_scheme": "rk3", "dual_time_inner_iter": 20,
+                   "time_accurate": False, "adaptive_cfl": True, "cfl_start": 0.02, "cfl_max": 0.5, "cfl_min": 0.01,
+                   "low_mach_precond": True}
+        settings = settings_from_package(package)
+        assert (settings.cfl_start, settings.cfl_max, settings.cfl_min) == (0.02, 0.5, 0.01)
+        del package["cfl_max"]
+        with pytest.raises(KeyError):
+            settings_from_package(package)
 
     def test_all_five_controller_sites_pass_cfl_min(self):
         """构造点逐一核对，防止将来新增后端时又漏一处（统一经 `configure_time_stepping`，这里查每处都调用它
@@ -281,14 +286,12 @@ class TestEveryBackendConstructsAController:
 
         from autoflowcfd.core.fr_solver import solver as cpu_single
         from autoflowcfd.core.gpu.distributed import gpu_distributed as gpu_multi
-        from autoflowcfd.core.gpu.distributed import (
-            gpu_distributed_fully_distributed as gpu_multi_fd,
-        )
         from autoflowcfd.core.gpu.solver import gpu_solver as gpu_single
         from autoflowcfd.core.mpi import distributed_solver as cpu_mpi
-        for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
-            # 用 module_source：这五个里已经有拆成子包的（gpu_multi_fd），
-            # `inspect.getsource(包)` 只返回 `__init__.py`。
+        # 分布式两种加载方式各自共用一个装配（CPU：distributed_solver/assembly.py；多 GPU：gpu_distributed/setup.py），
+        # 完全分布式构造不再各自调用（I-110，见 test_multi_gpu_fully_distributed_builds_a_controller）
+        for mod in (cpu_single, gpu_single, gpu_multi, cpu_mpi):
+            # 用 module_source：这些模块都已拆成子包，`inspect.getsource(包)` 只返回 `__init__.py`。
             src = module_source(mod)
             assert 'configure_time_stepping(' in src, mod.__name__
             assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"

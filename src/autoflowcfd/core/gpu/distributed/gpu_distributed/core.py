@@ -22,11 +22,8 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器（主类与装配顺序）
 
 from typing import Optional
 
-from loguru import logger
-
 from autoflowcfd.core.gpu.distributed.gpu_distributed_init import _GPUDistributedInitMixin
-from autoflowcfd.core.mpi import is_root
-from autoflowcfd.core.mpi.comm import barrier
+from autoflowcfd.core.mpi.distributed_solver.assembly import DistributedRunSettings, canonical_turbulence_model
 
 from .residual import _MultiGPUResidualMixin
 from .setup import _MultiGPUSetupMixin
@@ -34,7 +31,7 @@ from .stepping import _MultiGPUSteppingMixin
 from .timestep import _MultiGPUTimeStepMixin
 
 
-from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
@@ -115,36 +112,50 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             dual_time_inner_iter: dual-time 每个物理步的内迭代次数上限（与单机同名参数）；2026-10-20 以前多 GPU
                 没有这个构造参数，由调用方在构造后改 `time_integrator.dual_time_steps`
         """
-        # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
-        # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
+
+        settings = DistributedRunSettings(
+            turb_model_name=canonical_turbulence_model(turb_model_name),
+            freestream={"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                        "mach_ref": resolve_mach_ref(rho_inf, vel_inf, p_inf),
+                        "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)},
+            mu_molecular=mu_molecular, turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies, artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha, wall_treatment=wall_treatment,
+            time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter, time_accurate=time_accurate,
+            adaptive_cfl=adaptive_cfl, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            low_mach_precond=low_mach_precond)
+        # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，CLI 由体网格 WALL 边界面构造后传入；
+        # 湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
-        self._sem_num_eddies = None if sem_num_eddies is None else int(sem_num_eddies)
-        self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
-        self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
-        self.wall_treatment = validate_wall_treatment(wall_treatment)
-        turb_model = str(turb_model_name).upper()
-        self._setup_identity_and_device(
-            mesh, ops, n_ranks, rank, device_id, mu_molecular,
-            rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)
-        n_sps, n_local = self._setup_partition_and_geometry(mesh, ops, n_ranks)
-        self._setup_time_integration(time_scheme, cfl_start, cfl_max, cfl_min,
-                                     adaptive_cfl=adaptive_cfl, time_accurate=time_accurate,
-                                     low_mach_precond=low_mach_precond, dual_time_inner_iter=dual_time_inner_iter)
-        self._setup_turbulence(mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
-                               turbulence_intensity, viscosity_ratio)
-        self._setup_state_and_boundary(n_local, n_sps)
+        self._setup_identity_and_device(rank, n_ranks, device_id, mesh.order, settings)
+        self._is_fully_distributed = False
+        self.mesh = mesh
+        self.ops = ops
+        self._setup_partition_and_geometry(mesh, ops, n_ranks)
+        self._setup_time_integration(settings)
+        models = self._setup_turbulence_models(mesh.n_sps_per_cell)
+        if models.des is not None:
+            # DDES/IDDES：逐单元网格尺度只依赖几何，传统模式下 self.mesh 是完整全局网格，算一次、按
+            # compact_global_ids 切片；全局结果保留供换阶后重新切片（几何量与阶数无关）
+            from autoflowcfd.core.gpu import get_cupy
+            from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
 
-        from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
+            cp = get_cupy()
+            self._iddes_h_max_global, self._iddes_h_wn_global = compute_h_max_and_h_wn(mesh)
+            compact_global_ids = self.dist_flat_face.compact_global_ids
+            with cp.cuda.Device(self.device_id):
+                self.iddes_h_max_compact = cp.asarray(self._iddes_h_max_global[compact_global_ids])
+                self.iddes_h_wn_compact = cp.asarray(self._iddes_h_wn_global[compact_global_ids])
+        if self.turb_model_gpu is not None:
+            self._init_wall_distance_distributed()
 
-        self.convergence_history = ConvergenceHistory()
-        self.iteration = 0
+        # 边界幽灵态：按完整全局网格构建（全局面编号），再把 group_code 重映射到本 rank 的压缩面编号——残差核
+        # 以压缩面编号查询，两套编号不是同一索引空间的子区间（2-rank 合成网格上 8/12 个面会查到错误的组）
+        from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
+        from autoflowcfd.core.fr_solver.boundary import boundary_physics, build_boundary_ghost_provider
 
-        barrier()
-        if is_root():
-            logger.info(
-                f"MultiGPUDistributedSolver initialized: {n_ranks} ranks, "
-                f"{n_local} local cells/rank (+{self.partition.n_halo} halo)"
-            )
-            print("✅ MultiGPUDistributedSolver Ready:")
-            print(f"   Ranks: {n_ranks}, Cells/rank: {n_local} (+{self.partition.n_halo} halo)")
-            print(f"   GPU device: {self.device_id} per rank")
+        self._setup_state_and_boundary(restrict_ghost_provider(
+            build_boundary_ghost_provider(self.mesh, self.ops, boundary_physics(self), {}),
+            self.partition.local_faces))
+        self._finish_setup("traditional mode")

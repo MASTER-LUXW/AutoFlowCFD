@@ -64,7 +64,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
 
     # --- 1. 每个 rank 独立插值/重置自己的 local U + 湍流场（CPU 上做，
     # 理由见函数文档）---
-    freestream = getattr(solver, '_package_freestream', None) or solver.freestream
+    freestream = solver.freestream
     # 不给兜底值，理由同 build.py 同名注释。
 
     new_fields_np = new_nu_t_np = None
@@ -165,7 +165,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
 
     solver.mu_molecular = my_package['mu_molecular']
     solver.freestream = {**my_package['freestream'], "mach_ref": my_package['mach_ref']}
-    solver._package_freestream = my_package['freestream']
 
     reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）

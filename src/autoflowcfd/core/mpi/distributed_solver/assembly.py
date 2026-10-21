@@ -51,6 +51,19 @@ def canonical_turbulence_model(name) -> str:
     return upper
 
 
+def settings_from_package(package: dict) -> DistributedRunSettings:
+    """完全分布式加载的运行设置：取自 root 打包的紧凑包（`distributed_mesh_loader/package.py`，键恒有；CPU 与多 GPU
+    共用）。"""
+    names = ('mu_molecular', 'turbulence_intensity', 'viscosity_ratio', 'sem_num_eddies',
+             'artificial_viscosity_enabled', 'artificial_viscosity_alpha', 'wall_treatment', 'time_scheme',
+             'dual_time_inner_iter', 'time_accurate', 'adaptive_cfl', 'cfl_start', 'cfl_max', 'cfl_min',
+             'low_mach_precond')
+    return DistributedRunSettings(
+        turb_model_name=canonical_turbulence_model(package['turb_model_name']),
+        freestream={**package['freestream'], "mach_ref": package['mach_ref']},
+        **{name: package[name] for name in names})
+
+
 class _DistributedAssemblyMixin:
     """`DistributedFRSolver` 的装配方法（只含方法；属性由两条构造路径经这里设置）。"""
 

@@ -9,19 +9,7 @@
 from typing import Any, Optional
 from autoflowcfd.core.mpi.comm import barrier
 
-from .assembly import DistributedRunSettings, canonical_turbulence_model
-
-
-def _settings_from_package(package: dict) -> DistributedRunSettings:
-    """完全分布式加载的运行设置：取自 root 打包的紧凑包（`distributed_mesh_loader/package.py`，键恒有）。"""
-    names = ('mu_molecular', 'turbulence_intensity', 'viscosity_ratio', 'sem_num_eddies',
-             'artificial_viscosity_enabled', 'artificial_viscosity_alpha', 'wall_treatment', 'time_scheme',
-             'dual_time_inner_iter', 'time_accurate', 'adaptive_cfl', 'cfl_start', 'cfl_max', 'cfl_min',
-             'low_mach_precond')
-    return DistributedRunSettings(
-        turb_model_name=canonical_turbulence_model(package['turb_model_name']),
-        freestream={**package['freestream'], "mach_ref": package['mach_ref']},
-        **{name: package[name] for name in names})
+from .assembly import settings_from_package
 
 
 class _DistributedFromPackageMixin:
@@ -100,7 +88,7 @@ class _DistributedFromPackageMixin:
 
         configure_numba_threads(n_threads)
         self = cls.__new__(cls)
-        settings = _settings_from_package(package)
+        settings = settings_from_package(package)
         self._assemble_settings(rank, n_ranks, package['order'], settings)
         self._is_fully_distributed = True
         self._root_context = root_context

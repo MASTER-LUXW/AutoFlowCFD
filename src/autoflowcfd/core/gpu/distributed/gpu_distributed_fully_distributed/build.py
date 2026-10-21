@@ -1,22 +1,9 @@
 """AutoFlowCFD V2.0 - 从完全分布式包构造多 GPU solver"""
 
-import types
-
-
-from loguru import logger
-
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.mpi.distributed_solver.assembly import settings_from_package
 
-from autoflowcfd.core.mpi import get_rank
-
-from autoflowcfd.core.mpi.comm import barrier
-
-from autoflowcfd.core.mpi.distributed_state import DistributedFRState
-
-from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
-from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 def build_multi_gpu_solver_from_fully_distributed_package(
@@ -45,194 +32,35 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     Returns:
         MultiGPUDistributedSolver 实例
     """
-    from autoflowcfd.core.gpu.array_manager import GPUArrayManager
-    from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
     from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
+    from autoflowcfd.core.turbulence.registry import has_transport_equations
     from autoflowcfd.fr.operators import generate_fr_operators
-    from autoflowcfd.core.time_integration.base import (
-        require_distributed_scheme,
-    )
-
-    cp = get_cupy()
-
-    turb_model_name = package['turb_model_name']
-    from autoflowcfd.core.turbulence.registry import require_supported
-    if turb_model_name != require_supported(turb_model_name):
-        raise NotImplementedError(
-            f"MultiGPUDistributedSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
-            f"'{turb_model_name}'（应为规范化的大写模型名）。")
 
     self = cls.__new__(cls)
-    self.rank = rank if rank is not None else get_rank()
-    self.n_ranks = n_ranks
+    self._setup_identity_and_device(rank, n_ranks, device_id, package['order'], settings_from_package(package))
     self._is_fully_distributed = True
     self.cell_partition = None  # 本 rank 从未持有完整全局网格，见类文档
     self._root_context = root_context
 
-    self.order = int(package['order'])
-    self.current_order = self.order
-    self.order_continuation_enabled = True
-
     precompacted_mesh = package['precompacted_mesh']
     self.mesh = precompacted_mesh
-    # 每个 rank 本地重新生成算子（纯函数，只依赖 order，见 CPU 版
-    # `from_fully_distributed_package` 同一处注释——避免把 FROperators
-    # 整个 pickle 发过来的不必要开销）。
+    # 每个 rank 本地重新生成算子（纯函数，只依赖阶数），不随包 pickle 传输
     self.ops = generate_fr_operators(package['order'])
-
     self.partition = package['partition']
-    # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
+    # 隐式步的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
     self._block_jacobi_colors_local = package['cell_colors']
     self._coupling_colors_local = package['cell_colors_d2']
+    # 面几何与压缩索引空间的网格几何都已由 root 按本 rank 切好，只需上传设备
     self.dist_flat_face = package['dist_fc']
-
-    # GPU 设备选择：与主 __init__ 同一个默认策略（rank % n_gpus）。
-    if device_id is None:
-        n_gpus = cp.cuda.runtime.getDeviceCount()
-        device_id = self.rank % n_gpus
-    self.device_id = device_id
-    with cp.cuda.Device(device_id):
-        logger.info(f"Rank {self.rank} using GPU device {device_id} (fully-distributed mode)")
-    self.array_mgr = GPUArrayManager(device_id=device_id)
-
+    self.flat_face_gpu = build_gpu_flat_face(self.dist_flat_face.base_flat, self.device_id)
     n_sps = precompacted_mesh.n_sps_per_cell
-    n_local = self.partition.n_local_cells
-
-    # 分布式面几何（GPU）：`dist_fc`/`precompacted_mesh` 已经是 root 按
-    # 本 rank 的 compact 索引空间预先切好的数据，不需要像"传统模式"
-    # `_init_distributed_face_geometry` 那样调用 `build_distributed_
-    # flat_face`（那需要完整全局网格，本 rank 没有）——只需要把已经算好
-    # 的 `dist_flat_face.base_flat` 上传 GPU。
-    self.flat_face_gpu = build_gpu_flat_face(self.dist_flat_face.base_flat, device_id)
-
-    # mesh_data：`precompacted_mesh`（`PrecompactedMeshData`）本身**已经**
-    # 是 compact 索引空间大小的几何数据（root 预先切好），不像"传统模式"
-    # 需要 `_CompactMeshDataView` 再从全局网格里切一次——直接传给
-    # `upload_mesh_data` 即可（鸭子类型接口完全兼容，见该类文档）。
-    self.mesh_data = self.array_mgr.upload_mesh_data(precompacted_mesh, self.ops)
-    self.n_compact = precompacted_mesh.n_cells
-    # WMLES 壁面剪应力修正需要的 numpy compact 视图——`precompacted_mesh`
-    # 本身就是这个视图（numpy，compact 索引空间），不需要像"传统模式"
-    # 那样另外构造 `_CompactMeshDataView`。
-    self._compact_mesh_view = precompacted_mesh
-    self._perm_gpu = cp.asarray(self.dist_flat_face.perm)
-    self._inv_perm_gpu = cp.asarray(self.dist_flat_face.inv_perm)
-    self.ops_data = {k: v for k, v in self.mesh_data.items()}
-
-    self.gpu_halo = GPUHaloExchange(self.partition, n_sps=n_sps, n_vars=5, device_id=device_id)
-    self.state = DistributedFRState(self.partition, n_sps)
-
-    freestream_pkg = package['freestream']
-    # `self.freestream`（含 mach_ref）在"传统模式" `__init__` 里是无条件
-    # 设置的（AUSM+up Weiss-Smith 预处理在全部 turb_model_name 下都要
-    # 读 `self.freestream["mach_ref"]`，不是只有 SST/DDES/IDDES 才需要
-    # ——这一点与 CPU `DistributedFRSolver.from_fully_distributed_
-    # package` 不同，那边的 `self.freestream` 只在湍流分支里设置，因为
-    # CPU 版 mach_ref 是从 `self._local_solver.freestream` 取的，本类
-    # 没有等价的 `_local_solver`），这里同样无条件设置，不放在湍流分支
-    # 里，否则 NONE/LES/WMLES 会在 compute_inviscid_residual_gpu 里
-    # AttributeError。
-    self.freestream = {**freestream_pkg, "mach_ref": package['mach_ref']}
-    self.mu_molecular = package['mu_molecular']
-    self.artificial_viscosity_enabled = bool(package['artificial_viscosity_enabled'])
-    self.artificial_viscosity_alpha = float(package['artificial_viscosity_alpha'])
-    self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
-    self._package_freestream = freestream_pkg
-    self._turbulence_intensity = package['turbulence_intensity']
-    self._viscosity_ratio = package['viscosity_ratio']
-    self._sem_num_eddies = package['sem_num_eddies']
-
-    time_scheme_enum = package['time_scheme']
-    time_scheme_str = getattr(time_scheme_enum, 'value', time_scheme_enum)
-    self.time_integrator = GPUTimeIntegrator(
-        scheme=require_distributed_scheme(time_scheme_str))
-
-    # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
-    # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
-    # 构造点此前各写一份且已分叉，见该模块文档）。
-    from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
-
-    configure_time_stepping(
-        self, time_scheme_str, time_accurate=bool(package['time_accurate']),
-        adaptive_cfl=bool(package['adaptive_cfl']),
-        cfl_start=package['cfl_start'], cfl_max=package['cfl_max'], cfl_min=package['cfl_min'],
-        low_mach_precond=package['low_mach_precond'])
-    # 低马赫预处理开关（2026-09-25 补齐）：此前这条路径**从未设置**它，而
-    # `step()` 直接读取 —— 每个 RK 步都会 AttributeError。与其余后端同一判据。
-    # 双时间步内迭代次数取 package 携带的值（时间积分器在上面按格式构造）
-    self.time_integrator.dual_time_steps = package['dual_time_inner_iter']
-    reset_dual_time_history(self)
-    # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-    reset_newton_state(self)
-
-    self.turb_model_name = turb_model_name
-    self.turb_model_gpu = None
-    self.ddes_model_gpu = None
-    self.iddes_h_max_compact = None
-    self.iddes_h_wn_compact = None
-    self.sgs_model_gpu = None
-    self.wall_model = None
-    self.wall_distance_gpu = None
-
-    from autoflowcfd.core.fr_solver.turbulence.init import build_turbulence_models, describe_turbulence_models
-    from autoflowcfd.core.turbulence.registry import has_transport_equations
-
-    models = build_turbulence_models(self, turb_model_name, n_local, n_sps, cp=cp, device_id=device_id)
-    self.turb_model_gpu, self.ddes_model_gpu, self.sgs_model_gpu = models
-    if has_transport_equations(turb_model_name):
-        _upload_wall_geometry_compact(self, package, cp, device_id)
-    logger.info(f"Rank {self.rank}: GPU {describe_turbulence_models(turb_model_name, models)} (fully-distributed mode)")
-    from autoflowcfd.core.turbulence.wall_model import build_wall_model
-    self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
-
-    with cp.cuda.Device(device_id):
-        from autoflowcfd.core.utils.flow_direction import (
-            freestream_conservative_state,
-        )
-
-        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
-        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
-        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
-        self.U_gpu = cp.empty((n_local, n_sps, 5), dtype=cp.float64)
-        self.U_gpu[:] = cp.asarray(
-            freestream_conservative_state(self.freestream, 5))
-
-    # boundary_ghost_provider：root 已经用完整全局网格构造好并把
-    # group_code 重映射到本 rank 的 compact 索引空间（见
-    # `build_fully_distributed_rank_package` 文档"边界条件"一节），
-    # 不需要像"传统模式" `__init__` 那样再调用 `build_boundary_ghost_
-    # provider`/重映射一次。
-    self.boundary_ghost_provider = package['boundary_ghost_provider']
-
-    self._wall_mask_gpu = None
-
-    self._open_mask_gpu = None
-    if self.turb_model_gpu is not None:
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
-        compact_mesh_stub = types.SimpleNamespace(
-            face_connectivity=types.SimpleNamespace(n_faces=self.dist_flat_face.base_flat.n_faces)
-        )
-        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, self.boundary_ghost_provider)
-        with cp.cuda.Device(device_id):
-            self._wall_mask_gpu = cp.asarray(wall_mask_np)
-            self._open_mask_gpu = cp.asarray(open_mask_np)
-
-    from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
-
-    self.convergence_history = ConvergenceHistory()
-    self.iteration = 0
-
-    barrier()
-    if self.rank == 0:
-        logger.info(
-            f"MultiGPUDistributedSolver (fully-distributed) initialized: {n_ranks} ranks, "
-            f"{n_local} local cells/rank (+{self.partition.n_halo} halo)"
-        )
-        print("✅ MultiGPUDistributedSolver Ready (fully-distributed mode: "
-              "only root rank loaded the full mesh):")
-        print(f"   Ranks: {n_ranks}, Cells/rank: {n_local} (+{self.partition.n_halo} halo)")
-        print(f"   GPU device: {device_id} per rank")
-
+    self._setup_compact_geometry(precompacted_mesh, self.ops, n_sps)
+    self._setup_time_integration(settings_from_package(package))
+    self._setup_turbulence_models(n_sps)
+    if has_transport_equations(self.turb_model_name):
+        # 壁距与 DES 网格尺度由 root 在完整网格上算好、切成本 rank 的紧凑索引空间随包下发
+        _upload_wall_geometry_compact(self, package, get_cupy(), self.device_id)
+    # 边界幽灵态：root 已按全局网格构建并把 group_code 重映射到本 rank 的压缩面编号
+    self._setup_state_and_boundary(package['boundary_ghost_provider'])
+    self._finish_setup("fully-distributed mode: only root rank loaded the full mesh")
     return self

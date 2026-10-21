@@ -75,13 +75,17 @@ def _fake_build_gpu_flat_face(flat_face, device_id):
 def gpu_shim(monkeypatch):
     """把本次改动新模块 + 其调用的 GPU 硬件相关类全部换成替身，
     见模块文档"方法论"一节。"""
+    import autoflowcfd.core.gpu.distributed.gpu_distributed.setup as mgpu_setup_mod
+
     shim = NumpyAsCupy()
-    patch_module_get_cupy(monkeypatch, gdfd_mod, shim)
-    # `GPUHaloExchange` 由 build.py / redistribute.py 在**顶层**导入，所以
-    # 它进的是这两个子模块的全局；对包对象 setattr 不会改变它们内部的
-    # 引用（`gpu_distributed_fully_distributed` 2026-09-24 拆成了子包）。
-    patch_pkg_attr(monkeypatch, gdfd_mod, "GPUHaloExchange", _FakeHaloExchange)
+    patch_module_get_cupy(monkeypatch, [gdfd_mod, mgpu_setup_mod], shim)
+    # 两条构造路径共用的装配阶段（`gpu_distributed/setup.py`）在**顶层**导入这些类与运行环境判据，替身要打在
+    # 那个模块的全局上；redistribute.py 同样顶层导入 `GPUHaloExchange`
+    patch_pkg_attr(monkeypatch, [gdfd_mod, mgpu_setup_mod], "GPUHaloExchange", _FakeHaloExchange)
+    monkeypatch.setattr(mgpu_setup_mod, "GPUArrayManager", _FakeArrayManager)
     monkeypatch.setattr(array_manager_mod, "GPUArrayManager", _FakeArrayManager)
+    monkeypatch.setattr(mgpu_setup_mod, "gpu_available", True)
+    monkeypatch.setattr(mgpu_setup_mod, "mpi_available", lambda require=False: True)
     monkeypatch.setattr(gpu_face_geometry_mod, "build_gpu_flat_face", _fake_build_gpu_flat_face)
     return shim
 
@@ -257,6 +261,33 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
         assert captured["root_context"] == "ROOT_CTX"
 
 
+def _patch_sst_standins(monkeypatch):
+    """真实 `GPUTurbulenceSST` / `compute_turbulence_face_masks_gpu` 要求真实 CUDA，这里用最小 Fake 隔离（不重新
+    验证它们的数值逻辑，那是其他测试文件的范围）。"""
+    import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as sst_mod
+    import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as scalar_transport_mod
+
+    class _FakeGPUTurbulenceSST:
+        def __init__(self, n_cells, n_sps, device_id, k_inf=1e-6, omega_inf=1.0):
+            self.n_cells = n_cells
+            self.n_sps = n_sps
+            self.k_inf = k_inf
+            self.omega_inf = omega_inf
+            self.k_field = np.full((n_cells, n_sps), k_inf)
+            self.omega_field = np.full((n_cells, n_sps), omega_inf)
+            self.k_max = None
+            self.omega_max = None
+            self.beta1 = 0.075
+
+    monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
+
+    def _no_face_masks(compact_mesh_stub, provider):
+        n = compact_mesh_stub.face_connectivity.n_faces
+        return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+
+    patch_pkg_attr(monkeypatch, scalar_transport_mod, "compute_turbulence_face_masks_gpu", _no_face_masks)
+
+
 class TestBuildFromFullyDistributedPackageSstTurbulence:
     def test_wires_sst_turbulence_from_package(self, mesh_and_ops, gpu_shim, monkeypatch):
         """SST：`wall_distance_compact`（root 预先算好）必须原样上传成
@@ -265,28 +296,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
         `compute_turbulence_face_masks_gpu` 要求真实 CUDA，这里用最小
         Fake 隔离（不重新验证它们的数值逻辑，那是其他测试文件的范围）。
         """
-        import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as sst_mod
-        import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as scalar_transport_mod
-
-        class _FakeGPUTurbulenceSST:
-            def __init__(self, n_cells, n_sps, device_id, k_inf=1e-6, omega_inf=1.0):
-                self.n_cells = n_cells
-                self.n_sps = n_sps
-                self.k_inf = k_inf
-                self.omega_inf = omega_inf
-                self.k_field = np.full((n_cells, n_sps), k_inf)
-                self.omega_field = np.full((n_cells, n_sps), omega_inf)
-                self.k_max = None
-                self.omega_max = None
-                self.beta1 = 0.075
-
-        monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
-
-        def _no_face_masks(compact_mesh_stub, provider):
-            n = compact_mesh_stub.face_connectivity.n_faces
-            return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
-
-        patch_pkg_attr(monkeypatch, scalar_transport_mod, "compute_turbulence_face_masks_gpu", _no_face_masks)
+        _patch_sst_standins(monkeypatch)
 
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
         from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
@@ -475,3 +485,47 @@ class TestGpuInterpolateDispatchesFullyDistributed:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_fully_distributed_sst_initializes_the_production_ramp(mesh_and_ops, gpu_shim, monkeypatch):
+    """完全分布式构造经两条路径共用的 `_setup_time_integration`（I-110）：产生项渐变计数器已初始化。2026-10-22
+    以前这条路径从不调用 `init_production_ramp`，输运模型第一步 `advance_production_ramp` 即 AttributeError。"""
+    from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_steps
+    from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+    from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
+        build_multi_gpu_solver_from_fully_distributed_package,
+    )
+
+    _patch_sst_standins(monkeypatch)
+    mesh, ops = mesh_and_ops
+    package = _build_sst_package(mesh, ops)
+    solver = build_multi_gpu_solver_from_fully_distributed_package(
+        MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
+    assert solver._turb_ramp_step == 0 and solver._turb_production_ramp_complete is False
+    assert solver._turb_production_ramp_steps == production_ramp_steps(package["time_scheme"])
+
+
+def test_both_multi_gpu_constructors_assemble_the_same_attributes(mesh_and_ops, gpu_shim, monkeypatch):
+    """多 GPU 传统模式与完全分布式构造共用装配阶段：属性集合只在几何来源相关的少数属性上不同（I-110）。"""
+    from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+    from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
+        build_multi_gpu_solver_from_fully_distributed_package,
+    )
+    from autoflowcfd.core.time_integration import TimeIntegrationScheme
+
+    _patch_sst_standins(monkeypatch)
+    mesh, ops = mesh_and_ops
+    monkeypatch.setattr(MultiGPUDistributedSolver, "_init_wall_distance_distributed",
+                        lambda self: setattr(self, "wall_distance_gpu", np.zeros(1)))
+    traditional = MultiGPUDistributedSolver(
+        mesh, ops, 1, rank=0, device_id=0, time_scheme=TimeIntegrationScheme.SSP_RK3, mu_molecular=1.8e-5,
+        rho_inf=1.225, vel_inf=33.33, p_inf=101325.0, turb_model_name="SST", turbulence_intensity=0.02,
+        viscosity_ratio=8.0, wall_distance_source=synthetic_wall_source(mesh))
+    fully = build_multi_gpu_solver_from_fully_distributed_package(
+        MultiGPUDistributedSolver, _build_sst_package(mesh, ops), n_ranks=1, device_id=0, rank=0, root_context=None)
+    a, b = set(vars(traditional)), set(vars(fully))
+    assert a - b <= {"_wall_distance_source"}, a - b
+    assert b - a <= {"_root_context", "_block_jacobi_colors_local", "_coupling_colors_local"}, b - a
+    for name in ("turb_model_name", "mu_molecular", "_turbulence_intensity", "_viscosity_ratio", "wall_treatment",
+                 "low_mach_precond_enabled", "_turb_production_ramp_steps", "order"):
+        assert getattr(traditional, name) == getattr(fully, name), name

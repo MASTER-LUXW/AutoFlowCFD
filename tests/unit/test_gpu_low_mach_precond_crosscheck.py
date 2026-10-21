@@ -258,10 +258,11 @@ class TestGpuSolverWiring:
 
         import autoflowcfd.core.fr_solver.solver as cpu_single
         import autoflowcfd.core.gpu.distributed.gpu_distributed as gpu_multi
-        import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gpu_multi_fd
         import autoflowcfd.core.gpu.solver.gpu_solver as gpu_single
         import autoflowcfd.core.mpi.distributed_solver as cpu_mpi
-        for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
+        # 分布式两种加载方式各自共用一个装配（CPU：distributed_solver/assembly.py；多 GPU：gpu_distributed/setup.py，
+        # 完全分布式构造经它，I-110）
+        for mod in (cpu_single, gpu_single, gpu_multi, cpu_mpi):
             src = module_source(mod)
             assert "configure_time_stepping(" in src, mod.__name__
             assert "AFCFD_LOW_MACH_PRECOND" not in src, (
