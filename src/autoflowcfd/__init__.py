@@ -69,9 +69,9 @@ for _var in ('MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS', '
              'OMP_NUM_THREADS'):
     os.environ.setdefault(_var, _blas_threads)
 
-from typing import Dict
+from typing import Dict  # noqa: E402  （上面先设线程环境变量，再导入任何可能拉起 numpy 的模块）
 
-from ._version import read_version
+from ._version import read_version  # noqa: E402
 
 __version__ = read_version()
 __author__ = "AutoFlowCFD Team"
@@ -80,7 +80,7 @@ __email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
 
 # 导入主 API 类
-from .api import AutoFlowCFDAPI
+from .api import AutoFlowCFDAPI  # noqa: E402
 
 # 模块元数据
 __all__ = [
@@ -94,10 +94,10 @@ __all__ = [
 
 def get_version() -> str:
     """获取 AutoFlowCFD 的当前版本。
-    
+
     Returns:
         str: 语义化版本字符串（例如 "0.1.0"）
-        
+
     Example:
         >>> import autoflowcfd
         >>> autoflowcfd.get_version()
@@ -108,10 +108,10 @@ def get_version() -> str:
 
 def get_info() -> Dict[str, str]:
     """获取 AutoFlowCFD 的系统信息。
-    
+
     Returns:
         Dict: 包含版本、作者等信息的字典
-        
+
     Example:
         >>> import autoflowcfd
         >>> info = autoflowcfd.get_info()
@@ -129,15 +129,15 @@ def get_info() -> Dict[str, str]:
 
 def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
     """创建 AutoFlowCFD API 实例。
-    
+
     用于创建 API 实例的便捷函数。
-    
+
     Args:
         verbose: 启用详细日志输出
-        
+
     Returns:
         AutoFlowCFDAPI: API 实例
-        
+
     Example:
         >>> api = autoflowcfd.create_api()
         >>> grid = api.load_grid("car_surface.nas")

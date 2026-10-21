@@ -135,6 +135,7 @@ def bcast_from_root(obj):
         return obj
     return comm.bcast(obj, root=0)
 
+
 def run_on_root(fn):
     """在 root 上执行 `fn()`，执行结果（成功 / 失败）广播给全部 rank——集体操作，全部 rank 都必须调用。
 

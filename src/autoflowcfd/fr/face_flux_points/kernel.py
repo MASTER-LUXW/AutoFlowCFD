@@ -259,7 +259,8 @@ def build_fp_newton_parallel(
                             if ax != n_axis:
                                 abc[p, ax] = fc[p, ix2]
                                 ix2 += 1
-                    nb_interp[f] = native_prism_interp_matrix_nb(abc, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
+                    nb_interp[f] = native_prism_interp_matrix_nb(abc, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np,
+                                                                 n_sps)
                 nb_cell_id[f] = nc
 
         # ---- Owner 侧 Newton (neighbor_primary 才需要) ----
@@ -316,7 +317,8 @@ def build_fp_newton_parallel(
                             if ax != o_axis:
                                 abc_o[p, ax] = fc_o[p, ix2]
                                 ix2 += 1
-                    ow_interp[f] = native_prism_interp_matrix_nb(abc_o, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
+                    ow_interp[f] = native_prism_interp_matrix_nb(abc_o, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np,
+                                                                 n_sps)
                 ow_cell_id[f] = oc
 
     return (nb_fc, nb_resid, ow_fc, ow_resid,

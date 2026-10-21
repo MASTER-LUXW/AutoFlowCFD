@@ -109,7 +109,8 @@ def rebuild_distributed_solver_from_checkpoint(
         physics=physics, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
         time_accurate=resolve_resume_time_accurate(time_scheme, metadata),
-        dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS, sem_num_eddies=resolve_resume_sem_num_eddies(metadata, turbulence_model))
+        dual_time_inner_iter=DEFAULT_DUAL_TIME_STEPS, sem_num_eddies=resolve_resume_sem_num_eddies(metadata,
+                                                                                                   turbulence_model))
     loaded_metadata, iteration = solver.load_checkpoint_distributed(checkpoint_path)
     metadata = loaded_metadata or metadata
 

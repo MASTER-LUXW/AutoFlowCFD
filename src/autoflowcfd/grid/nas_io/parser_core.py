@@ -27,9 +27,9 @@ class NASParser:
         encoding: 文件编码，默认 UTF-8
         version: 检测到的 NAS 文件版本
     """
-    
+
     SUPPORTED_VERSIONS = {"v22", "v23", "v24"}
-    
+
     def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm',
                  bc_types: Optional[Dict[str, str]] = None):
         """初始化解析器
@@ -66,17 +66,17 @@ class NASParser:
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"NAS file not found: {file_path}")
-        
+
         if self.file_path.suffix.lower() not in ['.nas', '.bdf']:
             logger.warning(
                 f"File extension '{self.file_path.suffix}' is not standard "
                 f"for NAS files (.nas or .bdf). Proceeding anyway."
             )
-        
+
         logger.info(f"NAS parser initialized: {file_path}")
-    
+
     def parse(
-        self, 
+        self,
         skip_validation: bool = False,
         generate_volume_mesh: bool = False,
         volume_mesh_params: Optional[Dict] = None
@@ -99,28 +99,28 @@ class NASParser:
             NASParseError: 解析过程中发生错误
         """
         logger.info(f"Parsing NAS file: {self.file_path}")
-        
+
         try:
             # Step 1: Detect file version
             self.version = self._detect_version()
             logger.info(f"Detected NAS version: {self.version}")
-            
+
             if self.version not in self.SUPPORTED_VERSIONS:
                 raise NASFormatError(
                     f"Unsupported NAS version: {self.version}. "
                     f"Supported versions: {self.SUPPORTED_VERSIONS}"
                 )
-            
+
             # Step 2: Parse nodes (delegated)
             logger.info("Parsing nodes...")
             nodes, node_id_to_index = parse_nodes_from_nas(
                 str(self.file_path), self.encoding
             )
             logger.info(f"Parsed {nodes.count:,} nodes")
-            
+
             if nodes.count == 0:
                 raise NASParseError("No nodes found in NAS file")
-            
+
             # 坐标换算到米（units='auto' 时先检测单位）
             raw_extent = float(max(
                 nodes.x.max() - nodes.x.min(),
@@ -207,27 +207,27 @@ class NASParser:
                     file_format=self.version,
                     bounding_box=bounding_box
                 )
-                
+
                 grid_data = GridData(
                     nodes=nodes,
                     cells=surface_cells,
                     boundaries=boundaries,
                     metadata=metadata
                 )
-                
+
                 logger.success(
                     f"NAS file parsed successfully: "
                     f"{nodes.count:,} nodes, {surface_cells.count:,} cells, "
                     f"{len(boundaries.groups)} boundary groups"
                 )
-                
+
                 return grid_data
-            
+
         except NASParserError:
             raise
         except Exception as e:
             raise NASParseError(f"Unexpected error during parsing: {str(e)}") from e
-    
+
     def generate_volume_mesh_from_surface(
         self,
         surface_grid: GridData,
@@ -261,24 +261,24 @@ class NASParser:
                 for i, line in enumerate(f):
                     if i > 100:
                         break
-                    
+
                     line_upper = line.upper().strip()
-                    
+
                     if 'ANSA' in line_upper:
                         match = re.search(r'V(\d{2})', line_upper)
                         if match:
                             version_num = match.group(1)
                             return f"v{version_num}"
-                    
+
                     if 'NASTRAN' in line_upper or 'BDF' in line_upper:
                         return "v24"
-                
+
                 logger.warning("No version marker found in NAS file. Assuming v24 format.")
                 return "v24"
-                
+
         except Exception as e:
             raise NASFormatError(f"Failed to detect NAS version: {str(e)}") from e
-    
+
     def _compute_bounding_box(self, nodes: NodeArray):
         """计算表面网格的精确包围盒（不加 buffer）。
 

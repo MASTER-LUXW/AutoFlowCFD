@@ -111,7 +111,8 @@ def log_mesh_metric_report(scaled_quality: np.ndarray,
     """
     n_cells = int(scaled_quality.shape[0])
     n_shape_warn = int(np.sum(scaled_quality.min(axis=1) < SHAPE_QUALITY_WARN_THRESHOLD))
-    n_misaligned = 0 if cell_face_misalignment is None else int(np.sum(cell_face_misalignment > _FACE_MISALIGNMENT_WARN))
+    n_misaligned = (0 if cell_face_misalignment is None
+                    else int(np.sum(cell_face_misalignment > _FACE_MISALIGNMENT_WARN)))
     stats = {"n_cells": n_cells, "n_shape_warn": n_shape_warn, "n_misaligned": n_misaligned}
     if n_shape_warn == 0 and n_misaligned == 0:
         logger.info(f"网格度量诊断：{n_cells} 个单元的形状质量与面法向一致性均正常")

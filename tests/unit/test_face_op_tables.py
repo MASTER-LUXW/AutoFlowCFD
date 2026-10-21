@@ -14,7 +14,9 @@ import pytest
 
 from autoflowcfd.fr.face_flux_trace import face_reference_weights
 from autoflowcfd.fr.native_prism.face import build_native_prism_boundary_extrap, native_prism_face_points
-from autoflowcfd.fr.native_tet.basis import build_native_tet_boundary_extrap, build_native_tet_lift, native_tet_face_points
+from autoflowcfd.fr.native_tet.basis import (
+    build_native_tet_boundary_extrap, build_native_tet_lift, native_tet_face_points,
+)
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.fr.operators.face_ops import N_FACE_OPS, face_op_index
 from autoflowcfd.fr.triangle_apex import apex_slots, cell_triangle_slots, rotate_triangle

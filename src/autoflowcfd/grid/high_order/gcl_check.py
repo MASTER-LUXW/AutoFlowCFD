@@ -48,6 +48,7 @@ def verify_gcl(mesh, tolerance: float = 1e-8) -> bool:
         logger.warning(f"GCL check failed for {n_failed}/{mesh.n_cells} cells")
     return n_failed == 0
 
+
 def verify_gcl_overintegrated(mesh, tolerance: float) -> bool:
     """`verify_gcl` 的过积分实现，见该方法文档"度量阶数与解阶数
     解耦"一节。散度算子与真实体积项组装（core/fr_residual/inviscid.py）
@@ -74,7 +75,8 @@ def verify_gcl_overintegrated(mesh, tolerance: float) -> bool:
          _c2f, op_D_fine, _f2c) in oi["segs"]:
         if seg_hi <= seg_lo:
             continue
-        adj_seg = np.ascontiguousarray(det_seg)[..., None, None]                 * np.ascontiguousarray(inv_seg)   # adj[c,j,m,i]
+        adj_seg = (np.ascontiguousarray(det_seg)[..., None, None]
+                   * np.ascontiguousarray(inv_seg))   # adj[c,j,m,i]
         res_seg = contract_shared_operator_2axis(op_D_fine, adj_seg)
         cell_max[seg_lo:seg_hi] = np.max(np.abs(res_seg), axis=(1, 2))
 

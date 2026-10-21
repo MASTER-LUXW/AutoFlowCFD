@@ -43,11 +43,13 @@ def test_distributed_view_gives_the_single_machine_coefficients(with_eddy_viscos
     from autoflowcfd.fr.operators import generate_fr_operators
 
     single = FRSolver(mesh=_mesh(), order=1, turb_model_name="NONE", vel_inf=10.0,
-                      time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                      time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF,
+                      mu_molecular=MU_MOLECULAR)
     dmesh = _mesh()
     dist = DistributedFRSolver(mesh=dmesh, ops=generate_fr_operators(1), face_connectivity=dmesh.face_connectivity,
                                n_ranks=1, order=1, turb_model_name="none", vel_inf=10.0,
-                               time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                               time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF,
+                               mu_molecular=MU_MOLECULAR)
     U = _state(single.state.U.shape)
     single.state.U = U.copy()
     single.state._update_primitives()

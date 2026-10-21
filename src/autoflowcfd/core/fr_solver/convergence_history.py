@@ -75,7 +75,8 @@ class ConvergenceHistory:
         """`CheckpointManager.save` 的 history 字典（全部步都没有算力系数时不写系数组、都没有湍流残差时不写湍流列）。"""
         out = {
             "iterations": list(self.iterations),
-            "residuals": {MONITOR_RESIDUAL: list(self.residual), **{eq: list(v) for eq, v in self.per_equation.items()}},
+            "residuals": {MONITOR_RESIDUAL: list(self.residual), **{eq: list(v) for eq,
+                                                                    v in self.per_equation.items()}},
             "cfl_history": list(self.cfl),
         }
         if any(not math.isnan(v) for v in self.turbulence):

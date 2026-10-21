@@ -203,7 +203,8 @@ def extrude_layers(
 
         # 附加停止条件：ANSA 风格最大厚度上限
         if next_cumulative_thickness > effective_max_thickness:
-            logger.info(f"Reached ANSA-style max thickness ({effective_max_thickness:.4f}m). Stopping manual extrusion.")
+            logger.info(f"Reached ANSA-style max thickness ({effective_max_thickness:.4f}m). "
+                        "Stopping manual extrusion.")
             break
 
         # 本层的实际位移

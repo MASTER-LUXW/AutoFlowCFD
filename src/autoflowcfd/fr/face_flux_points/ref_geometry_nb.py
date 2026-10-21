@@ -197,18 +197,22 @@ def _newton_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys, char_leng
             res[p, 2] = phys[p, 2] - targets_phys[p, 2]
 
         # 有限差分 Jacobi
-        xp0 = x.copy(); xp0[:, 0] += eps
+        xp0 = x.copy()
+        xp0[:, 0] += eps
         fp0 = np.empty((n_pts, 3))
         for p in range(n_pts):
             fp0[p, fixed_axis] = fixed_val
-            fp0[p, o0] = xp0[p, 0]; fp0[p, o1] = xp0[p, 1]
+            fp0[p, o0] = xp0[p, 0]
+            fp0[p, o1] = xp0[p, 1]
         pp0 = _map_ref_nb(True, fp0, cell_nodes)
 
-        xp1 = x.copy(); xp1[:, 1] += eps
+        xp1 = x.copy()
+        xp1[:, 1] += eps
         fp1 = np.empty((n_pts, 3))
         for p in range(n_pts):
             fp1[p, fixed_axis] = fixed_val
-            fp1[p, o0] = xp1[p, 0]; fp1[p, o1] = xp1[p, 1]
+            fp1[p, o0] = xp1[p, 0]
+            fp1[p, o1] = xp1[p, 1]
         pp1 = _map_ref_nb(True, fp1, cell_nodes)
 
         J0 = (pp0 - phys) / eps
@@ -255,7 +259,9 @@ def _newton_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys, char_leng
                 xt0 = x[p, 0] + step[p] * dx[p, 0]
                 xt1 = x[p, 1] + step[p] * dx[p, 1]
                 fp = np.empty((1, 3))
-                fp[0, fixed_axis] = fixed_val; fp[0, o0] = xt0; fp[0, o1] = xt1
+                fp[0, fixed_axis] = fixed_val
+                fp[0, o0] = xt0
+                fp[0, o1] = xt1
                 pt = _map_ref_nb(True, fp, cell_nodes)
                 ddx = pt[0, 0] - targets_phys[p, 0]
                 ddy = pt[0, 1] - targets_phys[p, 1]
@@ -263,7 +269,9 @@ def _newton_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys, char_leng
                 rt = np.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
                 improved = rt < rb[p]
                 if improved:
-                    xb[p, 0] = xt0; xb[p, 1] = xt1; rb[p] = rt
+                    xb[p, 0] = xt0
+                    xb[p, 1] = xt1
+                    rb[p] = rt
                 else:
                     all_imp = False
                     step[p] *= 0.5

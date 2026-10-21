@@ -27,7 +27,8 @@ _WRITERS = ("autoflowcfd.cli.solve.checkpoint_io.periodic_checkpoint_callback",
 @pytest.fixture
 def writers():
     """结果落盘函数的替身（替身求解器不能真的写 checkpoint）；返回 {名字: mock}。"""
-    with patch(_WRITERS[0]) as cb, patch(_WRITERS[1]) as final, patch(_WRITERS[2]) as rcb, patch(_WRITERS[3]) as rfinal, \
+    with patch(_WRITERS[0]) as cb, patch(_WRITERS[1]) as final, \
+         patch(_WRITERS[2]) as rcb, patch(_WRITERS[3]) as rfinal, \
          patch("autoflowcfd.cli.solve.mesh_loader.save_volume_mesh_cache", return_value="out/volume_mesh.pkl") as save:
         yield {"callback": cb, "final": final, "resume_callback": rcb, "resume_final": rfinal, "save": save}
 
@@ -253,7 +254,8 @@ class TestPost:
         api.solver.host_view.return_value = SimpleNamespace(freestream={"vel_inf": 30.0}, bc_overrides={})
         api.volume_mesh = MagicMock()
         coeffs = SimpleNamespace(to_dict=lambda: {"Cd": 0.3})
-        with patch("autoflowcfd.cli.solve.aero_coefficients.reference_area_for", return_value=2.2) as area,              patch("autoflowcfd.postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr",
+        with patch("autoflowcfd.cli.solve.aero_coefficients.reference_area_for", return_value=2.2) as area, \
+             patch("autoflowcfd.postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr",
                    return_value=coeffs) as compute:
             assert api.calculate_coefficients() == {"Cd": 0.3}
         assert area.call_args.args[2] is None
@@ -286,7 +288,8 @@ class TestApiGenerateVolumeMesh:
         nodes = SimpleNamespace(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
         return SimpleNamespace(
             nodes=nodes, cells=SimpleNamespace(connectivity=np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])),
-            boundaries=SimpleNamespace(groups={}, bc_types={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0, 1]))
+            boundaries=SimpleNamespace(groups={}, bc_types={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0,
+                                                                                                       1]))
 
     def test_forwards_parameters_and_keeps_surface_mesh(self, monkeypatch):
         import autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator as vmg

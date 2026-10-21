@@ -22,8 +22,6 @@ from autoflowcfd.core.utils.array_module import to_host
 from autoflowcfd.core.gpu import get_cupy
 
 
-
-
 class _HostTurbulence:
     """输运湍流模型的主机副本：checkpoint 写出与单元平均读它的输运场、涡粘与输出键名；恢复路径的
     `restore_transported` 记下新场，由 `GPUHostView.push` 交给 GPU 模型。"""

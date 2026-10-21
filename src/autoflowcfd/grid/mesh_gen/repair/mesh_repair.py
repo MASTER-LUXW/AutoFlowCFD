@@ -250,4 +250,3 @@ def smooth_bad_cells(
         actions.append(f"Stage A: reached max_passes={max_passes} limit")
 
     return nodes, bad_mask, actions
-

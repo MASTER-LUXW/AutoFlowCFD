@@ -22,17 +22,17 @@ class TestQuadraturePoints:
         """测试Gauss-Legendre点集生成"""
         n = 3
         points, weights = gauss_legendre(n)
-        
+
         # 检查点数
         assert len(points) == n
         assert len(weights) == n
-        
+
         # 检查范围在(-1, 1)内
         assert np.all(points > -1.0) and np.all(points < 1.0)
-        
+
         # 检查权重为正
         assert np.all(weights > 0)
-        
+
         # 检查权重之和约为2（积分区间长度）
         assert abs(np.sum(weights) - 2.0) < 1e-10
 
@@ -40,14 +40,14 @@ class TestQuadraturePoints:
         """测试Gauss-Lobatto点集生成"""
         n = 4
         points, weights = gauss_lobatto(n)
-        
+
         # 检查点数
         assert len(points) == n
-        
+
         # 检查端点精确为-1和1
         assert abs(points[0] + 1.0) < 1e-14
         assert abs(points[-1] - 1.0) < 1e-14
-        
+
         # 检查点集有序
         assert np.all(np.diff(points) > 0)
 
@@ -89,17 +89,17 @@ class TestFRState:
     def test_fr_state_uniform_flow(self):
         """测试均匀流场初始化"""
         from autoflowcfd.core.fr_solver.state import FRState
-        
+
         n_cells = 5
         n_sps = 8
         state = FRState(n_cells, n_sps)
-        
+
         # 初始化均匀流场
         state.initialize_uniform(rho=1.0, u=10.0, v=0.0, w=0.0, p=101325.0)
-        
+
         # 检查密度
         assert np.allclose(state.U[:, :, 0], 1.0)
-        
+
         # 检查动量
         assert np.allclose(state.U[:, :, 1], 10.0)
         assert np.allclose(state.U[:, :, 2], 0.0)

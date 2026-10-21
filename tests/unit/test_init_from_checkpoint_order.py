@@ -92,7 +92,8 @@ def test_single_gpu_init_from_lower_order_through_the_host_view():
     mesh = build_channel_mesh_prism(2, 3, 4, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(_BC)
     g = GPUFRSolver(mesh=mesh, order=2, turb_model_name="SA", time_scheme=DUAL, vel_inf=30.0,
-                    wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                    wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF,
+                    mu_molecular=MU_MOLECULAR)
     with g.edit_host_state() as host:
         _, ckpt_order = restore_state_from_checkpoint("p1.h5", host, {"fields": fields})
     start_from_checkpoint_field(g, ckpt_order, report=False)
@@ -178,5 +179,3 @@ def test_every_backend_starts_from_the_checkpoint_before_solving():
     assert build.count("start_distributed_from_checkpoint(solver, run.init_checkpoint)") == 1
     assert inspect.getsource(run.run_solve).index("_build(run)") < inspect.getsource(run.run_solve).index(
         "solver.solve(")
-
-

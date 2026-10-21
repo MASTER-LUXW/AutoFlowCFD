@@ -33,7 +33,6 @@ from tests.validation.test_tgv import (
 )
 
 
-
 def test_couette_stable_from_wrong_ic_with_artificial_viscosity():
     """复用 test_couette.py::test_couette_prism_stable_from_wrong_ic 的
     设置（明确错误的半速初场，800 步），只是启用人工粘性——必须仍然

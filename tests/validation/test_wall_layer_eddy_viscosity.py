@@ -29,7 +29,8 @@ def test_velocity_in_the_wall_layer_stays_at_the_freestream_level():
                       vel_inf=U_INF, viscosity_ratio=50.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     solver.order_continuation_enabled = False
     corners = np.array([[0, 0, 0], [lx, 0, 0], [lx, 0, lz], [0, 0, lz]], dtype=float)
-    apply_wall_distance_source(solver, WallDistanceSource(triangles_from_faces(corners, np.array([[0, 1, 2], [0, 2, 3]]))))
+    apply_wall_distance_source(solver, WallDistanceSource(triangles_from_faces(corners, np.array([[0, 1, 2], [0, 2,
+                                                                                                              3]]))))
 
     first = None
     for _ in range(90):

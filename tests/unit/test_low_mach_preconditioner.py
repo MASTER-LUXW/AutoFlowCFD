@@ -54,8 +54,10 @@ def _numeric_flux_jacobian(U, n, eps_rel=1e-7):
     A = np.zeros((5, 5))
     for j in range(5):
         h = eps_rel * max(abs(U[j]), 1.0)
-        Up = U.copy(); Up[j] += h
-        Um = U.copy(); Um[j] -= h
+        Up = U.copy()
+        Up[j] += h
+        Um = U.copy()
+        Um[j] -= h
         A[:, j] = (_euler_flux_normal(Up, n) - _euler_flux_normal(Um, n)) / (2.0 * h)
     return A
 
@@ -72,8 +74,10 @@ def _gamma_matrix(rho, u, v, w, p, beta2):
 
 def _apply_via_public_api(r5, rho, u, v, w, p, mach_ref, k=1.1):
     """走生产入口（numba kernel）施加一次 Gamma，返回 (5,) 结果。"""
-    R = np.zeros((1, 1, 5)); R[0, 0] = r5
-    Q = np.zeros((1, 1, 5)); Q[0, 0] = [rho, u, v, w, p]
+    R = np.zeros((1, 1, 5))
+    R[0, 0] = r5
+    Q = np.zeros((1, 1, 5))
+    Q[0, 0] = [rho, u, v, w, p]
     return apply_low_mach_preconditioner(R, Q, mach_ref, k)[0, 0]
 
 
@@ -197,7 +201,9 @@ class TestTurbulenceComponentsUntouched:
         rng = np.random.default_rng(13)
         R = rng.standard_normal((4, 3, 7))
         Q = np.zeros((4, 3, 5))
-        Q[..., 0] = 1.2; Q[..., 1] = 30.0; Q[..., 4] = 1e5
+        Q[..., 0] = 1.2
+        Q[..., 1] = 30.0
+        Q[..., 4] = 1e5
         out = apply_low_mach_preconditioner(R, Q, 0.1)
         assert out.shape == R.shape
         np.testing.assert_array_equal(out[:, :, 5:], R[:, :, 5:])

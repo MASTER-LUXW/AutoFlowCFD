@@ -50,10 +50,11 @@ class TurbulenceModel(str, Enum):
     LES = "les"
 
 
-
 # 时间格式：配置层直接复用核心层的枚举，字符串解析统一走
 # `core/time_integration/base.py::scheme_from_name`（唯一那张词汇表，
 # 未知取值报错而不是静默换方案）。
+
+
 from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL, STEADY_SCHEMES  # noqa: E402
 from autoflowcfd.core.time_integration.base import (  # noqa: E402
     TimeIntegrationScheme,
@@ -159,7 +160,6 @@ class SolverConfig:
         if self.artificial_viscosity_alpha <= 0:
             raise ValueError(f"人工粘性强度 artificial_viscosity_alpha 必须为正数，得到 {self.artificial_viscosity_alpha}")
 
-
         # **2026-09-18：这里原本 `os.makedirs(self.output_dir)`，已删除。**
         #
         # 那是"构造一个值对象就产生文件系统副作用"——只要有人构造
@@ -183,12 +183,12 @@ class SolverConfig:
         """
         os.makedirs(self.output_dir, exist_ok=True)
         return self.output_dir
-    
+
     @property
     def is_gpu(self) -> bool:
         """检查是否使用 GPU 后端。"""
         return self.backend == BackendType.GPU
-    
+
     @property
     def is_cpu(self) -> bool:
         """检查是否使用 CPU 后端。"""
@@ -240,9 +240,9 @@ def _raise_on_cfl_triplet(config) -> None:
 @dataclass
 class SteadyConfig(SolverConfig):
     """稳态仿真配置。
-    
+
     继承 SolverConfig 的所有属性并添加稳态特定参数。
-    
+
     属性:
         max_iter: 最大迭代步数
         cfl_init / cfl_max / cfl_min: 自适应 CFL 的初值 / 上限 / 下限。默认 None = 按时间格式取该格式 CFL 律
@@ -308,9 +308,9 @@ class SteadyConfig(SolverConfig):
 @dataclass
 class TransientConfig(SolverConfig):
     """瞬态仿真配置。
-    
+
     继承 SolverConfig 的所有属性并添加瞬态特定参数。
-    
+
     属性:
         dt: 时间步长（秒）
         total_time: 总物理时间（秒）
@@ -370,7 +370,6 @@ class TransientConfig(SolverConfig):
 
         _raise_on_cfl_triplet(self)
 
-
         # 验证自由流条件
         if self.rho_inf <= 0:
             raise ValueError(f"rho_inf 必须为正数，得到 {self.rho_inf}")
@@ -378,7 +377,7 @@ class TransientConfig(SolverConfig):
             raise ValueError(f"vel_inf 必须为正数，得到 {self.vel_inf}")
         if self.p_inf <= 0:
             raise ValueError(f"p_inf 必须为正数，得到 {self.p_inf}")
-    
+
     @property
     def n_steps(self) -> int:
         """物理时间步数：给了 total_time 时按 `physical_time_steps` 换算（唯一换算函数），否则为 max_iter。"""

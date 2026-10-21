@@ -31,7 +31,7 @@ def _system(n, seed, spread=1.0):
 def test_solves_nonsymmetric_system_to_true_residual_tolerance(restart):
     A, b, x_true = _system(60, 0)
     x, it, info, _rel = gmres_right(lambda v: A @ v, b, lambda v: v, rtol=1e-10,
-                              restart=restart, max_iter=2000)
+                                    restart=restart, max_iter=2000)
     assert info == 0
     assert np.linalg.norm(b - A @ x) <= 1e-10 * np.linalg.norm(b) * 1.0001
     np.testing.assert_allclose(x, x_true, rtol=1e-7, atol=1e-8)
@@ -41,7 +41,7 @@ def test_perfect_preconditioner_converges_in_one_iteration():
     A, b, _ = _system(40, 1)
     Ainv = np.linalg.inv(A)
     x, it, info, _rel = gmres_right(lambda v: A @ v, b, lambda v: Ainv @ v, rtol=1e-10,
-                              restart=30, max_iter=100)
+                                    restart=30, max_iter=100)
     assert info == 0 and it == 1
 
 
@@ -49,9 +49,9 @@ def test_diagonal_preconditioning_helps_badly_scaled_system():
     A, b, _ = _system(80, 2, spread=5.0)
     d = np.diag(A).copy()
     _, it_plain, info_plain, _rel = gmres_right(lambda v: A @ v, b, lambda v: v, rtol=1e-8,
-                                          restart=80, max_iter=400)
+                                                restart=80, max_iter=400)
     _, it_prec, info_prec, _rel = gmres_right(lambda v: A @ v, b, lambda v: v / d, rtol=1e-8,
-                                        restart=80, max_iter=400)
+                                              restart=80, max_iter=400)
     assert info_prec == 0
     assert it_prec < it_plain
 
@@ -59,7 +59,7 @@ def test_diagonal_preconditioning_helps_badly_scaled_system():
 def test_max_iter_reports_positive_info_and_best_solution():
     A, b, _ = _system(60, 3, spread=4.0)
     x, it, info, _rel = gmres_right(lambda v: A @ v, b, lambda v: v, rtol=1e-14,
-                              restart=10, max_iter=10)
+                                    restart=10, max_iter=10)
     assert info > 0 and it == 10
     assert np.linalg.norm(b - A @ x) < np.linalg.norm(b)
 
@@ -67,7 +67,7 @@ def test_max_iter_reports_positive_info_and_best_solution():
 def test_non_finite_is_reported():
     A, b, _ = _system(10, 4)
     x, it, info, _rel = gmres_right(lambda v: A @ v * np.nan, b, lambda v: v, rtol=1e-8,
-                              restart=5, max_iter=20)
+                                    restart=5, max_iter=20)
     assert info < 0
 
 
@@ -81,7 +81,7 @@ def test_reduction_object_is_the_only_source_of_scalars():
     A, b, _ = _system(50, 5)
     x1, it1, _, _rel = gmres_right(lambda v: A @ v, b, lambda v: v, rtol=1e-9, restart=20, max_iter=500)
     x2, it2, _, _rel = gmres_right(lambda v: A @ v, b, lambda v: v, rtol=1e-9, restart=20, max_iter=500,
-                             red=Doubling())
+                                   red=Doubling())
     assert it1 == it2
     np.testing.assert_array_equal(x1, x2)
 
@@ -130,7 +130,9 @@ def test_basis_precision_follows_the_tolerance_and_sets_the_restart_length():
 
     cube_demo SA P1 的尺寸（1109.8 万个未知量、灵活模式）：双精度被压在下限 30，单精度 60——同一个 CFL 1500
     的线性系统 GMRES(30) 198 次、GMRES(60) 46 次。"""
-    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import (
+        GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart,
+    )
 
     assert basis_itemsize(0.1) == 4 and basis_itemsize(SINGLE_BASIS_MIN_RTOL) == 4
     assert basis_itemsize(0.5 * SINGLE_BASIS_MIN_RTOL) == 8 and basis_itemsize(0.0) == 8

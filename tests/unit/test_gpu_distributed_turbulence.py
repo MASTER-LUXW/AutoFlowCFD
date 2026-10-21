@@ -111,7 +111,8 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
         boundary_ghost_provider=DefaultGhostProvider(),
         # 产生项渐变进行中（第 10/50 步）：两侧必须按同一个计数器渐变（多 GPU
         # 2026-09-25 以前从不推进渐变，production_factor 恒为 1）
-        ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
+        ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50,
+                                         _turb_production_ramp_complete=False),
         turb_model_name=turb_model_name, ddes_model=_make_ddes_cpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
     )

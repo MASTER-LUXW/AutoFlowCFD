@@ -53,7 +53,8 @@ def _solver(vel):
     from autoflowcfd.core.fr_solver import FRSolver
 
     mesh = build_channel_mesh_prism(1, 4, 3, 1, 1.0, 1.0, 0.25)
-    return FRSolver(mesh=mesh, order=1, turb_model_name="NONE", rho_inf=1.225, vel_inf=vel, p_inf=101325.0, time_scheme=TimeIntegrationScheme.SSP_RK3, mu_molecular=MU_MOLECULAR)
+    return FRSolver(mesh=mesh, order=1, turb_model_name="NONE", rho_inf=1.225, vel_inf=vel, p_inf=101325.0,
+                    time_scheme=TimeIntegrationScheme.SSP_RK3, mu_molecular=MU_MOLECULAR)
 
 
 _A = float(np.sqrt(1.4 * 101325.0 / 1.225))

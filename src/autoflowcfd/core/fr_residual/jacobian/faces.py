@@ -52,7 +52,7 @@ def _total_jump(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind, mu, P
                 mach_ref):
     J = inviscid_common_flux_point(Qs, Qx, adjrow, mach_ref)
     Jv = viscous_common_flux_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind,
-                            mu, Pr, Pr_t, c_ip)
+                                   mu, Pr, Pr_t, c_ip)
     for v in range(5):
         J[v] = Jv[v] - J[v]
     return J
@@ -195,7 +195,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                          mu, Pr, Pr_t, c_ip, mach_ref)
         # 梯度输入只进粘性跳变量：对它们差分时不必重算 AUSM+up
         Jv0 = viscous_common_flux_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
-                                 mu, Pr, Pr_t, c_ip)
+                                        mu, Pr, Pr_t, c_ip)
         # ---- 本侧原始变量（边界面：复合差分）----
         for v in range(5):
             q = Qs[i].copy()
@@ -231,7 +231,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 g_x = gvx
                 t_x = gTx
             J1 = viscous_common_flux_point(Qs[i], g, tt, mus[i], Qx, g_x, t_x, mux, adjrow[i], h_ip, bk,
-                                    mu, Pr, Pr_t, c_ip)
+                                           mu, Pr, Pr_t, c_ip)
             for o in range(5):
                 dS[i, o, j] = (J1[o] - Jv0[o]) / h
         # ---- 另一侧状态：混合半区经配对幽灵态；sources 点经插值 ----
@@ -278,7 +278,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                         dO[i, o, j] = (J1[o] - J0[o]) / h
                 else:
                     J1 = viscous_common_flux_point(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip,
-                                            VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
+                                                   VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - Jv0[o]) / h
 
@@ -316,7 +316,8 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet,
                           owner_cell, neighbor_cell, is_boundary, owner_is_primary, neighbor_is_primary,
                           owner_adj_row_exact, neighbor_adj_row_exact,
-                          neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
+                          neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx,
+                          neighbor_src1_cell,
                           neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                           owner_src1_cell, owner_src1_mat, mixed_nb_partner, mixed_nb_mask,
                           mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, vbc_kind,

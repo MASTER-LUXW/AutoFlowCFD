@@ -28,6 +28,8 @@ class BoundaryTypeError(ValueError):
     """边界条件类型的指定有误或不完整（缺类型、组名不存在、类型不受支持）。"""
 
 #: 英文关键字（整词匹配，小写）
+
+
 _WORD_KEYWORDS = {
     "VELOCITY_INLET": ("inlet", "inflow", "entrance"),
     "PRESSURE_OUTLET": ("outlet", "outflow", "exit"),

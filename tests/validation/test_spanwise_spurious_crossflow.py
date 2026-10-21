@@ -180,7 +180,7 @@ class TestExtrusionAxisPreservesSpanwiseZero:
     """**硬判据**：展向是挤出轴时，展向速度必须保持机器零。"""
 
     def test_spanwise_velocity_stays_at_machine_zero(self,
-                                                    extrusion_axis_result):
+                                                     extrusion_axis_result):
         span_vel, _ = extrusion_axis_result
         rel = span_vel / U_INF
         assert rel < _EXTRUSION_AXIS_MAX, (

@@ -121,7 +121,6 @@ class CellBlockJacobian:
         self.n_residual_evals = n_eval
         self.coupling, self.cross_coupling = (None, None) if cross is None else cross.result()
 
-
     @classmethod
     def from_blocks(cls, blocks_prism, blocks_tet, *, n_sps: int, n_var: int, cell_is_prism,
                     n_real_prism: int, n_real_tet: int, xp=np):

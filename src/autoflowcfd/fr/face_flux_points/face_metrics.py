@@ -20,7 +20,7 @@ class FaceMetrics:
     true_normal: np.ndarray            # (n_faces, n_fp, 3)
     true_area_weight: np.ndarray       # (n_faces, n_fp)
     owner_adj_row_exact: np.ndarray    # (n_faces, n_fp, 3)
-    neighbor_adj_row_exact: np.ndarray # (n_faces, n_fp, 3)
+    neighbor_adj_row_exact: np.ndarray  # (n_faces, n_fp, 3)
 
 
 def build_face_metrics(

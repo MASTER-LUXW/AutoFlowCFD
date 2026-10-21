@@ -43,7 +43,8 @@ class VTKExporter:
         q_criterion: Q 准则单元场 `(n_cells,)`（请求 'q_criterion' 时必须给出）
     """
 
-    def __init__(self, grid_data, solution: Optional[SolutionVector], turbulence: Optional[Dict[str, np.ndarray]] = None,
+    def __init__(self, grid_data, solution: Optional[SolutionVector], turbulence: Optional[Dict[str,
+                                                                                                np.ndarray]] = None,
                  q_criterion: Optional[np.ndarray] = None):
         self.grid_data = grid_data
         self.solution = solution

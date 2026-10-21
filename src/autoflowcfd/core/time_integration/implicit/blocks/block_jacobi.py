@@ -95,6 +95,7 @@ DTAU_REBUILD_RATIO = 2.0
 #: 已可忽略，按比值判据会每步白白重分解）。
 PTC_NEGLIGIBLE = 1e-2
 
+
 def _order_of(n_real_prism: int, n_real_tet: int) -> int:
     """由每单元真实自由度反解阶数（刷新判据查标定表用）。"""
     from autoflowcfd.fr.native_padding import real_sps_per_cell

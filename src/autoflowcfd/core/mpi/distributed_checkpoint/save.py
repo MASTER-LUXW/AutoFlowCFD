@@ -8,7 +8,6 @@ import pickle
 from typing import Optional
 
 
-
 from autoflowcfd.core.mpi import get_size
 
 from autoflowcfd.core.mpi.comm import run_on_root

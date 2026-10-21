@@ -107,7 +107,7 @@ class TestLocallyClippedDataCorruptsHaloDetection:
         # 在这个"局部视角"里已经无法区分。
         f1_pos = int(np.where(face_idx == 1)[0][0])
         assert clipped_neighbor[f1_pos] == -1, "跨 rank 边被坍缩成 -1（复现根因）"
-        assert clipped_is_boundary[f1_pos] == False, "但它本不是真正的物理边界面"
+        assert not clipped_is_boundary[f1_pos], "但它本不是真正的物理边界面"
 
         clipped_fc = _FaceConnectivityView(clipped_owner, clipped_neighbor, clipped_is_boundary)
         # 用局部裁剪后的数据、局部 cell_partition（全 0，因为只看得到

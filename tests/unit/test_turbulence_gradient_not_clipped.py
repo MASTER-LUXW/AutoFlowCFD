@@ -96,7 +96,8 @@ def test_single_gpu_source_receives_the_exact_log_omega_gradient():
 
     s = _solver(GPUFRSolver)
     omega = _set_log_linear_omega(s.turb_model_gpu, s.mesh.sps_coords[..., 1])
-    g = _recorded_grad_omega(s.turb_model_gpu, lambda: s._evaluate_turbulence_rates_gpu(*s._prepare_turbulence_inputs_gpu()))
+    g = _recorded_grad_omega(s.turb_model_gpu,
+                             lambda: s._evaluate_turbulence_rates_gpu(*s._prepare_turbulence_inputs_gpu()))
     _check(g, omega, _real(s))
 
 

@@ -26,18 +26,18 @@ from loguru import logger
 @click.group()
 def utils() -> None:
     """实用工具命令。
-    
+
     系统实用工具和诊断工具。
-    
+
     \b
     Examples:
         # 检查版本
         $ autoflowcfd utils version
-        
+
     \b
         # 运行诊断
         $ autoflowcfd utils doctor
-        
+
     \b
         # 性能基准测试
         $ autoflowcfd utils benchmark --grid model.nas
@@ -49,30 +49,30 @@ def utils() -> None:
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def version(json_output: bool) -> None:
     """显示版本信息。
-    
+
     显示 AutoFlowCFD 版本和构建信息。
-    
+
 
     \b
     Examples:
         # 基本版本
         $ autoflowcfd utils version
-        
+
     \b
         # 详细 JSON 输出
         $ autoflowcfd utils version --json
-    
+
     \f
 
     Args:
         json_output: 以 JSON 格式输出
     """
     from autoflowcfd import __version__
-    
+
     try:
         import platform
         import sys
-        
+
         version_info = {
             "autoflowcfd": __version__,
             "python": sys.version,
@@ -80,7 +80,7 @@ def version(json_output: bool) -> None:
             "system": platform.system(),
             "machine": platform.machine(),
         }
-        
+
         if json_output:
             click.echo(json.dumps(version_info, indent=2))
         else:
@@ -90,11 +90,10 @@ def version(json_output: bool) -> None:
             click.echo(f"Platform: {platform.system()} {platform.release()}")
             click.echo(f"Machine:  {platform.machine()}")
             click.echo(f"{'='*40}")
-    
+
     except Exception as e:
         logger.error(f"获取版本信息失败: {e}")
         raise click.ClickException(str(e))
-
 
 
 def _dependency_report():
@@ -154,7 +153,7 @@ def doctor(json_output: bool) -> None:
     \b
         # JSON 输出
         $ autoflowcfd utils doctor --json
-    
+
     \f
 
     Args:
@@ -162,12 +161,12 @@ def doctor(json_output: bool) -> None:
     """
     if not json_output:
         logger.info("正在运行环境诊断...")
-    
+
     try:
         issues = []
         warnings = []
         info = {}
-        
+
         info['python_version'] = ".".join(str(v) for v in sys.version_info[:3])
         # 依赖按 pyproject 的声明逐项核对（2026-10-20 以前清单写死：scipy、tetgen、pyvista 没查，numba、h5py 被列为
         # "可选"——求解核心依赖 numba 内核、续算依赖 h5py checkpoint，Python 门槛写的 3.8）
@@ -175,7 +174,7 @@ def doctor(json_output: bool) -> None:
         issues.extend(dep_issues)
         warnings.extend(dep_warnings)
         info['dependencies'] = versions
-        
+
         # 检查 GPU 可用性
         try:
             import cupy as cp
@@ -185,15 +184,15 @@ def doctor(json_output: bool) -> None:
         except Exception:
             info['gpu_status'] = 'not available'
             warnings.append("GPU (CUDA) 不可用。安装 CuPy 和 CUDA 工具包以获得 GPU 加速。")
-        
+
         # 检查 CPU 核心数
         import multiprocessing
         cpu_count = multiprocessing.cpu_count()
         info['cpu_cores'] = cpu_count
-        
+
         # 汇总结果
         status = "healthy" if not issues else "unhealthy"
-        
+
         result = {
             "command": "utils.doctor",
             "status": status,
@@ -201,13 +200,13 @@ def doctor(json_output: bool) -> None:
             "warnings": warnings,
             "info": info,
         }
-        
+
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
             click.echo("\n环境诊断")
             click.echo(f"{'='*60}")
-            
+
             if issues:
                 click.echo("状态: ❌ 不健康")
                 click.echo(f"\n问题 ({len(issues)}):")
@@ -215,29 +214,29 @@ def doctor(json_output: bool) -> None:
                     click.echo(f"  ❌ {issue}")
             else:
                 click.echo("状态: ✅ 健康")
-            
+
             if warnings:
                 click.echo(f"\n警告 ({len(warnings)}):")
                 for warning in warnings:
                     click.echo(f"  ⚠️  {warning}")
-            
+
             click.echo("\n系统信息:")
             click.echo(f"  Python:      {info.get('python_version', 'unknown')}")
             click.echo(f"  CPU 核心数:   {info.get('cpu_cores', 'unknown')}")
             click.echo(f"  GPU 状态:  {info.get('gpu_status', 'unknown')}")
-            
+
             if info.get('dependencies'):
                 click.echo("\n依赖（按 pyproject 声明）:")
                 for pkg, ver in info['dependencies'].items():
                     click.echo(f"  {'✓' if ver else '✗'} {pkg:<20} {ver or '未安装'}")
-            
+
             click.echo(f"{'='*60}")
-            
+
             if not issues and not warnings:
                 click.echo("\n✅ 一切看起来都很好！")
             elif not issues:
                 click.echo(f"\n⚠️  发现 {len(warnings)} 个警告。系统功能正常但可以改进。")
-    
+
     except Exception as e:
         logger.error(f"诊断失败: {e}")
         raise click.ClickException(f"诊断失败: {e}")

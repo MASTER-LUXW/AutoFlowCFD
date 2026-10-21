@@ -85,4 +85,3 @@ def _reset_to_freestream(turb) -> None:
         f[:] = v
     if hasattr(turb, 'nu_t'):
         turb.nu_t[:] = 0.0
-

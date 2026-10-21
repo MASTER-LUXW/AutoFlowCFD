@@ -26,6 +26,8 @@ from __future__ import annotations
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.core.thermo import GAMMA
+
 
 def preconditioned_acoustic_eigs(
     un: np.ndarray,
@@ -151,8 +153,6 @@ def preconditioned_sound_speed(vel_mag, a, mach_ref: float, k: float = 1.1):
 #       推导最强的数值校验（测试里用数值 Jacobian 直接比对）
 # =============================================================================
 
-from autoflowcfd.core.thermo import GAMMA
-
 
 def _precond_beta2(q2, a2, mach_ref: float, k: float):
     """预处理参数 beta^2 = clip(max(|u|^2/a^2, k*mach_ref^2), 1e-10, 1)。
@@ -269,14 +269,14 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     `core/utils/preconditioning.py` 模块末尾"伪时间预处理矩阵 Gamma"
     一节；接入点见 `step.py::mean_flow_residual`（残差侧）与
     `cfl.py::compute_local_time_step`（步长侧）——两者**必须成对启用**。
-    
+
     为什么默认开：本项目的目标工况是汽车外流场，M~0.09（33m/s vs
     声速 340m/s）。不做预处理时显式格式的 dt 被声速限制，比对流
     时间尺度小约 11 倍，收敛步数因此白付约一个数量级——这正是
     用户观察到"需要数万步"的主因之一。预处理后 dt 由预处理波速
     (|un|+c_precond) 决定，M=0.1 下放大约 5 倍。
     不动点不变（det(Gamma)=beta^2>0），收敛解与关闭时是同一个解。
-    
+
     对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用：这里的推进只是到达 R=0 的路径，
     Gamma 只改路径、不改不动点。DUAL_TIME 不启用（请求了也只打一条日志说明），显式格式的时间精确推进同样
     不启用（`time_integration/time_accurate.py::configure_time_stepping`）：

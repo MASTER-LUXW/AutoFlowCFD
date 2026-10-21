@@ -131,7 +131,8 @@ class TestFreeStreamAndStructure:
         got = solver._artificial_diffusion_residual(nu)
         for k in range(5):
             expect = compute_scalar_diffusion_residual(
-                np.ascontiguousarray(solver.state.U[..., k]), np.ascontiguousarray(nu), mesh, solver.ops, gamma_band=0.0)
+                np.ascontiguousarray(solver.state.U[...,
+                                                    k]), np.ascontiguousarray(nu), mesh, solver.ops, gamma_band=0.0)
             np.testing.assert_array_equal(got[..., k], expect, err_msg=f"分量 {k}")
 
 

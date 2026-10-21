@@ -125,7 +125,8 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
     g._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av=None: (
         (dt_cell, dt_phys_cell) if return_physical_too else dt_cell)
     for name in ("compute_turbulence_source_gpu", "_apply_turbulence_corrections_gpu", "_update_production_ramp_gpu",
-                 "_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu", "_evaluate_turbulence_rates_gpu",
+                 "_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu",
+                 "_evaluate_turbulence_rates_gpu",
                  "_turbulent_mu_t_gpu"):
         setattr(g, name, types.MethodType(getattr(_GPUSolverIOMixin, name), g))
     return g

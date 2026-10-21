@@ -104,7 +104,8 @@ def test_branches_are_continuous_at_zero():
     eps = 1e-14 * NU
     for f in (lambda x: sa_source_terms(x, NU, d, Om, 1.0, np)[0], lambda x: sa_eddy_viscosity(x, NU, np),
               lambda x: sa_diffusivity(x, np.ones(1), NU, np)):
-        assert f(np.array([eps]))[0] == pytest.approx(f(np.array([-eps]))[0], abs=1e-12 * max(1.0, abs(f(np.zeros(1))[0])))
+        assert f(np.array([eps]))[0] == pytest.approx(f(np.array([-eps]))[0], abs=1e-12 * max(1.0,
+                                                                                              abs(f(np.zeros(1))[0])))
 
 
 def test_negative_branch_diffusivity_stays_positive_and_nu_t_zero():

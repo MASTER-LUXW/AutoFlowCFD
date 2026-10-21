@@ -279,4 +279,3 @@ class TestPrismDiffMatrices:
                 f"P{order} oo={oo}: 行和残余 {err:.3e} 已超过点积求和舍入底 "
                 f"{dot_floor:.3e} —— 那时行和修正才会成为棱柱段的主导改善"
                 f"项，本文件关于『棱柱没有改善』的结论需要重测")
-

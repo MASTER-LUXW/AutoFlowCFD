@@ -55,7 +55,8 @@ def _gpu(model, treatment):
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
 
     s = GPUFRSolver(mesh=_mesh(), order=1, turb_model_name=model, time_scheme=TimeIntegrationScheme.SSP_RK3,
-                    vel_inf=30.0, wall_treatment=treatment, wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                    vel_inf=30.0, wall_treatment=treatment, wall_distance_source=channel_wall_source(LX, H, LZ),
+                    rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     return s
 
@@ -67,7 +68,8 @@ def _dist(model, treatment):
     return DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,
                                order=1, turb_model_name=model, time_scheme=TimeIntegrationScheme.SSP_RK3,
                                vel_inf=30.0, wall_treatment=treatment,
-                               wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                               wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF,
+                               mu_molecular=MU_MOLECULAR)
 
 
 def _wall_configs(solver):
@@ -171,7 +173,6 @@ def test_checkpoint_records_the_wall_treatment():
     from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
 
     assert physics_metadata(_cpu("SST", "auto"))["wall_treatment"] == "auto"
-
 
 
 def _set_shear(s, u_of_y, rho=RHO_Y):

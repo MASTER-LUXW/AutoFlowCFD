@@ -14,6 +14,7 @@ from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATM
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
+
 def distributed_mesh_load_v2(
     input_file: str,
     order: int,
@@ -61,7 +62,8 @@ def distributed_mesh_load_v2(
     n_ranks=n_ranks, root_context=root_context)`。
 
     Args:
-        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`）。root 用真实全局网格算 wall_distance/h_max/h_wn
+        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`）。root 用真实全局网格算
+            wall_distance/h_max/h_wn
             （`compute_distributed_wall_distance`/`compute_h_max_and_
             h_wn` 都只需要完整网格，root 有，只算一次，见下方调用点；
             LES/WMLES 不需要任何 root 预计算的几何量），非 root rank 从未需要这些几何

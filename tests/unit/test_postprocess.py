@@ -24,14 +24,14 @@ from autoflowcfd.postprocess import (
 
 class TestAerodynamicCoefficients(unittest.TestCase):
     """气动力系数数据类的测试"""
-    
+
     def test_default_values(self):
         """系数默认值为零"""
         coeffs = AerodynamicCoefficients()
         self.assertEqual(coeffs.Cd, 0.0)
         self.assertEqual(coeffs.Cl, 0.0)
         self.assertEqual(coeffs.Cm, 0.0)
-    
+
     def test_to_dict(self):
         """转换为字典"""
         coeffs = AerodynamicCoefficients(Cd=0.3, Cl=0.1, Cm=-0.05)
@@ -39,7 +39,7 @@ class TestAerodynamicCoefficients(unittest.TestCase):
         self.assertAlmostEqual(d['Cd'], 0.3)
         self.assertAlmostEqual(d['Cl'], 0.1)
         self.assertAlmostEqual(d['Cm'], -0.05)
-    
+
     def test_string_representation(self):
         """字符串表示包含全部系数"""
         coeffs = AerodynamicCoefficients(Cd=0.28)
@@ -50,13 +50,13 @@ class TestAerodynamicCoefficients(unittest.TestCase):
 
 class TestAerodynamicForces(unittest.TestCase):
     """气动力数据类的测试"""
-    
+
     def test_default_values(self):
         """力的默认值为零"""
         forces = AerodynamicForces()
         self.assertEqual(forces.drag_force, 0.0)
         self.assertEqual(forces.lift_force, 0.0)
-    
+
     def test_to_dict(self):
         """转换为字典"""
         forces = AerodynamicForces(drag_force=150.0, lift_force=-20.0)
@@ -82,7 +82,7 @@ class TestCoefficientCalculatorRemoved(unittest.TestCase):
 
 class TestVTKExporter(unittest.TestCase):
     """Test VTK exporter"""
-    
+
     def setUp(self):
         """准备测试夹具"""
         nodes = NodeArray(
@@ -112,49 +112,49 @@ class TestVTKExporter(unittest.TestCase):
         )
         U = np.array([[1.2, 1.2 * 30.0, 0.0, 0.0, 101325.0 / 0.4 + 0.5 * 1.2 * 30.0 ** 2]])
         self.solution = SolutionVector(data=U, n_cells=1, n_variables=5)
-    
+
     def test_export_legacy_format(self):
         """导出 legacy VTK 格式"""
         exporter = VTKExporter(self.grid_data, self.solution)
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.vtk"
             result = exporter.export(str(output_path), fields=['velocity', 'pressure'])
-            
+
             self.assertTrue(result.exists())
             self.assertEqual(result.suffix, '.vtk')
-            
+
             # Check file content
             with open(result, 'r') as f:
                 content = f.read()
                 self.assertIn("vtk DataFile Version 3.0", content)
                 self.assertIn("DATASET UNSTRUCTURED_GRID", content)
-    
+
     def test_export_with_custom_fields(self):
         """导出指定的场"""
         exporter = VTKExporter(self.grid_data, self.solution)
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.vtk"
             exporter.export(str(output_path), fields=['velocity'])
-            
+
             with open(output_path, 'r') as f:
                 content = f.read()
                 self.assertIn("VECTORS Velocity", content)
-    
+
     def test_export_invalid_field(self):
         """拒绝非法的场名"""
         exporter = VTKExporter(self.grid_data, self.solution)
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.vtk"
             with self.assertRaises(ValueError):
                 exporter.export(str(output_path), fields=['invalid_field'])
-    
+
     def test_export_invalid_format(self):
         """拒绝非法的格式"""
         exporter = VTKExporter(self.grid_data, self.solution)
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "test.vtu"
             with self.assertRaises(ValueError):
@@ -163,11 +163,11 @@ class TestVTKExporter(unittest.TestCase):
 
 class TestConvergenceAnalyzer(unittest.TestCase):
     """Test convergence analyzer"""
-    
+
     def setUp(self):
         """准备测试夹具"""
         self.analyzer = ConvergenceAnalyzer()
-    
+
     def test_add_iteration(self):
         """添加迭代数据"""
         self.analyzer.add_iteration(
@@ -177,7 +177,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
         )
         self.assertEqual(len(self.analyzer.history), 1)
         self.assertEqual(self.analyzer.history[0].iteration, 1)
-    
+
     def test_export_csv(self):
         """把收敛历史导出为 CSV"""
         # Add some iterations
@@ -187,20 +187,20 @@ class TestConvergenceAnalyzer(unittest.TestCase):
                 residuals={'continuity': 10**(-i-2)},
                 cfl=5.0 + i
             )
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "convergence.csv"
             result = self.analyzer.export_csv(str(output_path))
-            
+
             self.assertTrue(result.exists())
-            
+
             # Verify CSV content
             with open(result, 'r') as f:
                 reader = csv.reader(f)
                 rows = list(reader)
                 self.assertGreater(len(rows), 1)  # Header + data
                 self.assertIn('iteration', rows[0])
-    
+
     def test_get_summary(self):
         """取仿真摘要"""
         # Add iterations
@@ -210,7 +210,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
                 residuals={'continuity': 10**(-i-2)},
                 cfl=5.0
             )
-        
+
         summary = self.analyzer.get_summary(computation_time=100.0)
         self.assertEqual(summary.total_iterations, 10)
         self.assertEqual(summary.computation_time, 100.0)
@@ -218,12 +218,12 @@ class TestConvergenceAnalyzer(unittest.TestCase):
 
 class TestSimulationReport(unittest.TestCase):
     """仿真报告生成器的测试"""
-    
+
     def setUp(self):
         """准备测试夹具"""
         self.config = {'backend': 'cpu', 'order': 2}
         self.analyzer = ConvergenceAnalyzer()
-        
+
         # Add some iterations
         for i in range(5):
             self.analyzer.add_iteration(
@@ -231,17 +231,17 @@ class TestSimulationReport(unittest.TestCase):
                 residuals={'continuity': 10**(-i-2)},
                 cfl=5.0
             )
-        
+
         self.report = SimulationReport(self.config, self.analyzer)
-    
+
     def test_generate_report(self):
         """生成 JSON 报告"""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
             result = self.report.generate(str(output_path), computation_time=60.0)
-            
+
             self.assertTrue(result.exists())
-            
+
             # Verify JSON content
             with open(result, 'r') as f:
                 report_data = json.load(f)

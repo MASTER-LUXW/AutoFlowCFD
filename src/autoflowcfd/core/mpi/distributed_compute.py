@@ -175,6 +175,7 @@ class DistributedMeshAdapter:
             return self.local_mesh.sps_coords
         return self.local_mesh.sps_coords[self.dist_fc.compact_global_ids]
 
+
 def distributed_mesh_adapter(partition: DistributedPartition, dist_fc: DistributedFlatFaceGeometry, local_mesh,
                              ops) -> DistributedMeshAdapter:
     """本 rank 的 `DistributedMeshAdapter`，缓存在 `dist_fc` 上（同一个分区 + 面几何 + 网格状态只构造一次）。

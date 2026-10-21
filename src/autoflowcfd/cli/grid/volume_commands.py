@@ -15,8 +15,6 @@ from typing import Optional
 from loguru import logger
 
 
-
-
 def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu):
     """`--first-layer-height` 或 `--target-yplus`（二选一）-> 第一层高度（`first_layer.resolve_first_layer_height`，
     与 Python API 共用）；参数组合不对时转成命令行用法错误。"""
@@ -286,7 +284,7 @@ def import_volume(
     \b
         # 然后直接从缓存求解
         $ autoflowcfd solve steady car_volume.pkl
-    
+
     \f
 
     Args:

@@ -141,8 +141,10 @@ def _viscous_jacobian(solver, mesh, n_real, rel_step=1e-6):
     J = np.empty((len(idx), len(idx)))
     for col, (c, s, v) in enumerate(idx):
         eps = rel_step * scale[v]
-        Up = U0.copy(); Up[c, s, v] += eps
-        Um = U0.copy(); Um[c, s, v] -= eps
+        Up = U0.copy()
+        Up[c, s, v] += eps
+        Um = U0.copy()
+        Um[c, s, v] -= eps
         J[:, col] = (rhs(Up) - rhs(Um)) / (2.0 * eps)
     solver.state.U = U0
     solver.state._update_primitives()

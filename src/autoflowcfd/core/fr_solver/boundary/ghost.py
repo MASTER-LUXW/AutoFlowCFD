@@ -28,6 +28,7 @@ def _compute_inlet_fp_positions(solver, is_target_face: np.ndarray) -> Dict[int,
     xyz = xyz.reshape(faces.size, n_fp, 3)
     return {int(f): xyz[k] for k, f in enumerate(faces)}
 
+
 def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_direction: np.ndarray,
                      Q_free) -> Optional[InletSEMGhostState]:
     """一个速度入口组的合成湍流入口（`boundary/synthetic_inlet.py`）：涡核尺度、雷诺应力与来流湍流同一组量。"""

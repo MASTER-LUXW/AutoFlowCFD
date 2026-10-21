@@ -20,9 +20,9 @@ from .constants import PRANDTL_TURBULENT
 
 
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
-                                 mu_t_field=None, Pr_t: float = PRANDTL_TURBULENT,
-                                 boundary_ghost_provider=None,
-                                 flat_face_override=None, primitives=None) -> np.ndarray:
+                                mu_t_field=None, Pr_t: float = PRANDTL_TURBULENT,
+                                boundary_ghost_provider=None,
+                                flat_face_override=None, primitives=None) -> np.ndarray:
     """计算真实面耦合的 FR 粘性残差 dU/dt（物理空间，已除以 det(J)）。
 
     Args:

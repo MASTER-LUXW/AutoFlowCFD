@@ -7,6 +7,8 @@ GPU 生产函数经 `get_cupy()` 拿张量库；把它换成这个替身，同�
 在测试中通过（2026-10-15 以前显存池放在 `cuda` 下面，`array_manager.py` 的同一个错误调用一直没有暴露）。
 """
 
+import numpy as np
+
 
 class _MemoryPool:
     """`cupy.cuda.MemoryPool` 用到的查询与释放接口（替身不缓存显存块）。"""
@@ -25,8 +27,6 @@ class _MemoryPool:
 
 
 _POOL = _MemoryPool()
-
-import numpy as np
 
 
 class NumpyAsCupy:

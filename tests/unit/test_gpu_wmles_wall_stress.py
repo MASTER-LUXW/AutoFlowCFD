@@ -69,7 +69,8 @@ def test_gpu_residual_path_matches_cpu_model(monkeypatch):
 
 def test_no_physical_wall_adds_nothing(monkeypatch):
     mesh, ops, provider, U = _case(wall=False)
-    assert EquilibriumWallModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU) is None
+    assert EquilibriumWallModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U,
+                                                      MU) is None
     actual = _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, EquilibriumWallModel())
     assert not actual.any()
 

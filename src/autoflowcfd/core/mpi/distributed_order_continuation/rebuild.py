@@ -4,10 +4,6 @@ import numpy as np
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
-
-
-
-
 def _interp_state_and_turbulence_local(solver, old_order: int,
                                        target_p: int,
                                        n_local: int) -> np.ndarray:

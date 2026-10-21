@@ -137,7 +137,7 @@ class TestResumeSkipsP0Reinit:
 
 
 def _fake_solver_with_residual_sequence(current_order, target_order, resumed,
-                                         residuals, phase_initial_residual=None):
+                                        residuals, phase_initial_residual=None):
     """与 _fake_solver 类似，但 `step()` 返回一个脚本化的残差序列（每次调用
     一个值，用完后保持最后一个值）而不是常数——用来测残差下降升阶判据
     （CL-02，`residual_drop_threshold`/`min_iter_before_transition`），而不只是
@@ -228,7 +228,7 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
             "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
         ):
             run_order_continuation(solver, max_iter=300, dt=1e-3, tol=1e-6,
-                                    checkpoint_callback=_count_p0_iters)
+                                   checkpoint_callback=_count_p0_iters)
 
         assert p0_iters["n"] == 100  # 用满 phase_max_iter 预算，判据从未触发
         assert "没有阶段起始残差记录" in capsys.readouterr().out
@@ -258,7 +258,7 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
             "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
         ):
             run_order_continuation(solver, max_iter=6, dt=1e-3, tol=1e-6,
-                                    checkpoint_callback=_checkpoint_cb)
+                                   checkpoint_callback=_checkpoint_cb)
 
         # 前 3 个记录值都是 P0 的基准（50.0，在 P0 自己的第一步取得）；爬坡到
         # P1 之后基准为该阶段重新取得（不是 P0 遗留的）。

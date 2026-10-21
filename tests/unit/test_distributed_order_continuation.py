@@ -147,7 +147,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
     完整的 `turb_model`。"""
 
     def _make_solver_with_turb(self, mesh, ops, k_value, omega_value,
-                                k_max=555.44, omega_max=1e6):
+                               k_max=555.44, omega_max=1e6):
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
 
         solver = DistributedFRSolver(
@@ -254,7 +254,6 @@ class TestDistributedOrderContinuationWithTurbulence:
         assert np.isfinite(result.final_residual)
         assert np.all(np.isfinite(solver.turb_model.k_field))
         assert np.all(np.isfinite(solver.turb_model.omega_field))
-
 
     def test_sa_order_continuation_reshapes_and_repins_wall_points(self, mesh_p2_and_ops):
         """SA-neg：nu_tilde 随阶数切换重塑形状；每次换阶由来源按新解点重查壁距，经

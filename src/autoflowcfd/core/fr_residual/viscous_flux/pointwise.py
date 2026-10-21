@@ -4,8 +4,6 @@
 import numpy as np
 
 
-
-
 from autoflowcfd.core.thermo import GAMMA, R_AIR
 
 from .constants import PRANDTL_TURBULENT

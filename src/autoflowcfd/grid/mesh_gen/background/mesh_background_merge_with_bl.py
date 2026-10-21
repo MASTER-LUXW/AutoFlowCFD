@@ -204,7 +204,8 @@ def _build_merged_mesh_with_bl(
         background_points = generate_core_background_points(
             core_plc_points, core_plc_faces, target_edge_length
         )
-        logger.info(f"TetGen constraint: target_edge_length={target_edge_length:.4f}m, volume_cap={volume_cap_fraction}")
+        logger.info(f"TetGen constraint: target_edge_length={target_edge_length:.4f}m, "
+                    f"volume_cap={volume_cap_fraction}")
 
     def _fill(extra_points):
         return fill_core_volume(

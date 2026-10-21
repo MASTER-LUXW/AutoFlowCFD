@@ -387,5 +387,3 @@ class TestComputeOmegaWallTarget:
 
         assert not np.any(has_value)
         np.testing.assert_array_equal(omega_wall_value_face, 0.0)
-
-

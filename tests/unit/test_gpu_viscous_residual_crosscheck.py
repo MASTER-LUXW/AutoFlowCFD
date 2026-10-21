@@ -264,5 +264,6 @@ class TestGpuViscousResidualMatchesCpu:
         scale = max(np.max(np.abs(r_cpu)), 1.0)
         assert max_diff / scale < 1e-6
 
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

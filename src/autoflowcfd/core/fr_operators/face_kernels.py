@@ -28,8 +28,6 @@ import numpy as np
 from .face_points import p0_flux_points
 
 
-
-
 @dataclass
 class FlatFaceGeometry:
     """`mesh.face_flux_points` + `mesh.face_connectivity` 的展平数组表示。
@@ -216,7 +214,6 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     # 原生面编码（四面体 [6,10)、棱柱 [10,15)），面算子索引据此给出。
     owner_cube_face = fc.owner_cube_face.astype(np.int64)
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
-
 
     from autoflowcfd.fr.face_flux_points.merge import _KernelFaceData
     if not isinstance(ffp_data, _KernelFaceData):

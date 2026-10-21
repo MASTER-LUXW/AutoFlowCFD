@@ -10,7 +10,9 @@ AutoFlowCFD V2.0 - P0 有限体积无粘残差 numba 并行 kernel
 算法与原 inviscid_p0.py 完全一致：
 - 每个面：AUSM+up 黎曼求解 → 面积加权通量 → scatter-add 到 owner/neighbor
 - 边界面：ghost_provider 在 kernel 外部预计算为 Q_ghost 数组
-- 按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
+- 按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，
+  `fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程
+  缓冲与归约。与 P>=1 界面核同一套颜色分组。
 
 验证：与原 Python 路径逐位对比（残差 L∞ 差 < 1e-14，纯浮点重排误差）。
 """
@@ -41,7 +43,9 @@ def _p0_inviscid_kernel(
 
     对颜色组里的每个面执行 AUSM+up 黎曼求解，把面积加权通量累加到 owner/neighbor 单元的残差。
 
-    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
+    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，
+    `fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程
+    缓冲与归约。与 P>=1 界面核同一套颜色分组。
     """
     for fi in prange(face_indices.shape[0]):
         f = face_indices[fi]
@@ -99,4 +103,3 @@ def _p0_inviscid_kernel(
             residual[nc, 2] += flux2 * inv_vol_n
             residual[nc, 3] += flux3 * inv_vol_n
             residual[nc, 4] += flux4 * inv_vol_n
-

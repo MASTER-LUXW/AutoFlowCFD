@@ -35,7 +35,6 @@ from numba import njit, prange
 from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative
 
 
-
 @njit(cache=True, parallel=True)
 def extrapolate_scalar_pair_kernel(
     scalar_sps,

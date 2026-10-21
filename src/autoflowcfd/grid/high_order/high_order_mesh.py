@@ -248,6 +248,7 @@ class HighOrderMesh:
         from .high_order_mesh_order import set_order as _set_order
 
         _set_order(self, order)
+
     def verify_gcl(self, tolerance: float = 1e-8) -> bool:
         """几何守恒律自检——薄委托到 `gcl_check.verify_gcl`
         （2026-09-19 拆出，见该模块文档）。"""

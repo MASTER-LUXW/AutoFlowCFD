@@ -48,7 +48,8 @@ def _elements(zone, name: str, etype: str, start: int, conn: np.ndarray) -> int:
     sec = _node(zone, name, "Elements_t", "I4", np.array([_ELEMENT_TYPE[etype], 0], dtype=np.int32))
     end = start + len(conn) - 1
     _node(sec, "ElementRange", "IndexRange_t", "I4", np.array([start, end], dtype=np.int32))
-    _node(sec, "ElementConnectivity", "DataArray_t", "I4", (np.asarray(conn, dtype=np.int64) + 1).astype(np.int32).ravel())
+    _node(sec, "ElementConnectivity", "DataArray_t", "I4", (np.asarray(conn,
+                                                                       dtype=np.int64) + 1).astype(np.int32).ravel())
     return end + 1
 
 
@@ -85,7 +86,8 @@ def write_cgns(mesh: ConvertibleMesh, path: str) -> None:
         _node(zone, "ZoneType", "ZoneType_t", "C1", _chars("Unstructured"))
         coords = _node(zone, "GridCoordinates", "GridCoordinates_t", "MT")
         for k, axis in enumerate("XYZ"):
-            _node(coords, f"Coordinate{axis}", "DataArray_t", "R8", np.ascontiguousarray(mesh.nodes[:, k], dtype=np.float64))
+            _node(coords, f"Coordinate{axis}", "DataArray_t", "R8", np.ascontiguousarray(mesh.nodes[:, k],
+                                                                                         dtype=np.float64))
 
         taken = set()
         start = 1

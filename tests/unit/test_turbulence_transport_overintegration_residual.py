@@ -97,7 +97,8 @@ class TestFreestreamPreservation:
         n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
         phi = np.full((n_cells, n_sps), 0.17)
         rho = np.full((n_cells, n_sps), 1.225)
-        vel = np.zeros((n_cells, n_sps, 3)); vel[..., 0] = 30.0
+        vel = np.zeros((n_cells, n_sps, 3))
+        vel[..., 0] = 30.0
         oi = get_overintegration_context(mesh, ops)
         det = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
         div = _scalar_convection_volume_overintegrated(

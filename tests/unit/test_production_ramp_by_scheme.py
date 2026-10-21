@@ -62,7 +62,8 @@ def test_cpu_distributed_traditional(scheme):
     s = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
         n_ranks=1, order=1, turb_model_name="SA", time_scheme=scheme,
-        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF,
+        mu_molecular=MU_MOLECULAR)
     _assert_fresh_counters(s, scheme)
     _assert_first_step_factor(s, s.turb_model, scheme)
 
@@ -98,7 +99,8 @@ def test_cpu_distributed_explicit_ramp_completion_reaches_the_solver():
     s = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
         n_ranks=1, order=1, turb_model_name="SA", time_scheme=RK3,
-        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+        wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF,
+        mu_molecular=MU_MOLECULAR)
     s._turb_production_ramp_steps = 2
     for _ in range(3):
         s.step(1e-6)
@@ -174,7 +176,8 @@ def test_distributed_checkpoint_carries_the_ramp_progress(tmp_path):
         return DistributedFRSolver(
             mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
             n_ranks=1, order=1, turb_model_name="SA", time_scheme=RK3,
-            wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+            wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, vel_inf=VEL_INF, p_inf=P_INF,
+            mu_molecular=MU_MOLECULAR)
     a = _dist()
     for _ in range(3):
         a.step(1e-6)

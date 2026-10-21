@@ -166,8 +166,6 @@ class GpuCoupledBackend:
         turb.rates(commit=True)
 
 
-
-
 def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data,
                             des=None):
     """GPU 模型的线性化部件 `(dirichlet_faces, dirichlet_values, pointwise, strong_rows, wall_target_k_slope)`

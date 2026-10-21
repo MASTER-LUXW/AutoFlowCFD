@@ -42,7 +42,8 @@ def _cpu(turb):
 
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
 
-    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=10.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=10.0,
+                 rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     if turb != "NONE":
         apply_wall_distance_source(s, channel_wall_source(0.4, 0.1, 0.08))
     return s
@@ -68,7 +69,8 @@ def test_single_gpu_matches_cpu(turb):
 
     gpu = GPUFRSolver(mesh=_mesh(), order=1, turb_model_name=turb, vel_inf=10.0,
                       time_scheme=TimeIntegrationScheme.SSP_RK3,
-                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF,
+                      mu_molecular=MU_MOLECULAR)
     np.testing.assert_allclose(_run(gpu), _run(_cpu(turb)), rtol=1e-8)
 
 
@@ -80,7 +82,8 @@ def test_cpu_distributed_matches_cpu(turb):
     mesh = _mesh()
     dist = DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,
                                order=1, turb_model_name=turb, time_scheme=TimeIntegrationScheme.SSP_RK3,
-                               vel_inf=10.0, wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                               vel_inf=10.0, wall_distance_source=channel_wall_source(0.4, 0.1, 0.08),
+                               rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     np.testing.assert_allclose(_run(dist), _run(_cpu(turb)), rtol=1e-8)
 
 

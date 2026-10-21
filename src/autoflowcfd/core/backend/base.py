@@ -69,5 +69,3 @@ class SolutionVector:
             V_sq = (self.data[:, 1]**2 + self.data[:, 2]**2 + self.data[:, 3]**2) / rho**2
             return (self.GAMMA - 1.0) * (rhoE - 0.5 * rho * V_sq)
         return np.array([])
-
-

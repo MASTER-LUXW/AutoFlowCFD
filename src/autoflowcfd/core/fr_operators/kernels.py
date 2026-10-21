@@ -7,6 +7,7 @@ from numba import njit
 
 from autoflowcfd.core.thermo import GAMMA
 
+
 @njit(cache=True, inline='always')
 def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
                          mach_ref: float) -> np.ndarray:
@@ -103,7 +104,6 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     M_L = unL / max(a_half, 1e-10)
     M_R = unR / max(a_half, 1e-10)
 
-
     # === 3. AUSM+ 质量通量分裂 (van Leer 多项式分裂函数) ===
     # 标准形式（Liou 1996, AUSM+）: M+(M)+M-(M) ≡ M（相容性要求：qL=qR时
     # mass_flux 必须精确退化为 rho*u_n）。此前版本 M_minus 的亚声速分支
@@ -111,6 +111,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     # M_plus(M)+M_minus(M) = 0.5*(M^2+1) 而不是 M —— 通量在 qL=qR
     # 时不等于精确物理通量，已用数值一致性测试验证发现并在此修复
     # （见 tests/unit/test_ausm_up_flux.py::TestAusmUpFluxIdentities::test_consistency）。
+
     def M_plus(M):
         """M+ 函数"""
         if abs(M) >= 1:

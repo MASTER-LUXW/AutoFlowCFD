@@ -147,7 +147,8 @@ class _PolyField:
         h = h if h is not None else 1e-4 * scale
         out = np.zeros(X.shape[0])
         for d in range(3):
-            e = np.zeros(3); e[d] = h
+            e = np.zeros(3)
+            e[d] = h
             f_p2 = self.flux(X + 2 * e)[:, d]
             f_p1 = self.flux(X + e)[:, d]
             f_m1 = self.flux(X - e)[:, d]

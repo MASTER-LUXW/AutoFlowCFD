@@ -44,6 +44,7 @@ def _get_ms_numba_kernel():
         _build_ms_interp_parallel = build_ms_interp_parallel
     return _build_ms_interp_parallel
 
+
 def _merge_single_cell_halves(faces, mixed, pn_cell, sec_cell, mask, interp, extra_cells, extra_mats, src1_idx):
     """多源面里两半来自同一个单元的（共形棱柱-棱柱四边形面，两条三角形子面的跨单元邻居是同一个棱柱）：
     次源矩阵（只在另一半的通量点行非零）并进主源矩阵（只在本半的行非零）、改为单一来源；次源表只保留

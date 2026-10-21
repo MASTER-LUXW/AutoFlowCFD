@@ -18,7 +18,6 @@ from autoflowcfd.core.turbulence.sst.bounds import (
 )
 
 
-
 def boundary_groups(provider):
     """边界幽灵态提供者的逐面边界组编码与组配置 `(group_code, code_to_config, default_config)`。
 

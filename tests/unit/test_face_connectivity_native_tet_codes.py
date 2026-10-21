@@ -43,7 +43,8 @@ def test_codes_match_the_per_face_set_reference_on_a_mixed_mesh():
         else:
             assert fc.neighbor_cube_face[f] == -1
     lo, hi = NATIVE_PRISM_FACE_CODE_RANGE
-    assert np.all((fc.owner_cube_face[fc.owner_cell < n_prism] >= lo) & (fc.owner_cube_face[fc.owner_cell < n_prism] < hi))
+    prism_codes = fc.owner_cube_face[fc.owner_cell < n_prism]
+    assert np.all((prism_codes >= lo) & (prism_codes < hi))
     tet_codes = {CUBE_FACE_CODES[f"tet_native_v{k}"] for k in range(4)}
     assert set(fc.owner_cube_face[fc.owner_cell >= n_prism].tolist()) <= tet_codes
 
@@ -56,4 +57,3 @@ def test_shared_tet_pair_gets_native_codes_directly():
     # 共享面 (1,2,3)：单元 0 排除顶点 0、单元 1 排除顶点 3
     assert {int(fc.owner_cube_face[shared[0]]), int(fc.neighbor_cube_face[shared[0]])} == \
         {CUBE_FACE_CODES["tet_native_v0"], CUBE_FACE_CODES["tet_native_v3"]}
-

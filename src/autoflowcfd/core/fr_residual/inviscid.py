@@ -215,7 +215,8 @@ def compute_inviscid_residual_fr(
 
     if mesh.n_points_1d == 1:
         # P0（Order Continuation 最低阶）：单个解点的度量无法代表单元各面各自的真实法向，走独立的
-        # 真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0 文档。面着色取自与 P>=1 同一份面几何（CPU 分布式为 flat_face_override）。
+        # 真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0 文档。面着色取自与 P>=1
+        # 同一份面几何（CPU 分布式为 flat_face_override）。
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from .inviscid_p0 import compute_inviscid_residual_fv_p0
 

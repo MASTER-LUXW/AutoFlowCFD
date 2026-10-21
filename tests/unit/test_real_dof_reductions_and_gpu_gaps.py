@@ -220,4 +220,3 @@ class TestDeadCodeRemoved:
         """
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         assert not hasattr(DistributedFRSolver, "compute_global_min_dt")
-

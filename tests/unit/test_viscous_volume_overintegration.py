@@ -170,7 +170,10 @@ def _overint_viscous_div(Q, gv, gT, mut, mesh, ops):
         if hi <= lo:
             continue
         nb = hi - lo
-        interp = lambda a: np.einsum("qs,cs...->cq...", c2f, a)
+
+        def interp(a, c2f=c2f):
+            return np.einsum("qs,cs...->cq...", c2f, a)
+
         G_phys = viscous_physical_flux_batch(
             np.ascontiguousarray(interp(Q[lo:hi]).reshape(-1, 5)),
             np.ascontiguousarray(interp(gv[lo:hi]).reshape(-1, 3, 3)),

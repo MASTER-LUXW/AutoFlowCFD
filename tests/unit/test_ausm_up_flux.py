@@ -27,7 +27,6 @@ MACH_REF = U_INF / A_INF
 Q_INF = 0.5 * RHO_INF * U_INF ** 2
 
 
-
 def _flux(qL, qR, n, mach_ref):
     """按 njit 逐通量点函数的契约调用：一维连续数组。"""
     return np.asarray(compute_ausm_up_flux(
@@ -311,7 +310,6 @@ class TestEveryImplementationUsesTheSameP5:
     def test_cupy_batch_version_matches_cpu_kernel(self, monkeypatch):
         import autoflowcfd.core.gpu.residual.gpu_inviscid.flux as gflux
         from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
 
         patch_module_get_cupy(monkeypatch, gflux, NumpyAsCupy())
         rng = np.random.default_rng(99)

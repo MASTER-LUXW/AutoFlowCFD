@@ -96,7 +96,8 @@ def test_tet_owned_wall_faces_integrate(order):
     fc = mesh.face_connectivity
     assert np.any(fc.is_boundary & (fc.owner_cell >= mesh.n_prism_cells))
     mesh.boundary_bc_types = {"farfield": "WALL"}
-    solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=MU, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3)
+    solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=MU, turb_model_name="SST",
+                      time_scheme=TimeIntegrationScheme.SSP_RK3)
     Q = np.asarray(solver.state.Q).copy()
     Q[..., 1:4] = 0.0
     Q[..., 4] = P + 500.0

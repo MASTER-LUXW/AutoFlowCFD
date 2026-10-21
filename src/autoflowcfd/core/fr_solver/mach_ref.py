@@ -43,7 +43,7 @@ def resolve_mach_ref(rho_inf: float, vel_inf: float, p_inf: float) -> float:
     参考马赫数，从真实自由来流条件算一次，不再各处各用一套（2026-
     08-14 那次失稳正是因为 CFL 和通量各自假设了不一致的参考值，
     见 cfl.py 模块文档"已撤销"一节）。
-    
+
     物理下限钳制（2026-08-26，P2 发散专项修复）：真实来流马赫数低于
     _MACH_REF_FLOOR 时钳制到下限。AUSM+up 的 Mp 压力扩散项正比于
     (pR-pL)/(fa*a_half_p²)，其中 fa≈2*mach_ref（滞止面）、

@@ -7,7 +7,6 @@
 """
 
 
-
 from loguru import logger
 
 from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
@@ -26,7 +25,6 @@ class _SolverSetupMixin:
         self.order = order
         self.artificial_viscosity_enabled = artificial_viscosity_enabled
         self.artificial_viscosity_alpha = artificial_viscosity_alpha
-        
 
     def _setup_initial_state(self, initial_state, n_cells, n_sps, turb_model_name,
                              rho_inf, vel_inf, p_inf, aoa_deg, aos_deg):
@@ -53,7 +51,6 @@ class _SolverSetupMixin:
             self.state.initialize_uniform(
                 rho=rho_inf, u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
                 p=p_inf)
-        
 
     def _setup_operators(self, order):
         """FR 算子（只依赖阶数）。"""
@@ -72,7 +69,6 @@ class _SolverSetupMixin:
         # 粘性的，会污染同一进程里后续求解器的几何/算子构造（真实 bug，
         # 见 `blas_threads_limited` 文档记录的 Couette 连跑失败）。
         # 限制只在求解循环内生效，见 `solve()` 里的 `blas_threads_limited`。
-        
 
     def _setup_physics_and_boundary(self, turb_model_name, mu_molecular, rho_inf, vel_inf,
                                     p_inf, aoa_deg, aos_deg, turbulence_intensity,
@@ -146,7 +142,7 @@ class _SolverSetupMixin:
         self.sgs_model = None
 
         self._init_turbulence_models(n_cells, n_sps)
-        
+
         # 6. 初始化时间积分器 (S-05)
         self.time_integrator = TimeIntegrator(scheme=time_scheme, dual_time_steps=dual_time_inner_iter)
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
@@ -194,7 +190,7 @@ class _SolverSetupMixin:
         from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
 
         reset_newton_state(self)
-        
+
         # 7. 壁面距离场（输运湍流模型用，`turbulence/registry.py::WALL_DISTANCE_MODELS`）
         self.wall_distance = None
 

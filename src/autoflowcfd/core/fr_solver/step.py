@@ -335,8 +335,6 @@ def step(solver, dt: float) -> float:
         raise
 
 
-
 def _current_order(solver) -> int:
     order = getattr(solver, "current_order", None)
     return int(order if order is not None else solver.order)
-

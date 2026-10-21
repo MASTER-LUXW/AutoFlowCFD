@@ -13,25 +13,25 @@ class TestNASParser:
         # Create a dummy .nas file
         nas_file = tmp_path / "test.nas"
         nas_file.write_text("$ Test NAS file\n")
-        
+
         parser = NASParser(str(nas_file))
         assert parser.file_path == nas_file
         assert parser.encoding == 'UTF-8'
-    
+
     def test_parser_file_not_found(self) -> None:
         """文件不存在抛 FileNotFoundError。"""
         with pytest.raises(FileNotFoundError):
             NASParser("nonexistent_file.nas")
-    
+
     def test_parser_invalid_extension_warning(self, tmp_path) -> None:
         """非标准扩展名给出警告。"""
         txt_file = tmp_path / "test.txt"
         txt_file.write_text("$ Test file\n")
-        
+
         # Should not raise, just warn
         parser = NASParser(str(txt_file))
         assert parser is not None
-    
+
     def test_detect_version_v24(self, tmp_path) -> None:
         """检出 v24 格式的版本。"""
         nas_content = """$ ANSA V24 NASTRAN FILE
@@ -42,11 +42,11 @@ CTRIA3,1,1,1,2,3
 """
         nas_file = tmp_path / "test_v24.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
         version = parser._detect_version()
         assert version == "v24"
-    
+
     def test_parse_simple_mesh(self, tmp_path) -> None:
         """解析简单的三角形网格。"""
         nas_content = """$ Simple triangular mesh
@@ -59,24 +59,24 @@ CTRIA3,2,1,2,4,3
 """
         nas_file = tmp_path / "simple_mesh.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
         grid = parser.parse()
-        
+
         assert grid.node_count == 4
         assert grid.cell_count == 2
         assert grid.metadata.file_format == "v24"
-    
+
     def test_parse_empty_file(self, tmp_path) -> None:
         """解析空的 NAS 文件。"""
         nas_file = tmp_path / "empty.nas"
         nas_file.write_text("")
-        
+
         parser = NASParser(str(nas_file))
-        
+
         with pytest.raises(NASParseError, match="No nodes found"):
             parser.parse()
-    
+
     def test_parse_no_cells(self, tmp_path) -> None:
         """解析只有节点没有单元的文件。"""
         nas_content = """GRID,1,,0.0,0.0,0.0
@@ -85,12 +85,12 @@ GRID,3,,0.0,1.0,0.0
 """
         nas_file = tmp_path / "no_cells.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
-        
+
         with pytest.raises(NASParseError, match="No cells found"):
             parser.parse()
-    
+
     def test_parse_with_comments(self, tmp_path) -> None:
         """解析带注释行的文件。"""
         nas_content = """$ This is a comment
@@ -104,13 +104,13 @@ CTRIA3,1,1,1,2,3
 """
         nas_file = tmp_path / "with_comments.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
         grid = parser.parse()
-        
+
         assert grid.node_count == 3
         assert grid.cell_count == 1
-    
+
     def test_parse_negative_coordinates(self, tmp_path) -> None:
         """解析负坐标的节点。"""
         nas_content = """GRID,1,,-1.0,-2.0,-3.0
@@ -176,7 +176,7 @@ CTRIA3,1,1,1,2,3
     # test_get_file_info 已删除：它断言的 NASParser.get_file_info() 在
     # parser_core.py 里根本不存在（在 src/ 下 grep 确认过），也没有任何曾经
     # 存在过的迹象——不是需要修复的回归，而是针对一个从未实现的功能的过时测试。
-    
+
     def test_large_mesh_parsing(self, tmp_path) -> None:
         """解析较大的网格（性能测试）。"""
         # 生成 1000 个节点、约 2000 个单元的网格
@@ -189,7 +189,7 @@ CTRIA3,1,1,1,2,3
                 z = 0.0
                 lines.append(f"GRID,{node_id},,{x:.6f},{y:.6f},{z:.6f}")
                 node_id += 1
-        
+
         cell_id = 1
         for i in range(99):
             for j in range(9):
@@ -201,17 +201,17 @@ CTRIA3,1,1,1,2,3
                 cell_id += 1
                 lines.append(f"CTRIA3,{cell_id},1,{n2},{n4},{n3}")
                 cell_id += 1
-        
+
         nas_content = "\n".join(lines)
         nas_file = tmp_path / "large_mesh.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
         grid = parser.parse()
-        
+
         assert grid.node_count == 1000
         assert grid.cell_count > 0
-    
+
     def test_malformed_grid_card(self, tmp_path) -> None:
         """处理格式错误的 GRID 卡片。"""
         nas_content = """GRID,1,,0.0,0.0,0.0
@@ -222,13 +222,13 @@ CTRIA3,1,1,1,2,3
 """
         nas_file = tmp_path / "malformed.nas"
         nas_file.write_text(nas_content)
-        
+
         # 无法解析的 GRID 卡报错并给出行号（I-131：此前跳过非法行继续）
         from autoflowcfd.grid.nas_io.nas_parser_exceptions import NASParseError
 
         with pytest.raises(NASParseError, match="第 2 行"):
             NASParser(str(nas_file)).parse()
-    
+
     def test_node_indexing_zero_based(self, tmp_path) -> None:
         """Nastran 从 1 开始的索引被转换成从 0 开始。"""
         nas_content = """GRID,1,,0.0,0.0,0.0
@@ -238,10 +238,10 @@ CTRIA3,1,1,1,2,3
 """
         nas_file = tmp_path / "indexing_test.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
         grid = parser.parse()
-        
+
         # Connectivity should use 0-based indices
         connectivity = grid.cells.connectivity[0]
         assert connectivity[0] == 0  # Node 1 in Nastran -> index 0

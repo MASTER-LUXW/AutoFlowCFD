@@ -167,7 +167,8 @@ class TestMultiGpuDistributedRkUsesSharedIntegrator:
         norm = gd_mod.MultiGPUDistributedSolver.step(stub, dt=0.0)
 
         np.testing.assert_allclose(stub.U_gpu.reshape(-1, n_vars), U3, rtol=1e-13, atol=0.0)
-        assert norm == pytest.approx(float(np.linalg.norm(5.0 * (U0 - T))), rel=1e-14),             "残差范数必须是 stage 0 的物理残差 R(U^n)"
+        assert norm == pytest.approx(float(np.linalg.norm(5.0 * (U0 - T))),
+                                     rel=1e-14),             "残差范数必须是 stage 0 的物理残差 R(U^n)"
         assert calls["n"] == 3, "正性回调必须在每个 RK stage 都被调用"
 
 

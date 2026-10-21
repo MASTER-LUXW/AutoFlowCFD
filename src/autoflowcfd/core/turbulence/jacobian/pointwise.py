@@ -114,5 +114,3 @@ def turbulence_pointwise_partials(evaluate, u, g, scales):
 def _array_module(a):
     from autoflowcfd.core.utils.array_module import array_module
     return array_module(a)
-
-

@@ -39,6 +39,7 @@ from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIE
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 
+
 class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _MultiGPUResidualMixin,
                                 _MultiGPUTimeStepMixin, _GPUDistributedInitMixin, DistributedSolveLoopMixin):
     """多 GPU + MPI 分布式求解器。

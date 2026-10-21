@@ -221,9 +221,8 @@ def step_mean_flow_newton(
             "本步已缩 %d 档）——dtau 缩到下限仍拿不到被接受的步，那不再是步长问题"
             "（dtau->0 即显式前向 Euler、必然被接受），检查残差求值在当前状态上是否"
             "已经非物理" % (info["gmres_info"], info["gmres_iters"], info["dtau_scale"],
-                           info["n_dtau_cuts"]))
+                       info["n_dtau_cuts"]))
     elif info["n_dtau_cuts"] > 0:
         logger.info("Newton 步缩 %d 档 dtau 后被接受（dtau_scale=%.3e, theta=%.3f）"
                     % (info["n_dtau_cuts"], info["dtau_scale"], info["theta"]))
     return u_new_mf, info
-

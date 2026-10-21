@@ -59,15 +59,13 @@ class MeshQualityValidator:
             'bl_max_aspect_ratio': 50.0,     # BL cells: expected to be stretched
             'core_max_aspect_ratio': 10.0,   # core-fill cells: should be close to isotropic
             'max_skewness': 0.95,            # radius-ratio based (Fluent-equivalent severity)
-            'max_orthogonality_angle': 70.0, # 角度；与 OpenFOAM 对齐（Green-Gauss 对非正交性
-                                              # 比表面法向修正格式更敏感，因此这里刻意比
-                                              # Fluent 宽松的 orthogonal-quality 下限更严格）
-            'max_adjacent_volume_ratio': 5.0,  # 与 STAR-CCM+ 的 "Volume Change" 指导对齐；
-                                                # 这个才是真正控制 Green-Gauss 的 1/V
-                                                # 梯度放大条件数的因素
-            'max_overlapping_cells': 0,        # 任何物理重叠的单元对都不合格——
-                                                # 见 mesh_overlap_check.py；“接近但未重叠”
-                                                # 仅供参考，不作为关卡
+            # 角度；与 OpenFOAM 对齐（Green-Gauss 对非正交性比表面法向修正格式更敏感，因此这里刻意比
+            # Fluent 宽松的 orthogonal-quality 下限更严格）
+            'max_orthogonality_angle': 70.0,
+            # 与 STAR-CCM+ 的 "Volume Change" 指导对齐；这个才是真正控制 Green-Gauss 的 1/V 梯度放大条件数的因素
+            'max_adjacent_volume_ratio': 5.0,
+            # 任何物理重叠的单元对都不合格——见 mesh_overlap_check.py；"接近但未重叠"仅供参考，不作为关卡
+            'max_overlapping_cells': 0,
         }
 
         logger.info("MeshQualityValidator initialized with default thresholds")
@@ -373,4 +371,3 @@ class MeshQualityValidator:
         report.n_close_cell_pairs = overlap_report.n_close_pairs
         report.overlap_min_gap = overlap_report.min_gap_found
         report.overlapping_cell_ids = overlap_report.overlapping_cell_ids
-

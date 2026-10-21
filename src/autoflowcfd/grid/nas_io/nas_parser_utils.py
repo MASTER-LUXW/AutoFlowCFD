@@ -11,13 +11,13 @@ def parse_nastran_float(value_str: str) -> float:
 
     处理 Nastran 的紧凑科学计数法，指数直接附着，
     没有 'e' 或 'E'。
-    
+
     Examples:
         "5.635257-127" -> 5.635257e-127
         "-7.5-14" -> -7.5e-14
         "1.23+4" -> 1.23e+4
         "100.5" -> 100.5
-    
+
     Args:
         value_str: 数字的字符串表示
 

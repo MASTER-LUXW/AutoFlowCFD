@@ -246,7 +246,7 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
 
         def _fake_builder(cls, package, n_ranks, device_id=None, rank=None, root_context=None):
             captured.update(cls=cls, package=package, n_ranks=n_ranks,
-                             device_id=device_id, rank=rank, root_context=root_context)
+                            device_id=device_id, rank=rank, root_context=root_context)
             return "SENTINEL"
 
         patch_pkg_attr(monkeypatch, gdfd_mod, "build_multi_gpu_solver_from_fully_distributed_package", _fake_builder)
@@ -290,12 +290,12 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
                 self.beta1 = 0.075
 
         monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
-        patch_pkg_attr(monkeypatch, 
-            scalar_transport_mod, "compute_turbulence_face_masks_gpu",
-            lambda compact_mesh_stub, provider: (
-                np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool),
-                np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool)),
-        )
+
+        def _no_face_masks(compact_mesh_stub, provider):
+            n = compact_mesh_stub.face_connectivity.n_faces
+            return np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+
+        patch_pkg_attr(monkeypatch, scalar_transport_mod, "compute_turbulence_face_masks_gpu", _no_face_masks)
 
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
         from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
@@ -357,8 +357,8 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'cfl_start': None, 'cfl_max': None, 'cfl_min': None, 'time_accurate': False, 'adaptive_cfl': True,
             'global_cell_colors': None, 'global_cell_colors_d2': None,
             'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,
-        'wall_treatment': 'resolved',
-        'low_mach_precond': True,
+            'wall_treatment': 'resolved',
+            'low_mach_precond': True,
         }
 
     def test_p0_to_p1_upgrade_interpolates_uniform_field_exactly(self, mesh_and_ops, gpu_shim):

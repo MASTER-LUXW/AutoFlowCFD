@@ -152,4 +152,3 @@ def test_simplex3d_grad_matches_finite_difference_away_from_degenerate_axis():
             assert np.all(np.isfinite(num_da))
             assert np.all(np.isfinite(num_db))
             assert np.all(np.isfinite(num_dc))
-

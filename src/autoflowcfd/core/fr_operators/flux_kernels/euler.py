@@ -71,5 +71,3 @@ def euler_physical_flux_batch(Q: np.ndarray) -> np.ndarray:
     for i in prange(n):
         F[i] = euler_physical_flux_point(Q[i])
     return F
-
-

@@ -40,8 +40,8 @@ def _write(tmp_path, U_sps):
 
     mgr = CheckpointManager(output_dir=str(tmp_path), quiet=True)
     # 与生产写入端一致：`conserved` 是单元平均 (n_cells, n_vars)，逐解点状态在 `U_sps`
-    path = mgr.save(solution=U_sps.mean(axis=1), extra_fields={"U_sps": U_sps}, history={"iterations": [1], "residuals": {"rho": [1.0]},
-                                                "coefficients": {}, "cfl_history": [0.03]}, iteration=3)
+    history = {"iterations": [1], "residuals": {"rho": [1.0]}, "coefficients": {}, "cfl_history": [0.03]}
+    path = mgr.save(solution=U_sps.mean(axis=1), extra_fields={"U_sps": U_sps}, history=history, iteration=3)
     return mgr, path
 
 

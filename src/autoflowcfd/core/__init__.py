@@ -40,7 +40,6 @@ from .turbulence.sgs import WALEModel
 from .backend import get_available_backends, list_available_backends, SolutionVector
 
 
-
 __all__ = [
     'FRState',
     'SolverResult',

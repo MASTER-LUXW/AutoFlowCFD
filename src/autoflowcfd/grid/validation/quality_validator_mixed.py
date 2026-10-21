@@ -83,9 +83,8 @@ def validate_mixed_mesh(
     # --- Volumes ---
     prism_vol = _qm.compute_prism_volumes(nodes, prism_conn)
     tet_vol_signed = _qm.compute_tetrahedron_volumes(nodes, tet_conn)
-    negative_mask = tet_vol_signed < 0  # 棱柱体积按构造为无符号——
-                                        # 见 compute_prism_volumes 的文档字符串，
-                                        # 了解为何它们尚无反转检查
+    # 棱柱体积按构造为无符号（见 compute_prism_volumes 的文档字符串），反转只能在四面体上检出
+    negative_mask = tet_vol_signed < 0
     report.negative_volumes = int(np.sum(negative_mask))
     all_volumes = np.concatenate([prism_vol, np.abs(tet_vol_signed)])
     positive_volumes = all_volumes[all_volumes > 0]

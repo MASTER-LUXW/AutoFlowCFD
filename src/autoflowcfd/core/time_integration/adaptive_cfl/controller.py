@@ -198,7 +198,6 @@ class AdaptiveCFLController(_CFLGatesMixin, _CFLUpdateMixin):
                 f"所需的语义；要让控制器工作请让 cfl_max > cfl_start）"
             )
 
-    
         # 状态
         # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 11 条的
         # 协调逻辑改的是 self.cfl_start，若这里仍读形参，初值就会绕过协调

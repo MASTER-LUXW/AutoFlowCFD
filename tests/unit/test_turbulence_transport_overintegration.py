@@ -165,7 +165,8 @@ class TestOverintegrationIsMoreAccurate:
         h = 1e-4 * max(np.abs(X).max(), 1.0)
         exact = np.zeros(X.shape[0])
         for d in range(3):
-            e = np.zeros(3); e[d] = h
+            e = np.zeros(3)
+            e[d] = h
             exact += (-flux(X + 2 * e)[:, d] + 8 * flux(X + e)[:, d]
                       - 8 * flux(X - e)[:, d] + flux(X - 2 * e)[:, d]) / (12 * h)
         exact = exact.reshape(n_cells, n_sps)

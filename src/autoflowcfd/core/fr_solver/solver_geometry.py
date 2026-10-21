@@ -72,4 +72,3 @@ class _SolverGeometryMixin:
             volumes: 单元体积，形状 (n_cells,)
         """
         return self.mesh.get_all_cell_volumes()
-

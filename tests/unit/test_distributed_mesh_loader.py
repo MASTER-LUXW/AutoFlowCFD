@@ -44,7 +44,9 @@ from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_f
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 
 from tests.unit._wall_source import synthetic_wall_source
-from tests.unit._distributed_mesh_loader_common import _FakeHaloExchange, _build_all_packages, _nonuniform_U, mesh_and_ops
+from tests.unit._distributed_mesh_loader_common import (
+    _FakeHaloExchange, _build_all_packages, _nonuniform_U, mesh_and_ops,
+)
 
 
 class TestRankPackagePicklable:

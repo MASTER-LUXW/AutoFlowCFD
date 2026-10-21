@@ -139,7 +139,7 @@ class GlobalCoarseCorrection(PseudoTransientDiagonal):
         xr, xc, xv = np.empty(n_x, np.int64), np.empty(n_x, np.int64), np.empty(n_x)
         if n_x:
             coupling_triplets(cross.indptr, cross.cols, cross.offset, cross.data, struct.row_dof, cross.col_dof,
-                               space.gid_local, space.gid_compact, nv, xr, xc, xv)
+                              space.gid_local, space.gid_compact, nv, xr, xc, xv)
         n = space.n_global * nv
         # 先在本 rank 合并重复项，只交换合并后的三元组
         mine = coo_matrix((np.concatenate([vals, xv]), (np.concatenate([rows, xr]), np.concatenate([cols, xc]))),

@@ -63,7 +63,7 @@ def export_vtk(
         $ autoflowcfd post export-vtk --case results -o flow.vtu --variables velocity --variables q_criterion
         $ autoflowcfd post export-vtk --case results -o flow_ho.vtu --high-order
         $ autoflowcfd post export-vtk --case results -o walls.vtu --boundaries-only
-        $ autoflowcfd post export-vtk --case results --checkpoint results/checkpoints/checkpoint_iter_000100.h5 -o t100.vtu
+        $ autoflowcfd post export-vtk -c results -o t100.vtu --checkpoint results/checkpoints/checkpoint_iter_000100.h5
     \f
 
     Args:
@@ -203,4 +203,3 @@ def _export_high_order(case, checkpoint, surface_mesh, skip_quality_check, outpu
     path = export_solver_highorder_vtk(solver, output_path.with_suffix(".vtu"), fields=var_list,
                                        binary=True if binary is None else binary)
     click.echo(f"\n✅ 高阶 VTK 导出完成：{path}")
-

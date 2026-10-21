@@ -50,6 +50,7 @@ def module_source(mod, *, recursive=True):
                 parts.append(inspect.getsource(sub))
     return "\n".join(parts)
 
+
 def module_sources(mod, *, recursive=True):
     """`[(限定名, 源码), ...]` —— 模块自身与（递归的）全部子模块，逐个分开。
 

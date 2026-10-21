@@ -45,7 +45,7 @@ class DistributedFRState:
         self.dU_dt = np.zeros((n_total, n_sps, n_vars))
 
     def initialize_uniform(self, rho: float = 1.0, u: float = 0.0, v: float = 0.0,
-                            w: float = 0.0, p: float = 1.0) -> None:
+                           w: float = 0.0, p: float = 1.0) -> None:
         """用均匀自由流场初始化 local+halo 全部单元（构造后必须调用：`__init__` 只分配零数组，rho=0 会让第一次
         原始变量换算产生 NaN）。公式与单机 `FRState.initialize_uniform` 同一份（`uniform_conservative`）；湍流场
         由湍流模型独立持有，不在 `self.U`/`self.Q` 里（`n_vars` 恒为 5）。

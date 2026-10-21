@@ -18,14 +18,14 @@ def estimate_steinerleft(
 ) -> int:
     """估算 Steiner 点预算（tetgen 的 `steinerleft`），足够宽松以
     满足请求的区域，按实际问题大小缩放而不是固定常量。
-   
+
     tetgen 默认的 steinerleft=100000 是全局上限，整个网格共享——
     当区域的 maxvolume 目标远低于 PLC 的自然（无约束）四面体大小
     时，它可能在目标到处达到之前就耗尽，静默地在最后精化的角落
    留下一长串超大单元（直接测量：5.5x3x3 m 域限制到 0.05 m，
     固定 300,000 预算留下 6-10% 的单元超过目标 1.5 倍，最坏情况
     约 5-6 倍）。
-   
+
     全域分级区域（只要设置了 max_cell_size 就存在——见
     mesh_background._build_merged_mesh）总是此处传入的所有区域中
     maxvol 最大的，所以 bbox_volume / coarsest_maxvol 估计它单独
@@ -33,7 +33,7 @@ def estimate_steinerleft(
     区域时行为不变（与原始单区域公式相同，而且——随着 Stage B
     的 core-边局部修复区域被移除，见 mesh_repair.py 的模块文档
     字符串——`regions` 现在实际最多包含 1 个条目）。
-   
+
     下面的 `n_extra_regions` 处理在当前用法中是死的，但保留而不
     是特殊处理掉，以防未来调用方合法地传入多个区域：用多个区域
     中最小的 maxvol 来除整个 bbox（本函数的早期版本，用
@@ -46,12 +46,12 @@ def estimate_steinerleft(
     修正后的值——实际的 5 倍核心填充爆炸（1.2M -> 6.1M 四面体）
     结果是一个独立的、仍未解决的 tetgen 多区域精化行为（见
     mesh_repair.py），不是这个预算数量实际导致的。
-   
+
     Args:
         points: PLC 边界点，shape=(n, 3)——只用于其包围盒体积
         regions: (seed_point, region_id, maxvol) 元组，或 None/空
             表示无约束（nobisect=True）填充
-   
+
     Returns:
         steinerleft，限制在 [300_000, 20_000_000]——或当没有活跃区域
         时为 100_000（tetgen 自身默认值）。

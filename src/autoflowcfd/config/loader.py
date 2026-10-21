@@ -46,12 +46,12 @@ class ConfigLoader:
         >>> config = loader.load("config.yaml")
         >>> print(config.backend)
     """
-    
+
     def __init__(self):
         """初始化配置加载器，设置默认配置。"""
         self.default_steady = SteadyConfig()
         self.default_transient = TransientConfig()
-    
+
     def load(self, config_path: Union[str, Path]) -> Union[SteadyConfig, TransientConfig]:
         """从 YAML 文件加载配置（`load_with_keys` 的配置对象部分）。"""
         return self.load_with_keys(config_path)[0]
@@ -78,24 +78,24 @@ class ConfigLoader:
             >>> config = loader.load("simulation.yaml")
         """
         config_path = Path(config_path)
-        
+
         if not config_path.exists():
             raise FileNotFoundError(f"未找到配置文件: {config_path}")
-        
+
         logger.info(f"正在从 {config_path} 加载配置")
-        
+
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_dict = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise ValueError(f"{config_path} 中的 YAML 格式无效: {e}")
-        
+
         if not isinstance(config_dict, dict):
             raise ValueError(f"配置必须是 YAML 映射，得到的是 {type(config_dict)}")
-        
+
         # 确定仿真模式
         mode = config_dict.get('mode', 'steady')
-        
+
         keys = {k for k in config_dict if k != 'mode'}
         if mode == 'steady':
             return self._load_steady_config(config_dict), keys
@@ -103,7 +103,7 @@ class ConfigLoader:
             return self._load_transient_config(config_dict), keys
         else:
             raise ValueError(f"未知的仿真模式: {mode}。必须是 'steady' 或 'transient'")
-    
+
     def _load_steady_config(self, config_dict: Dict[str, Any]) -> SteadyConfig:
         """加载并验证定常配置。
 
@@ -114,10 +114,10 @@ class ConfigLoader:
             SteadyConfig: 验证后的定常配置
         """
         logger.debug("正在加载定常配置")
-        
+
         # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_steady)
-        
+
         # 创建配置对象
         try:
             config = SteadyConfig(**merged)
@@ -125,7 +125,7 @@ class ConfigLoader:
             return config
         except Exception as e:
             raise ValueError(f"无效的定常配置: {e}")
-    
+
     def _load_transient_config(self, config_dict: Dict[str, Any]) -> TransientConfig:
         """加载并验证瞬态配置。
 
@@ -136,10 +136,10 @@ class ConfigLoader:
             TransientConfig: 验证后的瞬态配置
         """
         logger.debug("正在加载瞬态配置")
-        
+
         # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_transient)
-        
+
         # 创建配置对象
         try:
             config = TransientConfig(**merged)
@@ -150,7 +150,7 @@ class ConfigLoader:
             return config
         except Exception as e:
             raise ValueError(f"无效的瞬态配置: {e}")
-    
+
     def _merge_defaults(self, user_config: Dict[str, Any], default_config) -> Dict[str, Any]:
         """以 dataclass 默认值为底，覆盖用户给出的字段；未知字段（拼写错误等）直接报错。
 
@@ -176,26 +176,26 @@ class ConfigLoader:
             >>> loader.save_template("config_template.yaml", mode="steady")
         """
         output_path = Path(output_path)
-        
+
         if mode == 'steady':
             config = self.default_steady
         elif mode == 'transient':
             config = self.default_transient
         else:
             raise ValueError(f"未知的模式: {mode}。必须是 'steady' 或 'transient'")
-        
+
         # 将枚举转换为字符串以便 YAML 序列化
         config_dict = self._enum_to_string(config)
         config_dict['mode'] = mode
-        
+
         # 添加注释作为 YAML 结构
         yaml_content = self._add_yaml_comments(config_dict, mode)
-        
+
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
-        
+
         logger.info(f"配置模板已保存至 {output_path}")
-    
+
     def _enum_to_string(self, config) -> Dict[str, Any]:
         """将枚举值转换为字符串以便 YAML 序列化。
 
@@ -215,7 +215,7 @@ class ConfigLoader:
             value = getattr(config, f.name)
             result[f.name] = value.value if isinstance(value, Enum) else value
         return result
-    
+
     def _add_yaml_comments(self, config_dict: Dict[str, Any], mode: str) -> str:
         """向 YAML 输出添加说明注释。
 
@@ -231,31 +231,31 @@ class ConfigLoader:
         lines.append("")
         lines.append(f"mode: {mode}")
         lines.append("")
-        
+
         for key, value in config_dict.items():
             if key == 'mode':
                 continue
-            
+
             # 为重要参数添加注释
             comment = self._get_parameter_comment(key, mode)
             if comment:
                 lines.append(f"# {comment}")
 
             # 通过 yaml.safe_dump 本身序列化值，而不是使用 f-string，
-            # 否则 None 值（例如默认的 phase_max_iter）会呈现为字面文本 "None" - 
+            # 否则 None 值（例如默认的 phase_max_iter）会呈现为字面文本 "None" -
             # PyYAML 不将裸写的 "None" 识别为 null（只有 null/Null/NULL/~ /空可以），
             # 所以 safe_load 会将其读回为字符串 "None"，而不是 Python None，
             # 并且它会静默地因类型错误而验证失败，而不是加载为真正的默认值。
-            # 转储为单键 {key: value} 流式映射（然后剥离大括号）- 而不是单独转储 `value` - 
+            # 转储为单键 {key: value} 流式映射（然后剥离大括号）- 而不是单独转储 `value` -
             # 避免 PyYAML 在裸顶层标量后附加 "...\n" 文档结束标记，
             # 否则这会作为杂散行出现在这个手工组装的多行文件的中间，并破坏整个模板的每次解析。
             dumped = yaml.safe_dump({key: value}, default_flow_style=True).strip()
             assert dumped.startswith("{") and dumped.endswith("}")
             lines.append(dumped[1:-1])
             lines.append("")
-        
+
         return "\n".join(lines)
-    
+
     def _get_parameter_comment(self, param: str, mode: str) -> str:
         """获取配置参数的帮助注释。
 

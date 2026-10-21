@@ -51,5 +51,3 @@ def sa_dirichlet_spec(wall_zero_face):
 def sa_strong_rows(d_wall):
     """`(n_cells, n_sps, 1)` 布尔：壁面解点的行（Jacobian 置零）。"""
     return np.asarray(to_host(d_wall) == 0.0)[..., None]
-
-

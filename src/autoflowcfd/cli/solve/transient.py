@@ -60,8 +60,8 @@ _TIME_METHOD_CHOICES = ["dual-time", "rk3"]
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
               dt: float, cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
-        aoa_deg: float, aos_deg: float,
-        physical_time: float,
+              aoa_deg: float, aos_deg: float,
+              physical_time: float,
               output_dir: str, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, probes: tuple, init_checkpoint: Optional[str],
@@ -104,7 +104,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
     from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
     input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir,
-                                                     parse_bc_type_options(bc_type))
+                                                    parse_bc_type_options(bc_type))
 
     # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
     check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)

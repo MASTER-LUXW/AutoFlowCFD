@@ -117,7 +117,7 @@ def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_til
     ghost_o, a_o, ghost_n, a_n = ghost
     if want_coupling:
         cross_offset, expected_col, cross_size, slots = cross_layout(flat, n_prism, npr, nte, n_var=nv,
-                                                                      include_partner=False)
+                                                                     include_partner=False)
         cross_data = np.zeros(cross_size, dtype=np.float32)
         cross_col = -np.ones_like(cross_offset)
     else:
@@ -139,7 +139,8 @@ def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_til
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length, float(c_ip), float(gamma_band),
             flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
-            flat.neighbor_src1_cell, flat.neighbor_src1_mat, flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
+            flat.neighbor_src1_cell, flat.neighbor_src1_mat, flat.owner_src0_cell, flat.owner_src0_tpl,
+            flat.owner_src0_tid,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             m_o, m_n, ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n),
             *diff["owner"], *diff["neighbor"], cross_offset, cross_data, cross_col)

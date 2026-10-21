@@ -59,9 +59,12 @@ def _build_face_dict_numba(
 
         # Face 0: nodes 0,1,2
         a, b, c = n0, n1, n2
-        if a > b: a, b = b, a
-        if b > c: b, c = c, b
-        if a > b: a, b = b, a
+        if a > b:
+            a, b = b, a
+        if b > c:
+            b, c = c, b
+        if a > b:
+            a, b = b, a
         face_key1[face_idx] = (np.int64(a) << 32) | np.int64(b)
         face_max[face_idx] = c
         face_cell_map[face_idx] = cell_idx
@@ -69,9 +72,12 @@ def _build_face_dict_numba(
 
         # Face 1: nodes 0,1,3
         a, b, c = n0, n1, n3
-        if a > b: a, b = b, a
-        if b > c: b, c = c, b
-        if a > b: a, b = b, a
+        if a > b:
+            a, b = b, a
+        if b > c:
+            b, c = c, b
+        if a > b:
+            a, b = b, a
         face_key1[face_idx] = (np.int64(a) << 32) | np.int64(b)
         face_max[face_idx] = c
         face_cell_map[face_idx] = cell_idx
@@ -79,9 +85,12 @@ def _build_face_dict_numba(
 
         # Face 2: nodes 0,2,3
         a, b, c = n0, n2, n3
-        if a > b: a, b = b, a
-        if b > c: b, c = c, b
-        if a > b: a, b = b, a
+        if a > b:
+            a, b = b, a
+        if b > c:
+            b, c = c, b
+        if a > b:
+            a, b = b, a
         face_key1[face_idx] = (np.int64(a) << 32) | np.int64(b)
         face_max[face_idx] = c
         face_cell_map[face_idx] = cell_idx
@@ -89,9 +98,12 @@ def _build_face_dict_numba(
 
         # Face 3: nodes 1,2,3
         a, b, c = n1, n2, n3
-        if a > b: a, b = b, a
-        if b > c: b, c = c, b
-        if a > b: a, b = b, a
+        if a > b:
+            a, b = b, a
+        if b > c:
+            b, c = c, b
+        if a > b:
+            a, b = b, a
         face_key1[face_idx] = (np.int64(a) << 32) | np.int64(b)
         face_max[face_idx] = c
         face_cell_map[face_idx] = cell_idx
@@ -200,7 +212,7 @@ def _compute_tet_cell_centers(cell_connectivity: np.ndarray, nodes: NodeArray) -
 
 def _compute_prism_cell_centers(prism_connectivity: np.ndarray, nodes: NodeArray) -> np.ndarray:
     """每个三角棱柱的顶点平均质心，形状=(n_cells, 3)。
-    
+
     与 _compute_tet_cell_centers 相同的顶点平均约定（不是真正的体积质心）——
     与本模块其余部分对待四面体“中心”用于方向翻转的方式一致；只用于决定
     面的哪一侧是“内部”拥有单元，不需要任何体积上精确的量。

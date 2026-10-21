@@ -130,7 +130,7 @@ def coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps: 
                    rows[:n_diag], cols[:n_diag], vals[:n_diag])
     if n_coup:
         coupling_triplets(struct.indptr, struct.cols, struct.offset, struct.data, row_dof, row_dof, agg, agg,
-                           n_var, rows[n_diag:], cols[n_diag:], vals[n_diag:])
+                          n_var, rows[n_diag:], cols[n_diag:], vals[n_diag:])
     return rows, cols, vals
 
 

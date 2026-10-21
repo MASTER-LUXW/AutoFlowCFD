@@ -202,4 +202,3 @@ def wall_model_cf(solver):
     cf = -tau[on_plate, 0] / (0.5 * RHO_INF * U_INF ** 2)
     o = np.argsort(x)
     return x[o], cf[o]
-

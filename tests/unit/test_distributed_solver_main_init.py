@@ -210,8 +210,6 @@ class TestDistributedStepMatchesSingleMachine:
             f"分布式推进一步后的状态与单机不一致（相对 {rel:.3e}）"
             f"，precond={precond}")
 
-
-
     def test_time_accurate_step_matches_single_machine(self, mesh_and_ops):
         """时间精确显式推进（瞬态 rk3 档）：分布式与单机子步数相同、推进出同一个状态（子步长取跨 rank
         的全场最小稳定步长，`time_integration/time_accurate.py`）。"""
@@ -367,7 +365,7 @@ class TestDistributedCheckpointRoundTrip:
         assert metadata.get("surface_mesh") == "dummy_surface.nas"
 
     @pytest.mark.parametrize("multi_gpu,fully_distributed", [(False, False), (False, True), (True, False),
-                                                              (True, True)])
+                                                             (True, True)])
     def test_every_distributed_resume_path_restores_the_flow_angles(self, multi_gpu, fully_distributed):
         """四条分布式 resume 构造路径（CPU 传统 / CPU 完全分布式 / 多 GPU 传统 / 多 GPU 完全分布式）都经唯一的构造
         入口（`distributed_build.build_distributed_solver`），物理参数（含攻角与侧滑角）原样取自 checkpoint。"""
@@ -421,6 +419,7 @@ class TestDistributedCheckpointRoundTrip:
         solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
 
         calls = []
+
         def _cb(solver_ref, iteration):
             calls.append(iteration)
 

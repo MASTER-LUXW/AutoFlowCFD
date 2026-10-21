@@ -128,7 +128,7 @@ class TestUnifiedEntryPointPicksStrategyByMeshAttribute:
         mesh = SimpleNamespace(
             face_connectivity=fc,
             boundary_groups={"WALL": np.array([0], dtype=np.int32),
-                              "FARFIELD": np.array([0], dtype=np.int32)},
+                             "FARFIELD": np.array([0], dtype=np.int32)},
             boundary_surface_mesh=_corner_cell_surface_mesh(),
         )
         group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
@@ -139,7 +139,7 @@ class TestUnifiedEntryPointPicksStrategyByMeshAttribute:
         mesh = SimpleNamespace(
             face_connectivity=fc,
             boundary_groups={"WALL": np.array([0], dtype=np.int32),
-                              "FARFIELD": np.array([0], dtype=np.int32)},
+                             "FARFIELD": np.array([0], dtype=np.int32)},
             boundary_surface_mesh=None,
         )
         with pytest.raises(ValueError, match="原始面网格"):          # 按单元匹配：有歧义的单元报错

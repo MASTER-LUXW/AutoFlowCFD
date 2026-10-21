@@ -277,6 +277,7 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     # J,M 相邻，合并成 K 轴是 no-copy view（小算子 D 同理）。
     return _contract_shared(D.reshape(F, J * M), X.reshape(C, J * M, V))
 
+
 def fine_segments(oi):
     """过积分上下文逐段给出 `(lo, hi, c2f, det_f, inv_f, D2, f2c)`（空段跳过），供逐单元融合核使用：
     `D2` 是细点微分矩阵收缩轴合并后的 `(n_fine, 3 n_fine)`（行 `q`、列 `3 p + m`，与逆变通量按 `(p, m)`

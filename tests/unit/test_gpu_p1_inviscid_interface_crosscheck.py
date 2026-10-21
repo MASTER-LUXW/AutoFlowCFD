@@ -23,13 +23,13 @@ import pytest
 
 cp = pytest.importorskip("cupy")
 
-from autoflowcfd.core.fr_residual.inviscid import (
+from autoflowcfd.core.fr_residual.inviscid import (  # noqa: E402
     compute_inviscid_residual_fr,
     primitive_to_conserved,
 )
-from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
+from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu  # noqa: E402
 
-from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh  # noqa: E402
 
 MACH_REF = 0.2
 

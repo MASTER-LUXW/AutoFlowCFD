@@ -105,7 +105,8 @@ def test_distributed_checkpoint_carries_dt_and_previous_level(tmp_path):
     def _dist():
         return DistributedFRSolver(mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
                                    n_ranks=1, order=1, turb_model_name="none", vel_inf=10.0,
-                                   time_scheme=TimeIntegrationScheme.DUAL_TIME, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                                   time_scheme=TimeIntegrationScheme.DUAL_TIME, rho_inf=RHO_INF, p_inf=P_INF,
+                                   mu_molecular=MU_MOLECULAR)
     a = _dist()
     a.order_continuation_enabled = False
     a.solve(max_iter=2, dt=DT, tol=0.0)

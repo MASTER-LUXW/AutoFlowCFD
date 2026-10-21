@@ -25,7 +25,9 @@ from autoflowcfd.core.turbulence.transport import (
     compute_scalar_diffusion_residual as _cpu_compute_scalar_diffusion_residual,
     compute_turbulence_transport_residual as _cpu_compute_turbulence_transport_residual,
 )
-from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient as _cpu_compute_physical_scalar_gradient
+from autoflowcfd.core.fr_operators.gradients import (
+    compute_physical_scalar_gradient as _cpu_compute_physical_scalar_gradient,
+)
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
@@ -352,6 +354,7 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
 
         np.testing.assert_allclose(dk_gpu, dk_cpu, rtol=1e-9, atol=1e-9)
         np.testing.assert_allclose(domega_gpu, domega_cpu, rtol=1e-9, atol=1e-9)
+
 
 class TestComputeWallDirichletMaskGpu:
     """真实 bug 回归测试（2026-09-12，与 CPU 版

@@ -24,8 +24,6 @@ from typing import Callable, Optional
 from autoflowcfd.core.time_integration.positivity import assert_admissible
 
 
-
-
 def _finish_stage(U, positivity_func):
     """每个 RK stage 的收尾：正性保持。
 
@@ -39,6 +37,7 @@ def _finish_stage(U, positivity_func):
     else:
         assert_admissible(U)
     return U
+
 
 class TimeIntegrationScheme(Enum):
     """时间积分格式枚举。"""
@@ -80,9 +79,10 @@ class TimeIntegrationScheme(Enum):
     # 精确的隐式推进由双时间步承担。
 
 
-
 #: **用户词汇 -> 枚举的唯一事实来源**：CLI `--time-method`、`api.run_transient`、YAML 配置层共用这一份；
 #: 未知取值报错。
+
+
 _SCHEME_ALIASES = {
     "rk3": TimeIntegrationScheme.SSP_RK3,
     "ssp_rk3": TimeIntegrationScheme.SSP_RK3,
@@ -141,6 +141,8 @@ def scheme_from_name(name):
 #: 着色（`core/mpi/distributed_implicit.py`）。表外的方案由
 #: `require_distributed_scheme` 在构造时拒绝，而不是让 `step()` 走到某个回退
 #: 分支里静默换成别的格式。
+
+
 DISTRIBUTED_SCHEMES = (
     TimeIntegrationScheme.FORWARD_EULER,
     TimeIntegrationScheme.SSP_RK2,
@@ -186,7 +188,6 @@ _SCHEME_TABLE = {
 }
 
 
-
 #: 每一步解 Newton-Krylov 线性系统的格式：隐式稳态，以及双时间步（内迭代是带 BDF 物理时间项的同一个
 #: Newton 步，`implicit/newton/physical_time.py`）。CFL 律、全局一致的块着色等按它判断
 IMPLICIT_SCHEMES = (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
@@ -218,7 +219,6 @@ DEFAULT_STEADY_TOL = 1e-6
 STEADY_DT = 1e-3
 
 
-
 def physical_time_steps(total_time: float, dt: float) -> int:
     """推进到物理时刻 `total_time` 所需的时间步数（瞬态命令、配置层、API 共用的唯一换算）。
 
@@ -235,6 +235,7 @@ def physical_time_steps(total_time: float, dt: float) -> int:
     logger.warning(f"物理时长 {total_time:g} s 不是时间步 {dt:g} s 的整数倍：推进 {n} 步，"
                    f"结束于 t = {n * dt:.9g} s")
     return n
+
 
 class TimeIntegrator:
     """带局部时间步长的显式 SSP Runge-Kutta 积分器。"""
@@ -269,10 +270,10 @@ class TimeIntegrator:
         positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """根据配置的方案，推进一个时间步。
-        
+
         对于显式SSP-RK格式，严格按照Shu-Osher形式实现三阶段计算，
         每个阶段都重新计算残差以确保时间精度。
-        
+
         Args:
             solution: 当前解 U^n
             residual_func: 残差计算函数 R(U)
@@ -369,8 +370,8 @@ class TimeIntegrator:
         # === Stage 2 ===
         # U^(2) = alpha[1,0]*U^0 + alpha[1,1]*U^(1) + beta[1]*dt*L(U^(1))
         U_stage2 = (alpha[1][0] * U0 +
-                   alpha[1][1] * U_stage1 +
-                   beta[1] * dt * L1)
+                    alpha[1][1] * U_stage1 +
+                    beta[1] * dt * L1)
         del L1  # 同 Stage 1 处 del L0 的 B-12 注释：L1 只参与 Stage 2 组合，
         # 组合完成立即释放，避免与 Stage 2 残差求值的瞬态数组共存。
         U_stage2 = _finish_stage(U_stage2, positivity_func)
@@ -382,9 +383,9 @@ class TimeIntegrator:
         if n_stages >= 3:
             # U^(3) = alpha[2,0]*U^0 + alpha[2,1]*U^(1) + alpha[2,2]*U^(2) + beta[2]*dt*L(U^(2))
             U_stage3 = (alpha[2][0] * U0 +
-                       alpha[2][1] * U_stage1 +
-                       alpha[2][2] * U_stage2 +
-                       beta[2] * dt * L2)
+                        alpha[2][1] * U_stage1 +
+                        alpha[2][2] * U_stage2 +
+                        beta[2] * dt * L2)
             U_stage3 = _finish_stage(U_stage3, positivity_func)
 
             # 对于RK3，最终解就是U^(3)
@@ -394,7 +395,7 @@ class TimeIntegrator:
             U_new = U_stage2
 
         return U_new
-    
+
     def reset(self) -> None:
         self.n_steps = 0
         self.current_time = 0.0

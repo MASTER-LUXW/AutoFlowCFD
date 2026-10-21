@@ -2,7 +2,7 @@
 
 
 def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
-                                 omega_max, turb_k_field, wall_treatment, with_k_slope: bool = False):
+                                  omega_max, turb_k_field, wall_treatment, with_k_slope: bool = False):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell

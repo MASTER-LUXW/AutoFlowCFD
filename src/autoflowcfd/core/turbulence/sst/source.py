@@ -24,9 +24,9 @@ class _SSTSourceMixin:
     """k/omega 源项（产生、耗散、交叉扩散、环境维持项、realizability 下限）"""
 
     def compute_source_terms(self, Q: np.ndarray, grad_U: np.ndarray,
-                            d_wall: np.ndarray, mu: float,
-                            grad_k: np.ndarray,
-                            grad_omega: np.ndarray, des=None) -> Tuple[np.ndarray, np.ndarray]:
+                             d_wall: np.ndarray, mu: float,
+                             grad_k: np.ndarray,
+                             grad_omega: np.ndarray, des=None) -> Tuple[np.ndarray, np.ndarray]:
         """
         计算 SST 模型的完整源项。
 

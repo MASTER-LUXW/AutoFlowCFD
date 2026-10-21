@@ -1,15 +1,12 @@
 """AutoFlowCFD V2.0 - 局部与全局逐单元数组之间的收集（写 checkpoint）与分发（读 checkpoint），都是点对点缓冲区通信。"""
 
 
-
-
 from typing import Optional
 
 import numpy as np
 
 
 from autoflowcfd.core.mpi import get_comm, get_rank, get_size
-
 
 
 def gather_global_state(

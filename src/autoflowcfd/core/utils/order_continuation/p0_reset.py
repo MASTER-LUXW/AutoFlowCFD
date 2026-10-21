@@ -4,10 +4,6 @@
 import numpy as np
 
 
-
-
-
-
 def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     """把一个**全新**（非 resume）求解器的状态重建到 P0。
 

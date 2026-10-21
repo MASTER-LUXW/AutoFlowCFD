@@ -3,7 +3,6 @@
 import types
 
 
-
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy

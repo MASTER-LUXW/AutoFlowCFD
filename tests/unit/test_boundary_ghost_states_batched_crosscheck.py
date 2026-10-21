@@ -110,4 +110,3 @@ def test_single_face_call_matches_batch():
     batched = provider.ghost_states(faces, Q_o, normals)
     for k in range(min(len(faces), 12)):
         np.testing.assert_array_equal(provider(int(faces[k]), Q_o[k], normals[k]), batched[k])
-

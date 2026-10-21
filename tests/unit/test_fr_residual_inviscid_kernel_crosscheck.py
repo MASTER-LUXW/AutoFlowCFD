@@ -35,7 +35,7 @@ from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
 def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None, mach_ref=0.1,
-                                    return_correction=False):
+                                     return_correction=False):
     """与 fr_residual_inviscid.py::compute_inviscid_residual_fr 完全对应
     的"新版"：体积项逐字复制（未改动），界面项换成新 kernel。"""
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()

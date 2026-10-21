@@ -110,7 +110,8 @@ def test_checkpoint_round_trip_through_the_host_view(tmp_path, turb):
 
     np.testing.assert_array_equal(np.asarray(b.U_gpu), np.asarray(a.U_gpu))
     for n in names:
-        np.testing.assert_array_equal(np.asarray(getattr(b.turb_model_gpu, n)), np.asarray(getattr(a.turb_model_gpu, n)))
+        np.testing.assert_array_equal(np.asarray(getattr(b.turb_model_gpu, n)), np.asarray(getattr(a.turb_model_gpu,
+                                                                                                   n)))
     np.testing.assert_array_equal(np.asarray(b.turb_model_gpu.nu_t), np.asarray(a.turb_model_gpu.nu_t))
     np.testing.assert_array_equal(b.tau_accum, a.tau_accum)
     # 产生项渐变按 checkpoint 记录的进度续接（与 CPU 同一处理）：因子经主机视图回写到设备上的模型

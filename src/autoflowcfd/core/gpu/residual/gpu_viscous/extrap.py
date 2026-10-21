@@ -1,8 +1,6 @@
 """AutoFlowCFD V2.0 - 面通量点外插与 tilde 通量配对(GPU 粘性)"""
 
 
-
-
 from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu
 
 
@@ -57,7 +55,7 @@ def _p0_cell_values(cp, cells, n_fp, Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
 
 
 def _extrap_side(cp, idx, src0_cell_all, src0_tpl_all, src0_tid_all, src1_idx_all, src1_cell_all, src1_mat_all,
-                  Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
+                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
     """按 src0(+src1) 机制把某一侧（owner 或 neighbor）的 Q/grad_vel/
     grad_T/mu_t 外插到面 idx 对应的 FP 网格。"""
     E_cell = src0_cell_all[idx]
@@ -76,7 +74,7 @@ def _extrap_side(cp, idx, src0_cell_all, src0_tpl_all, src0_tid_all, src1_idx_al
 
 
 def _self_extrap_side(cp, cell_idx, face_op, boundary_extrap_native,
-                       Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
+                      Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
     """自身面外插——某一侧单元用自己的场值按自身面几何外插到 FP
     （owner-primary 块的 `Q_o`/`gv_o`/`gT_o`/`mut_o`，或 neighbor-primary
     块的 `Q_n_native`/`gv_n_native`/`gT_n_native`/`mut_n_native`）。

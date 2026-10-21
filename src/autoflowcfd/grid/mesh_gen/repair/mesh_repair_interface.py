@@ -231,7 +231,7 @@ def run_stage_d_interface_repair(
         # 取每条违规界面面上的四面体一侧全局索引，转回局部（四面体数组
         # 内）索引：全局索引减 n_prism。
         tet_side_global = np.where(owner_is_prism[crosses_interface][bad_face],
-                                    jn[bad_face], io[bad_face])
+                                   jn[bad_face], io[bad_face])
         bad_tet_local = np.unique(tet_side_global - n_prism)
         bad_tet_local = bad_tet_local[(bad_tet_local >= 0) & (bad_tet_local < len(merged_cells))]
         if len(bad_tet_local) == 0:

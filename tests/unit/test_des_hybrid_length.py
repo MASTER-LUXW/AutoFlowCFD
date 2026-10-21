@@ -135,7 +135,7 @@ def test_sst_destruction_uses_lengths_from_the_same_evaluation(model_cls):
     k_safe, omega_safe = model_evaluation_fields(model.k_field, model.omega_field,
                                                  model._omega_realizability_min, np)
     length = model_cls().length_scale(np, k_safe, omega_safe, model.nu_t, mu / rho, d, grad_U, model._last_F1, h,
-                                 order_from_n_sps(m), model.beta_star, h_wn=h * 0.3)
+                                      order_from_n_sps(m), model.beta_star, h_wn=h * 0.3)
     k = model.k_field
     expected = (rho * model.beta_star * k * omega_safe - rho * k * np.sqrt(k) / length
                 + rho * k_inf ** 1.5 / length - rho * model.beta_star * k_inf * omega_inf)

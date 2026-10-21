@@ -143,7 +143,7 @@ def report(case: str, checkpoint: Optional[str], output: str) -> None:
     \b
     Examples:
         $ autoflowcfd post report --case results/
-    
+
     \f
 
     Args:
@@ -206,7 +206,7 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
     \b
         # 保存到文件
         $ autoflowcfd post convergence --case results/ -o conv.png
-    
+
     \f
 
     Args:
@@ -252,7 +252,8 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
         panel = 0
 
         if want_residual:
-            ax = axes[panel]; panel += 1
+            ax = axes[panel]
+            panel += 1
             for eq_name, values in history['residuals'].items():
                 ax.semilogy(iterations[:len(values)], np.maximum(values, 1e-16), label=eq_name)
             ax.set_ylabel("Residual")
@@ -260,13 +261,15 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
             ax.grid(True, which='both', alpha=0.3)
 
         if want_cfl:
-            ax = axes[panel]; panel += 1
+            ax = axes[panel]
+            panel += 1
             ax.plot(iterations[:len(history['cfl_history'])], history['cfl_history'])
             ax.set_ylabel("CFL")
             ax.grid(True, alpha=0.3)
 
         if want_coeffs:
-            ax = axes[panel]; panel += 1
+            ax = axes[panel]
+            panel += 1
             for name, values in history['coefficients'].items():
                 ax.plot(iterations[:len(values)], values, label=name)
             ax.set_ylabel("Coefficient")
@@ -290,8 +293,8 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
 
 
 # export-vtk 与瞬态统计命令定义在同目录的 export_commands.py / transient_commands.py
-from autoflowcfd.cli.post.export_commands import export_vtk
-from autoflowcfd.cli.post.transient_commands import transient_mean, transient_psd, transient_rms
+from autoflowcfd.cli.post.export_commands import export_vtk  # noqa: E402
+from autoflowcfd.cli.post.transient_commands import transient_mean, transient_psd, transient_rms  # noqa: E402
 
 post.add_command(export_vtk)
 post.add_command(transient_mean)

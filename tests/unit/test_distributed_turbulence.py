@@ -166,7 +166,8 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
         boundary_ghost_provider=DefaultGhostProvider(),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
         # 不渐变（渐变步数 0）：与单机参照同一个计数器状态
-        ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False),
+        ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0,
+                                         _turb_production_ramp_complete=False),
     )
 
     # 决定性判据：分布式算出的 local cells k/omega/nu_t 更新结果，必须
@@ -361,7 +362,8 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 boundary_ghost_provider=DefaultGhostProvider(),
                 iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
                 # 不渐变（渐变步数 0）：与单机参照同一个计数器状态
-                ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False),
+                ramp_owner=types.SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=0,
+                                                 _turb_production_ramp_complete=False),
             )
             results[r] = turb
 

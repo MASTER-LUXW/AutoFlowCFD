@@ -195,7 +195,8 @@ def inner_iteration_suffix(solver) -> str:
     if not s:
         return ""
     drop = (s["initial"] / s["final"]) if s["final"] > 0.0 else float("inf")
-    return f" | inner={s['iterations']}{'' if s['converged'] else '(未收敛)'} |G| {s['initial']:.3e}->{s['final']:.3e} ({drop:.1e}x)"
+    return (f" | inner={s['iterations']}{'' if s['converged'] else '(未收敛)'} "
+            f"|G| {s['initial']:.3e}->{s['final']:.3e} ({drop:.1e}x)")
 
 
 __all__ = ["BdfTerm", "BdfResidual", "advance_physical_step",

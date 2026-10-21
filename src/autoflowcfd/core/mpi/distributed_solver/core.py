@@ -308,7 +308,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
                 self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
                 self.iddes_h_wn_compact = self._iddes_h_wn[compact_global_ids]
 
-
         # 7. 时间推进器：与单机 FRSolver 同一套 Shu-Osher SSP-RK3 stage
         # 实现（core/time_integration/base.py），保证分布式与单机路径
         # 时间精度一致（见 step() 文档：此前这里是自称"RK3"实际执行单步

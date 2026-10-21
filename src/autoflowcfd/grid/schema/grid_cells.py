@@ -17,16 +17,16 @@ if TYPE_CHECKING:
 @dataclass
 class CellArray:
     """单元数组(SoA布局)
-    
+
     以 SoA 布局存储单元连接关系和类型信息。
     支持三角形面网格（每个单元3个节点）。
-    
+
     属性:
         connectivity: 单元连接关系, int32, shape=(N_cells, 3)
                      每行包含构成三角形的3个节点索引
         cell_type: 单元类型数组, int32, shape=(N_cells,)
                   0=三角形，预留用于未来类型
-    
+
     示例:
         >>> cells = CellArray(
         ...     connectivity=np.array([[0, 1, 2], [1, 2, 3]], dtype=np.int32),
@@ -36,10 +36,10 @@ class CellArray:
     """
     connectivity: np.ndarray  # int32, shape=(N_cells, 3)
     cell_type: np.ndarray  # int32, shape=(N_cells,)
-    
+
     def __post_init__(self):
         """验证数组形状与数据类型
-        
+
         抛出异常:
             ValueError: 如果数组形状或数据类型无效
         """
@@ -53,7 +53,7 @@ class CellArray:
                 f"Connectivity must have 3 columns (triangular mesh), "
                 f"got {self.connectivity.shape[1]}"
             )
-        
+
         # 检查单元类型形状与连接关系匹配
         if len(self.cell_type.shape) != 1:
             raise ValueError(
@@ -64,7 +64,7 @@ class CellArray:
                 f"Cell type count ({self.cell_type.shape[0]}) doesn't match "
                 f"connectivity count ({self.connectivity.shape[0]})"
             )
-        
+
         # 检查数据类型
         if self.connectivity.dtype != np.int32:
             raise ValueError(
@@ -74,36 +74,36 @@ class CellArray:
             raise ValueError(
                 f"Cell type must be int32, got {self.cell_type.dtype}"
             )
-        
+
         # 确保连续内存布局
         if not self.connectivity.flags['C_CONTIGUOUS']:
             self.connectivity = np.ascontiguousarray(self.connectivity)
         if not self.cell_type.flags['C_CONTIGUOUS']:
             self.cell_type = np.ascontiguousarray(self.cell_type)
-        
+
         logger.debug(f"CellArray initialized with {self.count} cells")
-    
+
     @property
     def count(self) -> int:
         """获取单元数量
-        
+
         Returns:
             int: 单元数量
         """
         return len(self.connectivity)
-    
+
     @property
     def shape(self) -> Tuple[int, int]:
         """获取单元数组形状
-        
+
         Returns:
             Tuple[int, int]: 形状元组 (N_cells, 3)
         """
         return self.connectivity.shape
-    
+
     def to_gpu(self) -> 'CupyCellArray':
         """转换为GPU数据结构
-        
+
         Returns:
             CupyCellArray: CuPy版本的单元数组
         """
@@ -118,14 +118,14 @@ class CellArray:
                 "CuPy is required for GPU operations. "
                 "Install it with: pip install cupy-cuda11x"
             )
-    
+
     @classmethod
     def from_gpu(cls, gpu_cells: 'CupyCellArray') -> 'CellArray':
         """从GPU数据结构转换
-        
+
         Args:
             gpu_cells: CuPy版本的单元数组
-            
+
         Returns:
             CellArray: NumPy版本的单元数组
         """
@@ -145,24 +145,24 @@ class CellArray:
 @dataclass
 class CupyCellArray:
     """GPU单元数组(CuPy版本)
-    
+
     GPU 加速版本的 CellArray 使用 CuPy arrays.
-    
+
     属性:
         connectivity: 单元连接关系 (cupy.ndarray)
         cell_type: 单元类型数组 (cupy.ndarray)
     """
     connectivity: 'cp.ndarray'  # noqa: F821
     cell_type: 'cp.ndarray'  # noqa: F821
-    
+
     @property
     def count(self) -> int:
         """获取单元数量"""
         return len(self.connectivity)
-    
+
     def to_cpu(self) -> CellArray:
         """转换为CPU数据结构
-        
+
         Returns:
             CellArray: NumPy版本的单元数组
         """
@@ -176,16 +176,16 @@ class CupyCellArray:
 @dataclass
 class TetrahedralCells:
     """四面体单元数组（专为体网格设计）
-    
+
     存储体网格的四面体单元连接关系。
     每个四面体具有 4 个顶点和正体积。
-    
+
     属性:
         connectivity: 单元连接关系, int32, shape=(N_cells, 4)
                      每行包含构成四面体的 4 个节点索引
         volumes: 单元体积数组, float64, shape=(N_cells,)
                 每个四面体的体积（m^3）
-    
+
     示例:
         >>> cells = TetrahedralCells(
         ...     connectivity=np.array([[0, 1, 2, 3], [1, 4, 2, 3]], dtype=np.int32),
@@ -196,10 +196,10 @@ class TetrahedralCells:
     """
     connectivity: np.ndarray  # int32, shape=(N_cells, 4)
     volumes: np.ndarray  # float64, shape=(N_cells,)
-    
+
     def __post_init__(self):
         """验证数组形状与数据类型
-        
+
         抛出异常:
             ValueError: 如果数组形状或数据类型无效
         """
@@ -213,7 +213,7 @@ class TetrahedralCells:
                 f"Tetrahedral connectivity must have 4 columns, "
                 f"got {self.connectivity.shape[1]}"
             )
-        
+
         # 检查体积形状与连接关系匹配
         if len(self.volumes.shape) != 1:
             raise ValueError(
@@ -224,13 +224,13 @@ class TetrahedralCells:
                 f"Volumes count ({self.volumes.shape[0]}) doesn't match "
                 f"cell count ({self.connectivity.shape[0]})"
             )
-        
+
         # 检查数据类型
         if self.connectivity.dtype != np.int32:
             raise ValueError(f"Connectivity must be int32, got {self.connectivity.dtype}")
         if self.volumes.dtype != np.float64:
             raise ValueError(f"Volumes must be float64, got {self.volumes.dtype}")
-        
+
         # 验证体积为正值
         if np.any(self.volumes <= 0):
             n_negative = np.sum(self.volumes <= 0)
@@ -238,32 +238,32 @@ class TetrahedralCells:
                 f"All tetrahedral volumes must be positive, "
                 f"found {n_negative} non-positive volumes"
             )
-        
+
         # 确保连续内存布局
         if not self.connectivity.flags['C_CONTIGUOUS']:
             self.connectivity = np.ascontiguousarray(self.connectivity)
         if not self.volumes.flags['C_CONTIGUOUS']:
             self.volumes = np.ascontiguousarray(self.volumes)
-    
+
     @property
     def count(self) -> int:
         """获取单元数量"""
         return self.connectivity.shape[0]
-    
+
     @staticmethod
     def compute_volumes(nodes: 'NodeArray', connectivity: np.ndarray) -> np.ndarray:
         """计算四面体体积（使用绝对值确保体积为正）
-        
+
         四面体体积公式（顶点 A,B,C,D）：
             V = |det(B-A, C-A, D-A)| / 6
-        
+
         注意: 使用绝对值处理节点顺序不一致的情况，确保返回正值。
         对于生产级网格，建议在网格生成阶段确保一致的定向。
-        
+
         Args:
             nodes: 节点坐标
             connectivity: 四面体连接关系, shape=(N_cells, 4)
-            
+
         Returns:
             volumes: 单元体积 (始终为正), shape=(N_cells,), 单位m^3
         """
@@ -273,33 +273,33 @@ class TetrahedralCells:
         n1 = connectivity[:, 1]
         n2 = connectivity[:, 2]
         n3 = connectivity[:, 3]
-        
+
         # 使用高级索引获取节点坐标
         x = nodes.x
         y = nodes.y
         z = nodes.z
-        
+
         # 计算从顶点 0 到其他顶点的向量（向量化）
         v1_x = x[n1] - x[n0]
         v1_y = y[n1] - y[n0]
         v1_z = z[n1] - z[n0]
-        
+
         v2_x = x[n2] - x[n0]
         v2_y = y[n2] - y[n0]
         v2_z = z[n2] - z[n0]
-        
+
         v3_x = x[n3] - x[n0]
         v3_y = y[n3] - y[n0]
         v3_z = z[n3] - z[n0]
-        
+
         # 叉乘: v2 × v3（向量化）
         cross_x = v2_y * v3_z - v2_z * v3_y
         cross_y = v2_z * v3_x - v2_x * v3_z
         cross_z = v2_x * v3_y - v2_y * v3_x
-        
+
         # 点乘: v1 · (v2 × v3)（向量化）
         det = v1_x * cross_x + v1_y * cross_y + v1_z * cross_z
-        
+
         # 体积 = |det| / 6
         volumes = np.abs(det) / 6.0
 

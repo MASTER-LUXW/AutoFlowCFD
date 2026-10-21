@@ -352,7 +352,8 @@ def test_single_gpu_matches_cpu(model):
     mesh = build_channel_mesh_prism(1, 3, 3, 2, LX, H, LZ)
     mesh.boundary_bc_types = dict(_BC)
     gpu = GPUFRSolver(mesh=mesh, order=1, turb_model_name=model, vel_inf=10.0, time_scheme=DUAL,
-                      wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                      wall_distance_source=channel_wall_source(LX, H, LZ), rho_inf=RHO_INF, p_inf=P_INF,
+                      mu_molecular=MU_MOLECULAR)
     gpu.order_continuation_enabled = False
     for _ in range(3):
         cpu.step(2e-4)

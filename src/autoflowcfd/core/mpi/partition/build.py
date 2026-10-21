@@ -16,7 +16,7 @@ PARTITION_METHODS = ("metis", "block")
 
 
 def build_cell_adjacency_graph(owner_cell: np.ndarray, neighbor_cell: np.ndarray,
-                                is_boundary: np.ndarray, n_cells: int) -> Tuple[np.ndarray, np.ndarray]:
+                               is_boundary: np.ndarray, n_cells: int) -> Tuple[np.ndarray, np.ndarray]:
     """从面连接关系构建单元邻接图（CSR 格式）。
 
     两个单元通过内部面（非边界面）相连。用于 METIS 分区。每个单元的邻居按面序号排列（与此前逐面循环的

@@ -53,7 +53,8 @@ class ResidualNorm:
     半范数（该处文档）。线性求解在同一个加权范数里最小化（`linear_solve.py::_solve_direction`）。
 
     **逐方程按参考量级无量纲化**（`scales`，2026-10-11）：各列先除以该未知量的参考量级（平均流
-    `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流列为场的实际量级，`coupled_step.py::residual_reference_scales`）再求
+    `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流列为场的实际量级，
+    `coupled_step.py::residual_reference_scales`）再求
     加权平方和。此前直接对有量纲的残差求和：能量方程的残差比质量方程大 `p_inf / rho_inf`（约 1e5）倍、比
     动量方程大 `p_inf / (rho_inf U_inf)`（约 3e3）倍，范数实际只是能量方程的范数——cube_demo SA P1 上能量
     方程占 `sum w r^2` 的 1.000，其余五个方程合计 0.000。接受判据、SER、GMRES 最小化的都是它，质量、动量、
@@ -92,7 +93,7 @@ class ResidualNorm:
 
 
 def accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: float,
-                 red: LocalReductions, norm: "ResidualNorm") -> Tuple[object, float, float, int]:
+                red: LocalReductions, norm: "ResidualNorm") -> Tuple[object, float, float, int]:
     """按残差接受判据回溯 `theta`，返回
     `(U_new, theta, res_norm_new, n_extra_residual_eval)`。
 

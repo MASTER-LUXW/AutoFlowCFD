@@ -115,7 +115,8 @@ class TestAusmUpMachRef:
         u_n = q[1] * n[0] + q[2] * n[1] + q[3] * n[2]
         for mach_ref in [1.0, 0.5, 0.1, 0.05, 0.01, 0.001]:
             flux = compute_ausm_up_flux(q, q, n, mach_ref)
-            assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n), f"mach_ref={mach_ref}: mass flux consistency broken"
+            assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n), (
+                f"mach_ref={mach_ref}: mass flux consistency broken")
 
 
 class TestAusmUpM4P5CoefficientsMatchLiterature:
@@ -306,7 +307,8 @@ class TestFreeStreamPreservation:
 
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-        residual = compute_inviscid_residual_fv_p0(U, mesh, get_flat_face_geometry(mesh, mesh.operators), boundary_ghost_provider=DefaultGhostProvider())
+        residual = compute_inviscid_residual_fv_p0(U, mesh, get_flat_face_geometry(mesh, mesh.operators),
+                                                   boundary_ghost_provider=DefaultGhostProvider())
         rel_res = np.max(np.abs(residual)) / p_inf
 
         assert rel_res < 1e-10, f"P0 free-stream preservation failed: rel={rel_res:.3e}"

@@ -61,8 +61,8 @@ class TestDuplicateRecordsSameNeighborAreDeduplicated:
         neighbor_groups = {}
 
         ffp = _make_ffp(n_faces, true_normal, true_area_weight,
-                         owner_is_primary, neighbor_is_primary,
-                         owner_groups, neighbor_groups)
+                        owner_is_primary, neighbor_is_primary,
+                        owner_groups, neighbor_groups)
         fc = SimpleNamespace(
             normal=np.zeros((n_faces, 3)), area=np.zeros(n_faces),
             owner_cell=np.array([0, 0]), neighbor_cell=np.array([1, 1]),
@@ -89,8 +89,8 @@ class TestDuplicateRecordsSameNeighborAreDeduplicated:
         neighbor_is_primary = np.array([True, True])
 
         ffp = _make_ffp(n_faces, true_normal, true_area_weight,
-                         owner_is_primary, neighbor_is_primary,
-                         owner_groups={}, neighbor_groups={})
+                        owner_is_primary, neighbor_is_primary,
+                        owner_groups={}, neighbor_groups={})
         fc = SimpleNamespace(
             normal=np.zeros((n_faces, 3)), area=np.zeros(n_faces),
             owner_cell=np.array([2, 2]), neighbor_cell=np.array([-1, -1]),
@@ -120,8 +120,8 @@ class TestGenuineMultiSourceFallsBackToTriangulatedHalfFace:
         owner_groups = {(0, 7): [0, 1]}
 
         ffp = _make_ffp(n_faces, true_normal, true_area_weight,
-                         owner_is_primary, neighbor_is_primary,
-                         owner_groups, neighbor_groups={})
+                        owner_is_primary, neighbor_is_primary,
+                        owner_groups, neighbor_groups={})
         old_normal = np.array([[0.9, 0.1, 0.0], [0.8, -0.2, 0.0]])
         old_area = np.array([2.1, 2.4])  # 真实的三角化半面，加起来是整张四边形
         fc = SimpleNamespace(
@@ -146,8 +146,8 @@ class TestUngroupedFacesAreUntouched:
         neighbor_is_primary = np.array([True])
 
         ffp = _make_ffp(n_faces, true_normal, true_area_weight,
-                         owner_is_primary, neighbor_is_primary,
-                         owner_groups={}, neighbor_groups={})
+                        owner_is_primary, neighbor_is_primary,
+                        owner_groups={}, neighbor_groups={})
         fc = SimpleNamespace(
             normal=np.zeros((n_faces, 3)), area=np.zeros(n_faces),
             owner_cell=np.array([9]), neighbor_cell=np.array([10]),

@@ -152,7 +152,8 @@ class TestDistributedResidualMatchesSingleMachine:
         U = _uniform_freestream_U(mesh)
         mach_ref = 0.2
 
-        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
+        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref,
+                                                       boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -185,7 +186,8 @@ class TestDistributedResidualMatchesSingleMachine:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=DefaultGhostProvider())
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL,
+                                                      boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -285,7 +287,8 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U = _uniform_freestream_U(mesh)
         mach_ref = 0.2
 
-        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
+        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref,
+                                                       boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -316,7 +319,8 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=DefaultGhostProvider())
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL,
+                                                      boundary_ghost_provider=DefaultGhostProvider())
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity

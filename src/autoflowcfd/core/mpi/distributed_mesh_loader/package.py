@@ -143,7 +143,10 @@ def build_fully_distributed_rank_package(
     计算一次，不会因为循环 n_ranks 次而重复付出这个昂贵的 Newton
     迭代开销。
 
-    覆盖范围：均值流无粘/粘性残差所需的紧凑几何与边界幽灵态；湍流模型所需的全局量（壁距、IDDES 的 h_max/h_wn）由 root 在完整网格上算好、切成紧凑索引空间；全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入（换阶时 root 重新调用本函数，见 `redistribute_fully_distributed_for_new_order`）。
+    覆盖范围：均值流无粘/粘性残差所需的紧凑几何与边界幽灵态；湍流模型所需的全局量（壁距、IDDES 的 h_max/h_wn）由 root
+    在完整网格上算好、切成紧凑索引空间；全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、
+    全部时间格式、checkpoint 续算与 Order Continuation 均已接入（换阶时 root 重新调用本函数，见
+    `redistribute_fully_distributed_for_new_order`）。
 
     Args:
         mesh, ops, face_connectivity: root rank 持有的完整全局网格/

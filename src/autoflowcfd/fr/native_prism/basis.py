@@ -246,5 +246,3 @@ def native_prism_exact_jacobian(ref_rst: np.ndarray,
     jac[:, :, 1] = half_m * d_bottom_ds[None, :] + half_p * d_top_ds[None, :]
     jac[:, :, 2] = 0.5 * (top - bottom)
     return jac
-
-

@@ -27,7 +27,7 @@ def compute_prism_aware_overlap_bad_tet_mask(
     n_prism = len(prism_cells)
     if n_prism == 0:
         return None
-        
+
     from ...schema.grid_nodes import NodeArray
     from ..extraction.face_extractor import FaceExtractor
     from ...validation.mesh_overlap_check import check_face_overlap_and_proximity
@@ -37,19 +37,19 @@ def compute_prism_aware_overlap_bad_tet_mask(
         prism_cells, merged_cells.astype(np.int64), node_arr
     )
     mixed_report = check_face_overlap_and_proximity(merged_nodes, merged_cells, faces=mixed_faces)
-    
+
     if not len(mixed_report.overlapping_cell_ids):
         return None
-        
+
     global_ids = mixed_report.overlapping_cell_ids
     tet_ids = global_ids[global_ids >= n_prism] - n_prism
-    
+
     if len(tet_ids) == 0:
         return None
-        
+
     mask = np.zeros(len(merged_cells), dtype=bool)
     mask[tet_ids] = True
-    
+
     logger.warning(
         f"Prism-aware overlap check: {len(tet_ids)} core tet cell(s) physically "
         f"overlap a BL prism or another tet across the full mixed mesh - "
@@ -67,7 +67,7 @@ def compute_extra_bad_mask(
 ) -> Optional[np.ndarray]:
     """合并纯 tet 重叠和棱柱感知重叠为一个统一的坏单元掩码。"""
     overlap_bad_mask = None
-    
+
     if initial_report.overlapping_cell_ids is not None and len(initial_report.overlapping_cell_ids):
         overlap_bad_mask = np.zeros(len(merged_cells), dtype=bool)
         overlap_bad_mask[initial_report.overlapping_cell_ids] = True
@@ -79,5 +79,5 @@ def compute_extra_bad_mask(
             overlap_bad_mask = prism_overlap_mask
         else:
             overlap_bad_mask |= prism_overlap_mask
-            
+
     return overlap_bad_mask

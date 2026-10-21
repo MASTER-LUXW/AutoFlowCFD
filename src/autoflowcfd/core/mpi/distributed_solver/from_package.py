@@ -22,7 +22,7 @@ class _DistributedFromPackageMixin:
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,
-                                        root_context: Optional[dict] = None, n_threads: int = -1):
+                                       root_context: Optional[dict] = None, n_threads: int = -1):
         """真正的"完全分布式加载"构造入口（2026-09-02，见 core/mpi/
         distributed_mesh_loader/fully_distributed.py::distributed_mesh_load_v2/
         build_fully_distributed_rank_package 模块文档）。
@@ -39,7 +39,10 @@ class _DistributedFromPackageMixin:
         ——本身就要求一个完整全局网格，在这条路径下没有意义、也没有
         数据可用），直接把 package 里已经算好的内容赋到对应属性上。
 
-        全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入。换阶由 `DistributedFRSolver._interpolate_to_new_order` 调用 `redistribute_fully_distributed_for_new_order`：本 rank 只持有紧凑数据，root 用持有的 `_root_context` （完整全局网格）重新计算并分发新阶数的紧凑包。
+        全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与
+        Order Continuation 均已接入。换阶由 `DistributedFRSolver._interpolate_to_new_order` 调用
+        `redistribute_fully_distributed_for_new_order`：本 rank 只持有紧凑数据，root 用持有的 `_root_context`
+        （完整全局网格）重新计算并分发新阶数的紧凑包。
 
         Args:
             package: `build_fully_distributed_rank_package` 的返回值

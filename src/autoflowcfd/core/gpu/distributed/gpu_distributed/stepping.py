@@ -15,7 +15,7 @@ class _MultiGPUSteppingMixin:
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int,
-                                        device_id=None, rank=None, root_context=None):
+                                       device_id=None, rank=None, root_context=None):
         """真正的"完全分布式加载"构造入口（#1，2026-09-02）——与主
         `__init__`（"传统模式"：每个 rank 独立加载完整全局网格）的关键
         区别：`package` 是 root rank 预先算好、已经按本 rank 的 compact
@@ -27,7 +27,8 @@ class _MultiGPUSteppingMixin:
         实现拆到独立模块 `gpu_distributed_fully_distributed.py`（控制
         单文件行数，与 `_interpolate_to_new_order`/
         `gpu_distributed_order_continuation.py` 同一个拆分动机），见该
-        模块文档。全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入。
+        模块文档。全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、
+        checkpoint 续算与 Order Continuation 均已接入。
 
         Args:
             package: `build_fully_distributed_rank_package` 的返回值

@@ -282,4 +282,3 @@ def build_face_connectivity(
         face_node_ids=face_data.node_connectivity,
         is_boundary=is_boundary,
     )
-

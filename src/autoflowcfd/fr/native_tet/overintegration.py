@@ -134,6 +134,7 @@ def _tet_duffy_rule(n: int):
     wa, wb, wc = (q.ravel() for q in np.meshgrid(w, w, w, indexing="ij"))
     return (a, b, c), wa * wb * wc * (1.0 - b) / 2.0 * ((1.0 - c) / 2.0) ** 2
 
+
 def native_tet_n_fine(over_order: int) -> int:
     """native 四面体在 `over_order` 下的**真实**细点数。"""
     oo = int(over_order)

@@ -3,9 +3,9 @@
 max-line-length = 120
 extend-ignore = E203, W503
 exclude = .git, .venv, __pycache__, build, dist, .mypy_cache, .pytest_cache
-# pytest 夹具按名字导入后作为测试参数使用，flake8 把参数名视为对导入名的重定义（F811）
+# pytest 夹具按名字导入后作为测试参数使用：flake8 把导入视为未使用（F401）、把参数名视为对导入名的重定义（F811）
 per-file-ignores =
-    tests/unit/test_distributed_mesh_loader.py: F811
-    tests/unit/test_distributed_mesh_loader_dual_time.py: F811
-    tests/unit/test_distributed_mesh_loader_sst.py: F811
+    tests/unit/test_distributed_mesh_loader.py: F401, F811
+    tests/unit/test_distributed_mesh_loader_dual_time.py: F401, F811
+    tests/unit/test_distributed_mesh_loader_sst.py: F401, F811
     tests/unit/test_gpu_distributed_sa.py: F811

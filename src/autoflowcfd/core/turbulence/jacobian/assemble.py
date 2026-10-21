@@ -111,7 +111,9 @@ def add_wall_target_k_coupling(ctx: TurbulenceLinearization, out, gam) -> None:
 
     边界面只进它的 owner 单元（混合拆分面的配对边界面 owner 是同一单元），所以只有对角块。
     """
-    from autoflowcfd.core.turbulence.transport import compute_scalar_convection_residual, compute_scalar_diffusion_residual
+    from autoflowcfd.core.turbulence.transport import (
+        compute_scalar_convection_residual, compute_scalar_diffusion_residual,
+    )
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
     slope = np.asarray(ctx.wall_target_k_slope, dtype=np.float64)

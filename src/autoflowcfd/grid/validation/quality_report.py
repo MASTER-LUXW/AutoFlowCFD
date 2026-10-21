@@ -135,7 +135,8 @@ class MeshQualityReport:
             f"  Volume range: [{self.min_volume:.6e}, {self.max_volume:.6e}]",
             f"  Mean ± Std: {self.mean_volume:.6e} ± {self.std_volume:.6e}",
             f"  Global max/min ratio: {self.volume_ratio:.2e} (informational - BL grading, not a defect by itself)",
-            f"  Adjacent-cell (face-neighbour) ratio: max={self.adjacent_volume_ratio_max:.2f}, mean={self.adjacent_volume_ratio_mean:.2f}",
+            f"  Adjacent-cell (face-neighbour) ratio: max={self.adjacent_volume_ratio_max:.2f}, "
+            f"mean={self.adjacent_volume_ratio_mean:.2f}",
             "",
             "Aspect Ratio:",
             f"  Overall: [{self.min_aspect_ratio:.3f}, {self.max_aspect_ratio:.3f}], mean={self.mean_aspect_ratio:.3f}",
@@ -169,7 +170,8 @@ class MeshQualityReport:
             lines += [
                 "",
                 "Before/After Repair Comparison:",
-                f"  Status:                {'PASSED' if ir.passed else 'FAILED'} -> {'PASSED' if self.passed else 'FAILED'}",
+                f"  Status:                {'PASSED' if ir.passed else 'FAILED'} -> "
+                f"{'PASSED' if self.passed else 'FAILED'}",
                 f"  Max skewness:           {ir.max_skewness:.4f} -> {self.max_skewness:.4f}",
                 f"  Max non-orthogonality:  {ir.orthogonality_max:.2f} deg -> {self.orthogonality_max:.2f} deg",
                 f"  Max adjacent vol ratio: {ir.adjacent_volume_ratio_max:.2f} -> {self.adjacent_volume_ratio_max:.2f}",
@@ -198,5 +200,3 @@ class MeshQualityReport:
         lines.append("=" * 70)
 
         return "\n".join(lines)
-
-

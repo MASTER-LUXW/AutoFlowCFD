@@ -6,12 +6,12 @@
 示例:
     $ autoflowcfd --version
     AutoFlowCFD v0.2.0
-    
+
     $ autoflowcfd grid parse --help
     Usage: autoflowcfd grid parse [OPTIONS] INPUT_FILE
-    
+
     解析 ANSA .nas 网格文件。
-    
+
     $ autoflowcfd solve steady --help
     Usage: autoflowcfd solve steady [OPTIONS] INPUT_FILE
 
@@ -22,8 +22,8 @@ import sys
 import os
 
 # 本 CLI 的日志输出和 click.echo() 调用中使用 Unicode 符号
-#（勾选标记、°、³ 等）。Windows 下 stdout/stderr 默认使用活动控制台
-#代码页（如中文环境为 GBK/936），而非 UTF-8，这些字符会触发
+# （勾选标记、°、³ 等）。Windows 下 stdout/stderr 默认使用活动控制台
+# 代码页（如中文环境为 GBK/936），而非 UTF-8，这些字符会触发
 # UnicodeEncodeError 并中断命令执行。强制使用 UTF-8 并设置安全回退，
 # 确保输出不会因宿主控制台代码页不同而导致 CLI 崩溃。
 #
@@ -35,15 +35,16 @@ for _stream in (sys.stdout, sys.stderr):
 # 子进程（mpirun 拉起的各 rank 等）同样用 UTF-8
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-import click
-from loguru import logger
+# 以下导入放在标准流重配置之后（导入过程中的输出也要走 UTF-8）
+import click  # noqa: E402
+from loguru import logger  # noqa: E402
 
-from .. import __version__
-from autoflowcfd.cli.grid.commands import grid
-from autoflowcfd.cli.solve.commands import solve
-from autoflowcfd.cli.post.commands import post
-from .config_commands import config
-from .utils_commands import utils
+from .. import __version__  # noqa: E402
+from autoflowcfd.cli.grid.commands import grid  # noqa: E402
+from autoflowcfd.cli.solve.commands import solve  # noqa: E402
+from autoflowcfd.cli.post.commands import post  # noqa: E402
+from .config_commands import config  # noqa: E402
+from .utils_commands import utils  # noqa: E402
 
 
 @click.group()
@@ -85,7 +86,8 @@ def cli(verbose: bool) -> None:
         logger.add(
             lambda msg: click.echo(msg, err=True),
             level="DEBUG",
-            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+            format=("<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
+                    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"),
         )
     else:
         logger.remove()

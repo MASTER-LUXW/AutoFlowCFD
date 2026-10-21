@@ -142,6 +142,7 @@ class TestGPUTimeIntegration:
         U = cupy.array([[1.0, 0.0, 0.0, 0.0, 100.0]])
         dt_local = cupy.array([0.01])
         # 残差函数：常数残差
+
         def residual(U):
             return cupy.ones_like(U) * 10.0
         U_new = integrator.step(U, residual, dt_local)

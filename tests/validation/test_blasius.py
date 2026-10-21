@@ -191,7 +191,7 @@ class TestReferenceSolutionItself:
             assert got == pytest.approx(0.8604 / np.sqrt(re_x), rel=2e-4), (
                 f"Re_x={re_x:.1e}: v/U={got:.6e}")
         # 壁面上 v 必须严格为零（无滑移 + 不可穿透）
-        assert float(blasius_v_over_u(np.array([0.0]), 1.0e4)[0]) ==             pytest.approx(0.0, abs=1e-14)
+        assert float(blasius_v_over_u(np.array([0.0]), 1.0e4)[0]) == pytest.approx(0.0, abs=1e-14)
 
 
 class TestCaseConstruction:
@@ -379,7 +379,6 @@ class TestExactCriteriaOnAShortRun:
             solver, solver.mesh, L_PLATE, meta["H"], meta["Lz"])
         assert m_in > 0.0 and m_out > 0.0
         assert imb < 5.0e-2, f"in={m_in:.6e} out={m_out:.6e} imb={imb:.3e}"
-
 
     def test_wall_normal_velocity_is_small_at_the_wall(self, run):
         """贴壁第一层的 v 应远小于 U（边界层里 v/U ~ 1/sqrt(Re_x)）。"""

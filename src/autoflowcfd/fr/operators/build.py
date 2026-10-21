@@ -175,4 +175,3 @@ def generate_fr_operators(order: int) -> FROperators:
         face_extrap_by_op=face_extrap_by_op,
         face_lift_by_op=face_lift_by_op,
     )
-

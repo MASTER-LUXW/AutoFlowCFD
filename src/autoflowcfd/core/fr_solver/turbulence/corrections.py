@@ -28,6 +28,7 @@ def apply_turbulence_corrections(solver) -> None:
         nu_t = solver.sgs_model.compute_eddy_viscosity(grad_u, delta)
         logger.debug(f"SGS eddy viscosity computed: mean={nu_t.mean():.6e}, max={nu_t.max():.6e}")
 
+
 def get_turbulent_viscosity_field(solver) -> Optional[np.ndarray]:
     """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t。"""
     rho = solver.state.Q[:, :, 0]

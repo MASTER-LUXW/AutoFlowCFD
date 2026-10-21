@@ -69,4 +69,3 @@ def admissible_omega(omega, omega_inf: float, xp=np, source: str = "checkpoint")
                        f"{OMEGA_FLOOR_FRACTION} * omega_inf")
         omega = xp.where(bad, OMEGA_FLOOR_FRACTION * float(omega_inf), omega)
     return omega
-

@@ -125,7 +125,8 @@ def generate_hybrid_mesh(
             degenerate_threshold_seam = (min_cell_size ** 3) * 1e-6
             valid_mask_seam = post_merge_volumes_seam > degenerate_threshold_seam
             if int(np.sum(~valid_mask_seam)) > 0:
-                logger.warning(f"Seam merge left {int(np.sum(~valid_mask_seam))} newly-degenerate cells, removing them...")
+                logger.warning(f"Seam merge left {int(np.sum(~valid_mask_seam))} newly-degenerate cells, "
+                               "removing them...")
                 merged_cells = merged_cells[valid_mask_seam]
                 volumes = volumes[valid_mask_seam]
             merged_nodes, merged_cells, _nm_changed_seam = (
@@ -147,7 +148,7 @@ def generate_hybrid_mesh(
         merged_cells = merged_cells.astype(np.int32)
         validator = MeshQualityValidator()
         logger.info("Checking volume mesh quality (pre-repair)...")
-        
+
         _pre_repair_node_arr = NodeArray.from_array(merged_nodes)
         pre_repair_faces = FaceExtractor.extract_faces(merged_cells, _pre_repair_node_arr)
         initial_report = validator.validate(
@@ -178,7 +179,7 @@ def generate_hybrid_mesh(
             mesh_changed_by_repair = True
             merged_cells = merged_cells.astype(np.int32)
             prism_cells = _remap[prism_cells]
-            
+
             # 合并后检查新的退化
             _tmp_nodes_obj = NodeArray.from_array(merged_nodes)
             post_merge_volumes = TetrahedralCells.compute_volumes(_tmp_nodes_obj, merged_cells)

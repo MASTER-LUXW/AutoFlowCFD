@@ -5,11 +5,6 @@
 """
 
 
-
-
-
-
-
 # LES/DDES 入口合成湍流（`boundary/synthetic_inlet.py`）：雷诺应力与涡核尺度由来流湍流强度、涡粘比给定（与 RANS
 # 来流同一组量），涡核数量由 `--sem-num-eddies`（solver._sem_num_eddies）给定。下面是涡核数的默认值（各求解器
 # 构造签名与 CLI 的唯一来源）：None 表示按 Jarrin 密度判据 N = V_B / sigma_min^3 自动取（2026-10-17 以前固定 200，

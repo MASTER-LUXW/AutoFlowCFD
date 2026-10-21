@@ -137,7 +137,8 @@ def wall_group_codes(provider, groups: Optional[Sequence[str]] = None) -> Dict[i
     """参与积分的组：缺省为全部物理无滑移的 WALL 组（滑移壁不属于物体，模块文档）；`groups` 给出时按名字取
     （必须存在且是 WALL 组，滑移壁也可以显式指定）。"""
     names = dict(getattr(provider, "code_to_name", {}) or {})
-    wall = {code: names.get(code, str(code)) for code, cfg in provider.code_to_config.items() if cfg.get("type") == "WALL"}
+    wall = {code: names.get(code, str(code)) for code,
+            cfg in provider.code_to_config.items() if cfg.get("type") == "WALL"}
     if groups is None:
         from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall
 

@@ -209,7 +209,6 @@ class TestNativePrismGeometry:
     # Lz=0.004)` 网格在坍缩档下度量确实随点变化（极值比 > 2）**，所以
     # "原生档恒定"是基本身的功劳，不是网格规整的副产物。
 
-
     def test_prism_rows_fill_the_storage_width(self, monkeypatch):
         """棱柱的每个存储槽位都是真实解点（宽度 = 棱柱自由度数，I-29）：几何量逐点互不相同、有限且 det(J) 非零。
 

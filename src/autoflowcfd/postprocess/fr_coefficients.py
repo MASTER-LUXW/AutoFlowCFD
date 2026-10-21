@@ -74,7 +74,8 @@ def compute_aerodynamic_coefficients_fr(
     )
 
 
-def pressure_force_coefficients(solver, reference_area: float, groups: Optional[Sequence[str]] = None) -> Dict[str, float]:
+def pressure_force_coefficients(solver, reference_area: float, groups: Optional[Sequence[str]] = None) -> Dict[str,
+                                                                                                               float]:
     """只含压力（无粘数值通量）部分的力系数 {'Cd','Cl','Cs'}，供每步监控：不算速度梯度，开销只在壁面通量点上。"""
     host = solver.host_view() if hasattr(solver, "host_view") else solver
     code_to_name = wall_group_codes(host.boundary_ghost_provider, groups)

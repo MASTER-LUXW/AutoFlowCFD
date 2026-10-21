@@ -24,7 +24,8 @@ def _plate_under_big_slab(rng, n_junk=20):
     slab = np.array([[-50, -50, -2.2], [50, -50, 2.8], [50, 50, 2.8], [-50, 50, -2.2]])   # z = 0.3 + 0.05 x
     junk = rng.uniform(-2, 2, size=(3 * n_junk, 3))
     nodes = np.vstack([plate, slab, junk])
-    faces = np.vstack([pf, [[81, 82, 83], [81, 83, 84]], 85 + np.arange(3 * n_junk).reshape(n_junk, 3)]).astype(np.int64)
+    faces = np.vstack([pf, [[81, 82, 83], [81, 83, 84]], 85 + np.arange(3 * n_junk).reshape(n_junk,
+                                                                                            3)]).astype(np.int64)
     return nodes, faces, np.array(pf, dtype=np.int64)
 
 

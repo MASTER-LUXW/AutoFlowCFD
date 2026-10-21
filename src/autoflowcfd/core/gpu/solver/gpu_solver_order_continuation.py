@@ -22,7 +22,6 @@ import numpy as np
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
-
 def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     """`GPUFRSolver` 的阶数切换（升阶精确 Lagrange 延拓 / 降阶到 P0
     时重置为均匀自由流场，两种情形与 CPU/GPU 分布式版本同一处理，见

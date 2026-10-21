@@ -81,7 +81,7 @@ def parse(
     \b
         # 米制坐标的文件
         $ autoflowcfd grid parse plate.nas --units m
-    
+
     \f
 
     Args:
@@ -193,7 +193,7 @@ def validate(
     \b
         # 自定义阈值
         $ autoflowcfd grid validate sedan.nas --threshold-aspect-ratio 500.0
-    
+
     \f
 
     Args:
@@ -247,7 +247,7 @@ def validate(
 
         if exit_code != 0:
             raise SystemExit(exit_code)
-    
+
     except Exception as e:
         logger.error(f"Validation failed: {e}")
         if json_output:
@@ -277,7 +277,7 @@ def info(input_file: str, units: str, json_output: bool) -> None:
     \b
         # JSON 输出
         $ autoflowcfd grid info sedan.nas --json
-    
+
     \f
 
     Args:
@@ -331,12 +331,12 @@ def info(input_file: str, units: str, json_output: bool) -> None:
             click.echo(f"Nodes:          {node_count:,}")
             click.echo(f"Cells:          {cell_count:,}")
             click.echo(f"Boundaries:     {len(result['boundary_groups'])} groups")
-            
+
             for name, count in result['boundary_groups'].items():
                 click.echo(f"  - {name:<15} {count:,} cells")
             bbox = result["bounding_box_m"]
             click.echo(f"Bounding box:   {bbox['min']} ~ {bbox['max']} m")
-    
+
     except Exception as e:
         logger.error(f"Failed to get grid info: {e}")
         if json_output:

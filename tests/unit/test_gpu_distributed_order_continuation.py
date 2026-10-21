@@ -114,7 +114,8 @@ class TestGpuInterpolateToNewOrderCoreMath:
 
         # 短路掉几何/分区/上传相关的重型基础设施——已由本项目其余测试
         # 独立验证过，不是本次改动的对象。
-        new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local, local_faces=np.array([], dtype=np.int64))
+        new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local,
+                                              local_faces=np.array([], dtype=np.int64))
         monkeypatch.setattr(gpu_oc_module, "build_distributed_partition", lambda *a, **k: new_partition) \
             if hasattr(gpu_oc_module, "build_distributed_partition") else None
 
@@ -185,7 +186,8 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.sgs_model_gpu = None
         solver.wall_model = None
 
-        new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local, local_faces=np.array([], dtype=np.int64))
+        new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local,
+                                              local_faces=np.array([], dtype=np.int64))
         import autoflowcfd.core.mpi.partition as partition_mod
         patch_pkg_attr(monkeypatch, partition_mod, "build_distributed_partition", lambda *a, **k: new_partition)
 
@@ -244,7 +246,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
     """
 
     def _make_solver_stub(self, k_value, omega_value, n_cells=8, n_sps=6,
-                           k_max=555.44, omega_max=1e6):
+                          k_max=555.44, omega_max=1e6):
         from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
         from autoflowcfd.core.turbulence.sst import SSTModelFR
 

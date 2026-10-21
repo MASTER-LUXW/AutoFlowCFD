@@ -49,7 +49,7 @@ def test_cli_resolution():
     assert r(None, None, None, None, 1.225, 1.8e-5) is None
     assert r(2e-5, None, None, None, 1.225, 1.8e-5) == 2e-5
     assert r(None, 1.0, 40.0, 4.0, 1.225, 1.8e-5) == pytest.approx(first_layer_height_for_yplus(1.0, 40.0, 4.0,
-                                                                                              1.225, 1.8e-5))
+                                                                                                1.225, 1.8e-5))
     for args in ((2e-5, 1.0, 40.0, 4.0), (None, 1.0, None, 4.0), (None, None, 40.0, None)):
         with pytest.raises(click.UsageError):
             r(*args, 1.225, 1.8e-5)

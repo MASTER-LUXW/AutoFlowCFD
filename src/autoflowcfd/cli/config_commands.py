@@ -21,14 +21,14 @@ from loguru import logger
 @click.group()
 def config() -> None:
     """配置管理命令。
-    
+
     创建、验证和管理 YAML 配置文件。
-    
+
     \b
     Examples:
         # 创建配置模板
         $ autoflowcfd config init --template steady
-        
+
     \b
         # 验证配置
         $ autoflowcfd config validate simulation.yaml
@@ -43,19 +43,19 @@ def config() -> None:
               help="输出文件路径")
 def init(template: str, output: str) -> None:
     """生成配置文件模板。
-    
+
     为稳态或瞬态仿真创建带有合理默认值的 YAML 配置模板。
-    
+
 
     \b
     Examples:
         # 稳态模板
         $ autoflowcfd config init --template steady -o steady_config.yaml
-        
+
     \b
         # 瞬态模板
         $ autoflowcfd config init --template transient -o transient_config.yaml
-    
+
     \f
 
     Args:
@@ -77,7 +77,7 @@ def init(template: str, output: str) -> None:
         click.echo(f"✓ 配置模板已创建: {output}")
         click.echo(f"  类型: {template}")
         click.echo("\n编辑此文件以自定义您的仿真设置。")
-    
+
     except Exception as e:
         logger.error(f"创建配置模板失败: {e}")
         raise click.ClickException(f"创建配置模板失败: {e}")
@@ -88,19 +88,19 @@ def init(template: str, output: str) -> None:
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def show(config_file: str, json_output: bool) -> None:
     """显示配置文件内容。
-    
+
     加载并显示 YAML 配置文件，并进行验证。
-    
+
 
     \b
     Examples:
         # 显示配置
         $ autoflowcfd config show simulation.yaml
-        
+
     \b
         # JSON 输出
         $ autoflowcfd config show simulation.yaml --json
-    
+
     \f
 
     Args:
@@ -108,26 +108,26 @@ def show(config_file: str, json_output: bool) -> None:
         json_output: 以 JSON 格式输出
     """
     from autoflowcfd.config import ConfigLoader
-    
+
     logger.info(f"正在加载配置: {config_file}")
-    
+
     try:
         loader = ConfigLoader()
         config_obj = loader.load(config_file)
-        
+
         # 转换为字典以便显示
         if hasattr(config_obj, '__dict__'):
             config_dict = vars(config_obj)
         else:
             config_dict = config_obj.__dict__
-        
+
         if json_output:
             # 将枚举转换为字符串
             def enum_serializer(obj):
                 if hasattr(obj, 'value'):
                     return obj.value
                 raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-            
+
             click.echo(json.dumps(config_dict, indent=2, default=enum_serializer))
         else:
             click.echo(f"\n配置: {config_file}")
@@ -138,7 +138,7 @@ def show(config_file: str, json_output: bool) -> None:
                     value = value.value
                 click.echo(f"{key:<25} {value}")
             click.echo(f"{'='*60}")
-    
+
     except Exception as e:
         logger.error(f"加载配置失败: {e}")
         raise click.ClickException(f"加载配置失败: {e}")
@@ -149,19 +149,19 @@ def show(config_file: str, json_output: bool) -> None:
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def validate(config_file: str, json_output: bool) -> None:
     """验证配置文件。
-    
+
     检查配置文件是否存在语法错误和无效值。
-    
+
 
     \b
     Examples:
         # 验证配置
         $ autoflowcfd config validate simulation.yaml
-        
+
     \b
         # JSON 输出
         $ autoflowcfd config validate simulation.yaml --json
-    
+
     \f
 
     Args:
@@ -198,7 +198,7 @@ def validate(config_file: str, json_output: bool) -> None:
             click.echo("✓ 配置有效")
             click.echo(f"  文件: {config_file}")
             click.echo(f"  模式: {mode}")
-    
+
     except Exception as e:
         logger.error(f"配置验证失败: {e}")
         result = {
@@ -207,8 +207,8 @@ def validate(config_file: str, json_output: bool) -> None:
             "file": config_file,
             "error": str(e),
         }
-        
+
         if json_output:
             click.echo(json.dumps(result, indent=2))
-        
+
         raise click.ClickException(f"配置验证失败: {e}")

@@ -82,7 +82,8 @@ def _nodal_basis(order: int, prism: bool, ref_pts: np.ndarray):
 def _inside(prism: bool, xi: np.ndarray) -> np.ndarray:
     r, s, t = xi[:, 0], xi[:, 1], xi[:, 2]
     if prism:
-        return (r >= -1 - _INSIDE_TOL) & (s >= -1 - _INSIDE_TOL) & (r + s <= _INSIDE_TOL) & (np.abs(t) <= 1 + _INSIDE_TOL)
+        return ((r >= -1 - _INSIDE_TOL) & (s >= -1 - _INSIDE_TOL) & (r + s <= _INSIDE_TOL)
+                & (np.abs(t) <= 1 + _INSIDE_TOL))
     return (r >= -1 - _INSIDE_TOL) & (s >= -1 - _INSIDE_TOL) & (t >= -1 - _INSIDE_TOL) & (r + s + t <= -1 + _INSIDE_TOL)
 
 

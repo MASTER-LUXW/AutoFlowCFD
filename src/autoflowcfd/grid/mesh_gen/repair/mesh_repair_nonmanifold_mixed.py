@@ -188,7 +188,8 @@ def patch_nonmanifold_cavity_mixed(
 
     seed_idx = np.flatnonzero(seed)
     if len(seed_idx) == 0:
-        logger.warning("Non-manifold mixed-cavity patch: seed set empty after degenerate-face filtering - falling back to plain cell removal")
+        logger.warning("Non-manifold mixed-cavity patch: seed set empty after degenerate-face filtering - "
+                       "falling back to plain cell removal")
         return nodes, prism_cells, tet_cells
 
     seed_pos = -np.ones(n_total, dtype=np.int64)

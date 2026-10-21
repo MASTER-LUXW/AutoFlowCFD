@@ -101,7 +101,6 @@ def compute_viscous_interface_correction_kernel(
             mut_o = matvec_small(E_o, mu_t_field[oc])
             adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
                 # 混合拆分面（B-8，与非着色版同步，见 compute_viscous_interface_correction_kernel 同名注释）。
@@ -184,7 +183,6 @@ def compute_viscous_interface_correction_kernel(
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)
             mut_n_native = matvec_small(E_n, mu_t_field[nc])
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
-
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):

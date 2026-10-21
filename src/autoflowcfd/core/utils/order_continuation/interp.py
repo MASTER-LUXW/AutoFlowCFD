@@ -10,8 +10,6 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 from autoflowcfd.fr.native_padding import sps_width
 
 
-
-
 def interpolate_to_new_order(solver: Any, new_order: int):
     """把解从当前阶数延拓到新阶数（Order Continuation 升阶/降阶）。
 

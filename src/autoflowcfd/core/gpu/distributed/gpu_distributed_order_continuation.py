@@ -19,7 +19,6 @@ import numpy as np
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
-
 def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     """`MultiGPUDistributedSolver` 的阶数切换（升阶精确 Lagrange 延拓 /
     降阶到 P0 时重置为均匀自由流场，两种情形见 CPU 版
@@ -92,7 +91,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         if solver.turb_model_gpu is not None:
             new_fields_np = solver.turb_model_gpu.freestream_fields((n_local, new_n_sps), np)
             new_nu_t_np = np.zeros((n_local, new_n_sps))
-
 
     # --- 2. mesh/ops 切换（mesh 是"传统模式"下每个 rank 都持有的完整
     # 全局网格）---
@@ -169,7 +167,8 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         compact_mesh_stub = types.SimpleNamespace(
             face_connectivity=types.SimpleNamespace(n_faces=solver.dist_flat_face.base_flat.n_faces)
         )
-        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
+        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub,
+                                                                       solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
             solver._wall_mask_gpu = cp.asarray(wall_mask_np)
             solver._open_mask_gpu = cp.asarray(open_mask_np)

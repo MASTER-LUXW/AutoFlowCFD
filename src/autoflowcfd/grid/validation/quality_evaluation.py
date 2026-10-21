@@ -128,7 +128,8 @@ def generate_recommendations(report: MeshQualityReport, thresholds: dict) -> Non
             "Improve BL-region aspect ratio: reduce growth_rate or first-layer "
             "min_cell_size"
         )
-    if (report.core_max_aspect_ratio or report.max_aspect_ratio) > thresholds.get('core_max_aspect_ratio', thresholds['max_aspect_ratio']):
+    if (report.core_max_aspect_ratio or report.max_aspect_ratio) > thresholds.get('core_max_aspect_ratio',
+                                                                                  thresholds['max_aspect_ratio']):
         report.recommendations.append(
             "Improve core-region aspect ratio: tighten max_cell_size grading"
         )

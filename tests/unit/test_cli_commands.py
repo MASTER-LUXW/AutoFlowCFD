@@ -352,6 +352,7 @@ def test_cli_output_is_line_buffered_when_redirected(tmp_path):
     out = tmp_path / "log.txt"
     with open(out, "w") as f:
         subprocess.run([sys.executable, "-c",
-                        "import sys, autoflowcfd.cli.main; print(sys.stdout.line_buffering, sys.stderr.line_buffering)"],
+                        "import sys, autoflowcfd.cli.main; "
+                        "print(sys.stdout.line_buffering, sys.stderr.line_buffering)"],
                        stdout=f, stderr=subprocess.DEVNULL, check=True)
     assert out.read_text().split() == ["True", "True"]

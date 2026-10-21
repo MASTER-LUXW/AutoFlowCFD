@@ -15,7 +15,6 @@ from autoflowcfd.core.utils.checkpoint_time import (
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 
 
-
 def save_results(solver, output_dir: str, quiet: bool = False):
     """
     保存求解结果到指定目录。
@@ -251,4 +250,3 @@ def periodic_checkpoint_callback(interval: int, output_dir: str, input_file: str
             print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
 
     return callback
-

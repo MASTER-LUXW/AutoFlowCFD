@@ -17,7 +17,8 @@ from .treatment import (  # noqa: F401
     DEFAULT_WALL_TREATMENT, WALL_TREATMENTS, build_wall_model, needs_wall_model, validate_wall_treatment)
 
 __all__ = [
-    "B_LOG", "DEFAULT_WALL_TREATMENT", "build_wall_model", "KAPPA", "EquilibriumWallModel", "WALL_TREATMENTS", "WallMatching",
+    "B_LOG", "DEFAULT_WALL_TREATMENT", "build_wall_model", "KAPPA", "EquilibriumWallModel", "WALL_TREATMENTS",
+    "WallMatching",
     "build_wall_matching", "needs_wall_model", "solve_u_plus", "spalding_y_plus", "validate_wall_treatment",
     "wall_model_codes", "wall_shear_stress",
 ]

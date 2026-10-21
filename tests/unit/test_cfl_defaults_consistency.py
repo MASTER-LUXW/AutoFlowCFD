@@ -115,7 +115,6 @@ class TestConfigLayer:
             assert getattr(cfg, field) is None, f"{cls_name}.{field} 默认值不是 None"
 
 
-
 def _factory_kwargs(fn_name, config):
     """用替身网格/求解器跑一次 API 入口，返回求解器工厂收到的关键字参数。"""
     from unittest.mock import MagicMock, patch

@@ -72,7 +72,8 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
     Q[:, :, 4] = p_inf
     U = primitive_to_conserved(Q)
 
-    residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=u_inf / 340.0, boundary_ghost_provider=DefaultGhostProvider())
+    residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=u_inf / 340.0,
+                                            boundary_ghost_provider=DefaultGhostProvider())
 
     scale = rho_inf * u_inf  # 质量通量量级，与坍缩坐标测试同一套归一化思路
     tet_rel_res = np.max(np.abs(residual[n_prisms:])) / scale
@@ -115,7 +116,8 @@ def test_native_padding_rows_stay_frozen_after_real_residual_evaluation(order):
     Q[:, :, 4] = 1.0e5 + 1.0e3 * rng.standard_normal((n_cells, n_sps))
     U = primitive_to_conserved(Q)
 
-    residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=0.06, boundary_ghost_provider=DefaultGhostProvider())
+    residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=0.06,
+                                            boundary_ghost_provider=DefaultGhostProvider())
 
     n_tets = n_cells - n_prisms
     for i in range(n_tets):

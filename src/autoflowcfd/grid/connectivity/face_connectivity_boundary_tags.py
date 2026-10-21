@@ -146,7 +146,8 @@ def tag_boundary_groups_by_geometry(
     return group_code, name_to_code
 
 
-def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] = None) -> Tuple[np.ndarray, Dict[str, int]]:
+def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] = None) -> Tuple[np.ndarray, Dict[str,
+                                                                                                                 int]]:
     """所有调用点的统一入口：优先用逐面几何匹配，缺少原始面网格数据时
     回退到单元级别匹配。
 

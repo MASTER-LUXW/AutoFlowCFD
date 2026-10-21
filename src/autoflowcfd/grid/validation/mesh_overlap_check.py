@@ -35,6 +35,7 @@ from .mesh_overlap_report import OverlapProximityReport
 if TYPE_CHECKING:
     from ..schema.grid_faces import FaceData
 
+
 def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
     # 延迟导入：本包其余地方 mesh_gen -> validation 是单向依赖（见 quality_validator.py 里相同的
     # _extract_faces），反方向只在调用时导入，不必考虑导入顺序。

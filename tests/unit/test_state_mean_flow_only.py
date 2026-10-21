@@ -30,7 +30,8 @@ def _cpu(turb):
     from autoflowcfd.core.fr_solver.solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 
-    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, vel_inf=10.0, time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+    s = FRSolver(mesh=_mesh(), order=1, turb_model_name=turb, vel_inf=10.0, time_scheme=TimeIntegrationScheme.SSP_RK3,
+                 rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     if turb != "NONE":
         apply_wall_distance_source(s, channel_wall_source(0.4, 0.1, 0.08))
     return s
@@ -51,7 +52,8 @@ def test_cpu_and_gpu_report_the_same_residual_norm_for_sst():
 
     cpu = _cpu("SST")
     gpu = GPUFRSolver(mesh=_mesh(), order=1, turb_model_name="SST", vel_inf=10.0,
-                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), time_scheme="ssp_rk3", rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+                      wall_distance_source=channel_wall_source(0.4, 0.1, 0.08), time_scheme="ssp_rk3",
+                      rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     assert gpu.n_vars == cpu.state.n_vars
     # 非均匀初场（均匀来流的残差只是舍入噪声，相对比较没有意义）
     rng = np.random.default_rng(5)

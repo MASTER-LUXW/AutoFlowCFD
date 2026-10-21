@@ -79,7 +79,9 @@ def get_device_info(device_id: int = 0) -> dict:
             return {
                 'available': True,
                 'device_id': device_id,
-                'name': props.get('name', b'unknown').decode() if isinstance(props.get('name'), bytes) else str(props.get('name', 'unknown')),
+                'name': props.get('name', b'unknown').decode() if isinstance(props.get('name'),
+                                                                             bytes) else str(props.get('name',
+                                                                                                       'unknown')),
                 'compute_capability': f"{props.get('major', 0)}.{props.get('minor', 0)}",
                 'total_memory_mb': props.get('totalGlobalMem', 0) / (1024 ** 2),
                 'multi_processor_count': props.get('multiProcessorCount', 0),

@@ -254,10 +254,14 @@ class TestExportHighorderVtkOrder3Tet:
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
+
 def _poly_field(xyz, order):
     """物理空间 order 次多项式（P=order 下被 FR 解精确表示）。"""
-    return _cubic_field(xyz) if order == 3 else (_quadratic_field(xyz) if order == 2 else
-                                                  101325.0 + 50.0 * xyz[..., 0] - 30.0 * xyz[..., 1] + 20.0 * xyz[..., 2])
+    if order == 3:
+        return _cubic_field(xyz)
+    if order == 2:
+        return _quadratic_field(xyz)
+    return 101325.0 + 50.0 * xyz[..., 0] - 30.0 * xyz[..., 1] + 20.0 * xyz[..., 2]
 
 
 def _pressure_state(mesh, order):
@@ -366,7 +370,8 @@ def _sst_channel_solver():
     mesh = build_channel_mesh_prism(2, 3, 3, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
-    s = FRSolver(mesh=mesh, order=2, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=30.0, rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
+    s = FRSolver(mesh=mesh, order=2, turb_model_name="SST", time_scheme=TimeIntegrationScheme.SSP_RK3, vel_inf=30.0,
+                 rho_inf=RHO_INF, p_inf=P_INF, mu_molecular=MU_MOLECULAR)
     s.order_continuation_enabled = False
     apply_wall_distance_source(s, channel_wall_source(0.4, 0.1, 0.08))
     y = np.asarray(s.mesh.sps_coords)[..., 1]
@@ -400,7 +405,8 @@ def test_cli_high_order_export(tmp_path):
     from autoflowcfd.cli.post.export_commands import export_vtk
 
     s = _sst_channel_solver()
-    with patch("autoflowcfd.cli.solve.checkpoint_io.rebuild_solver_from_checkpoint", return_value=(s, 0, {})),             patch("autoflowcfd.cli.post.helpers._locate_checkpoint", return_value=tmp_path / "ckpt.h5"):
+    with patch("autoflowcfd.cli.solve.checkpoint_io.rebuild_solver_from_checkpoint", return_value=(s, 0, {})), \
+         patch("autoflowcfd.cli.post.helpers._locate_checkpoint", return_value=tmp_path / "ckpt.h5"):
         ok = CliRunner().invoke(export_vtk, ["--case", str(tmp_path), "--high-order", "-o", str(tmp_path / "ho.vtu"),
                                              "--variables", "pressure", "--variables", "k"])
         assert ok.exit_code == 0, ok.output
@@ -408,4 +414,3 @@ def test_cli_high_order_export(tmp_path):
         assert grid.n_cells == s.mesh.n_cells and 'TurbulentKineticEnergy' in grid.point_data
         bad = CliRunner().invoke(export_vtk, ["--case", str(tmp_path), "--high-order", "-o", str(tmp_path / "x.vtk")])
         assert bad.exit_code != 0 and ".vtu" in bad.output
-

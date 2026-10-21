@@ -19,12 +19,12 @@ from .grid_faces import FaceData
 @dataclass
 class GridData:
     """网格数据主类
-    
+
     顶层容器，聚合节点、单元、边界和元数据为
     一个统一结构。
-    
+
     这是 AutoFlowCFD 中网格操作的主要接口。
-    
+
     属性:
         nodes: 节点数组
         cells: 单元数组
@@ -35,7 +35,7 @@ class GridData:
     cells: CellArray
     boundaries: BoundaryMap
     metadata: GridMetadata
-    
+
     def __post_init__(self):
         """验证网格数据一致性"""
         if self.metadata.node_count != self.nodes.count:
@@ -43,28 +43,28 @@ class GridData:
                 f"Metadata node count ({self.metadata.node_count}) doesn't match "
                 f"actual node count ({self.nodes.count})"
             )
-        
+
         if self.metadata.cell_count != self.cells.count:
             raise ValueError(
                 f"Metadata cell count ({self.metadata.cell_count}) doesn't match "
                 f"actual cell count ({self.cells.count})"
             )
-        
+
         logger.info(
             f"GridData validated: {self.metadata.node_count} nodes, "
             f"{self.metadata.cell_count} cells"
         )
-    
+
     @property
     def node_count(self) -> int:
         """获取节点数量"""
         return self.nodes.count
-    
+
     @property
     def cell_count(self) -> int:
         """获取单元数量"""
         return self.cells.count
-    
+
     def to_gpu(self) -> 'CupyGridData':
         """转换为GPU数据结构"""
         return CupyGridData(
@@ -73,7 +73,7 @@ class GridData:
             boundaries=self.boundaries,
             metadata=self.metadata
         )
-    
+
     @classmethod
     def from_gpu(cls, gpu_grid: 'CupyGridData') -> 'GridData':
         """从GPU数据结构转换"""
@@ -83,16 +83,16 @@ class GridData:
             boundaries=gpu_grid.boundaries,
             metadata=gpu_grid.metadata
         )
-    
+
     def save_hdf5(self, filepath: str) -> None:
         """保存网格数据到HDF5文件"""
         try:
             import h5py
         except ImportError:
             raise ImportError("h5py is required for HDF5 I/O. Install it with: pip install h5py")
-        
+
         logger.info(f"Saving grid to HDF5: {filepath}")
-        
+
         with h5py.File(filepath, 'w') as f:
             # 保存 metadata
             meta_group = f.create_group('metadata')
@@ -103,23 +103,23 @@ class GridData:
                 meta_group.attrs['bounding_box'] = self.metadata.bounding_box
             if self.metadata.creation_time:
                 meta_group.attrs['creation_time'] = self.metadata.creation_time
-            
+
             # 保存 节点
             node_group = f.create_group('nodes')
             node_group.create_dataset('x', data=self.nodes.x)
             node_group.create_dataset('y', data=self.nodes.y)
             node_group.create_dataset('z', data=self.nodes.z)
-            
+
             # 保存 单元
             cell_group = f.create_group('cells')
             cell_group.create_dataset('connectivity', data=self.cells.connectivity)
             cell_group.create_dataset('cell_type', data=self.cells.cell_type)
-            
+
             # 保存 boundaries
             self.boundaries.save_hdf5(f)
-        
+
         logger.success(f"Grid saved to {filepath}")
-    
+
     @classmethod
     def load_hdf5(cls, filepath: str) -> 'GridData':
         """从HDF5文件加载网格数据"""
@@ -127,9 +127,9 @@ class GridData:
             import h5py
         except ImportError:
             raise ImportError("h5py is required for HDF5 I/O. Install it with: pip install h5py")
-        
+
         logger.info(f"Loading grid from HDF5: {filepath}")
-        
+
         with h5py.File(filepath, 'r') as f:
             # 加载 metadata
             meta_group = f['metadata']
@@ -141,7 +141,7 @@ class GridData:
                 bounding_box=tuple(meta_group.attrs['bounding_box']) if 'bounding_box' in meta_group.attrs else None,
                 creation_time=str(meta_group.attrs['creation_time']) if 'creation_time' in meta_group.attrs else None
             )
-            
+
             # 加载 节点
             node_group = f['nodes']
             nodes = NodeArray(
@@ -149,20 +149,20 @@ class GridData:
                 y=node_group['y'][:],
                 z=node_group['z'][:]
             )
-            
+
             # 加载 单元
             cell_group = f['cells']
             cells = CellArray(
                 connectivity=cell_group['connectivity'][:],
                 cell_type=cell_group['cell_type'][:]
             )
-            
+
             # 加载 boundaries
             boundaries = BoundaryMap.load_hdf5(f)
             metadata.boundary_groups = boundaries.boundary_names
-        
+
         logger.success(f"Grid loaded from {filepath}")
-        
+
         return cls(nodes=nodes, cells=cells, boundaries=boundaries, metadata=metadata)
 
 
@@ -173,7 +173,7 @@ class CupyGridData:
     cells: CupyCellArray
     boundaries: BoundaryMap
     metadata: GridMetadata
-    
+
     def to_cpu(self) -> GridData:
         """转换为CPU数据结构"""
         return GridData(
@@ -187,10 +187,10 @@ class CupyGridData:
 @dataclass
 class VolumeMeshData:
     """体网格数据主类（基于真实三维体积）
-    
+
     包含真实 3D 单元的体网格数据顶层容器。
     支持四面体、六面体和混合网格。
-    
+
     属性:
         nodes: 节点数组
         cells: 四面体单元数组（核心区 tetgen 填充 + 未转换为棱柱的 BL 单元）

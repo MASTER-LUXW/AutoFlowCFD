@@ -278,7 +278,7 @@ def freeze_self_colliding_nodes(
         remaining_budget[guilty] = 0.0
         frozen[guilty] = True
         total_frozen_count += len(guilty)
-        
+
         if i == 0:
             logger.warning(f"Detected {len(colliding_faces)} self-intersecting faces in BL layer. "
                            f"Freezing {len(guilty)} nodes to prevent invalid geometry.")

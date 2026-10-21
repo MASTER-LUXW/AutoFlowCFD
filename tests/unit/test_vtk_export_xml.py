@@ -13,10 +13,10 @@ import pytest
 
 pv = pytest.importorskip("pyvista")
 
-from autoflowcfd.core.backend.base import SolutionVector
-from autoflowcfd.postprocess._field_utils import cell_to_node
-from autoflowcfd.postprocess.vtk_export import VTKExporter
-from autoflowcfd.postprocess.vtk_export_xml import export_volume
+from autoflowcfd.core.backend.base import SolutionVector  # noqa: E402
+from autoflowcfd.postprocess._field_utils import cell_to_node  # noqa: E402
+from autoflowcfd.postprocess.vtk_export import VTKExporter  # noqa: E402
+from autoflowcfd.postprocess.vtk_export_xml import export_volume  # noqa: E402
 
 
 def _mixed_grid():

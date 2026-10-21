@@ -60,7 +60,8 @@ class _GPUSolverInitMixin:
             raise RuntimeError("网格没有 sps_coords，无法在解点上查询壁面距离")
         dist = source.query(np.asarray(sps).reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell, 3))
         self.wall_distance_gpu = cp.asarray(dist)
-        logger.info(f"Wall distance ({source.n_wall_faces} wall triangles, exact) computed: min={dist.min():.6e}, max={dist.max():.6e}")
+        logger.info(f"Wall distance ({source.n_wall_faces} wall triangles, exact) computed: "
+                    f"min={dist.min():.6e}, max={dist.max():.6e}")
         model = getattr(self, "turb_model_gpu", None)
         if hasattr(model, "apply_wall_distance"):
             # SST 设 omega 上界、SA-neg 识别壁面解点（`TransportedTurbulence.apply_wall_distance`）

@@ -1,15 +1,6 @@
 """AutoFlowCFD V2.0 - 把紧凑索引空间的壁面几何上传到设备"""
 
 
-
-
-
-
-
-
-
-
-
 def _upload_wall_geometry_compact(solver, package, cp, device_id):
     """从 package 里取出 root 已经按本 rank 的 compact 索引空间算好、
     切好的 wall_distance_compact/iddes_h_max_compact/iddes_h_wn_compact

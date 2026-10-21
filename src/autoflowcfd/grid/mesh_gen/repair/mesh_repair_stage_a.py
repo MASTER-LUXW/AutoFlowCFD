@@ -36,19 +36,20 @@ def run_stage_a_repair(
     from .mesh_repair import smooth_bad_cells
 
     logger.info("Running Stage A: Quality-gated smoothing...")
-    
+
     nodes_before_repair = merged_nodes
     merged_nodes, bad_mask, repair_actions = smooth_bad_cells(
-        merged_nodes, merged_cells, validator, max_passes=5, 
+        merged_nodes, merged_cells, validator, max_passes=5,
         initial_faces=pre_repair_faces,
         extra_bad_mask=overlap_bad_mask,
     )
-    
+
     mesh_changed_by_repair = not np.array_equal(nodes_before_repair, merged_nodes)
-    
+
     if mesh_changed_by_repair:
-        logger.info(f"Stage A completed: moved {int(np.sum(~np.all(nodes_before_repair == merged_nodes, axis=1)))} nodes.")
+        n_moved = int(np.sum(~np.all(nodes_before_repair == merged_nodes, axis=1)))
+        logger.info(f"Stage A completed: moved {n_moved} nodes.")
     else:
         logger.info("Stage A completed: no nodes moved.")
-        
+
     return merged_nodes, bad_mask, repair_actions

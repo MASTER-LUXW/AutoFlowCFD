@@ -5,12 +5,6 @@
 """
 
 
-
-
-
-
-
-
 # 热力学常数（GAMMA、R_AIR）在 core/thermo.py
 
 #: 分子 / 湍流普朗特数。残差（CPU 各路径、GPU）与解析 Jacobian 共用这一份。

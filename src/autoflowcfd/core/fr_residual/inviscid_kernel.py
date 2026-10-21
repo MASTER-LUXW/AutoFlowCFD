@@ -229,5 +229,3 @@ def compute_boundary_ghost_states(flat, Q, ghost_provider):
     Q_o = xp.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[idx]])
     Q_ghost[idx] = ghost_provider.ghost_states(faces, Q_o, flat.true_normal[idx])
     return Q_ghost
-
-

@@ -126,7 +126,10 @@ def test_legacy_init_from_lifts_to_higher_order(tmp_path):
 
     nodes1 = build_native_prism_nodes(1)
     nodes2 = build_native_prism_nodes(2)
-    lin = lambda x: 1.0 + 0.3 * x[:, 0] - 0.2 * x[:, 1] + 0.1 * x[:, 2]
+
+    def lin(x):
+        return 1.0 + 0.3 * x[:, 0] - 0.2 * x[:, 1] + 0.1 * x[:, 2]
+
     U = np.zeros((1, 8, 5))
     U[0, :6, :] = lin(nodes1)[:, None]
     U[0, 6:, :] = U[0, 0]                               # 旧约定：填充槽位复制真实 SP #0

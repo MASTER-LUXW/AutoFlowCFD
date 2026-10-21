@@ -270,7 +270,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             # omega_max 算出壁距后按最近壁面解点重定（`_init_wall_distance_gpu`）
             configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)
             logger.info(f"GPU SST k-omega model initialized on device {device_id} "
-                       f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
+                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
             print(f"   [OK] GPU SST k-omega model initialized "
                   f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 

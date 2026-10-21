@@ -38,11 +38,12 @@ from .threads import configure_numba_threads
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 
+
 class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                _SolverGeometryMixin):
     """
     基于通量重构 (FR) 方法的 N-S 方程求解器。
-    
+
     Attributes:
         mesh: 高阶网格对象
         state: 求解器状态容器

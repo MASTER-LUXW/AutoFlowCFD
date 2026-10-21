@@ -150,8 +150,10 @@ def newton_locate_on_prism_face(
         phys = map_prism_to_physical(full_points(x), cell_nodes)
         residual = phys - targets_phys  # (n_pts,3)
 
-        x_p0 = x.copy(); x_p0[:, 0] += eps
-        x_p1 = x.copy(); x_p1[:, 1] += eps
+        x_p0 = x.copy()
+        x_p0[:, 0] += eps
+        x_p1 = x.copy()
+        x_p1[:, 1] += eps
         phys_p0 = map_prism_to_physical(full_points(x_p0), cell_nodes)
         phys_p1 = map_prism_to_physical(full_points(x_p1), cell_nodes)
         J0 = (phys_p0 - phys) / eps  # (n_pts,3) d(phys)/d(x0)

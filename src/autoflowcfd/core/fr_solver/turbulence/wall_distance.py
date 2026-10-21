@@ -31,7 +31,8 @@ def apply_wall_distance_source(solver, source: WallDistanceSource) -> None:
     solver._wall_distance_source = source
     apply_wall_distance_to_model(solver)
     logger.info(
-        f"Wall distance ({source.n_wall_faces} wall triangles, exact) mapped to SPs for P{getattr(solver, 'current_order', '?')}: "
+        f"Wall distance ({source.n_wall_faces} wall triangles, exact) mapped to SPs for "
+        f"P{getattr(solver, 'current_order', '?')}: "
         f"shape={solver.wall_distance.shape}, min={solver.wall_distance.min():.6e}, "
         f"max={solver.wall_distance.max():.6e}")
 

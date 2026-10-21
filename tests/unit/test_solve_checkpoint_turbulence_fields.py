@@ -91,7 +91,6 @@ class TestWriteCheckpointStoresTurbulenceFields:
             assert "k_field" not in f["solution"]
             assert "omega_field" not in f["solution"]
 
-
     def test_only_the_conserved_state_is_stored(self, tmp_path):
         """原始变量由守恒变量导出、没有读取方（2026-10-08 以前另存 `Q_sps`，占单机 checkpoint 将近一半体积）。"""
         write_checkpoint(
@@ -188,6 +187,7 @@ class TestRebuildRestoresTurbulenceFields:
         import click
         # 重新构造出的求解器 U 形状相符（n_cells=2）但 turb_model 形状不符
         # （n_cells=5）——模拟湍流模型的场形状与平均流状态各自漂移的情形。
+
         def _fake_frsolver(**kwargs):
             from autoflowcfd.core.turbulence.sst import SSTModelFR
 

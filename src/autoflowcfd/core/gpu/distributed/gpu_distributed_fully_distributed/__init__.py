@@ -13,7 +13,8 @@ package`/`distributed_mesh_load_v2`，两者本身与后端无关，CPU/GPU 共�
 上传到 GPU（`GPUArrayManager.upload_mesh_data`/`GPUFlatFaceGeometry`/
 `cp.asarray`），且 SST 用 GPU 版类 `GPUTurbulenceSST`（DES 长度尺度与 WALE 是数组模块无关的同一份
 实现，以 `xp=cupy` 调用）——除此之外，package 的
-构造、字段含义与 CPU 版完全一致（全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入），直接复用
+构造、字段含义与 CPU 版完全一致（全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、
+全部时间格式、checkpoint 续算与 Order Continuation 均已接入），直接复用
 同一个 `build_fully_distributed_rank_package`/`distributed_mesh_load_v2`，
 不重新实现一遍。
 

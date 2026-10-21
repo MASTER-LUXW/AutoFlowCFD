@@ -154,7 +154,8 @@ def _build_standins(turb_model_name):
     dt_used = 1e-3  # 见 TestDdesModelDistinctFromSst 同一处 dt 放大注释
 
     stub = types.SimpleNamespace(
-        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, device_id=0, boundary_ghost_provider=DefaultGhostProvider(),
+        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, device_id=0,
+        boundary_ghost_provider=DefaultGhostProvider(),
         U_gpu=U, Q_gpu=conserved_to_primitive(U[..., :5]),
         mu_molecular=mu, turb_model_gpu=turb_gpu, sgs_model_gpu=None,
         ddes_model_gpu=_make_ddes_model_gpu(turb_model_name),
@@ -189,6 +190,7 @@ def _build_standins(turb_model_name):
     # 返回值），不能跟着平均流的预处理步长放大约 7 倍——k/omega 的显式
     # 更新刻意没有 point-implicit 阻尼。替身这里两份都给同一个常量，
     # 与 CPU 参照严格对齐，仍然满足本测试"逐位对照 SST 更新公式"的目的。
+
     def _dt_stub(return_physical_too=False):
         dt_arr = np.full(n_cells, dt_used)
         return (dt_arr, dt_arr) if return_physical_too else dt_arr

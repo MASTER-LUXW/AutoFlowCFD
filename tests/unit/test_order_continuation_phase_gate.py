@@ -157,7 +157,6 @@ def test_fixed_order_loop_converges_by_the_relative_criterion(monkeypatch):
     assert result.converged is True and calls["step"] == 7
 
 
-
 def test_phase_baseline_from_an_older_residual_definition_is_not_reused():
     """阶段基准随 checkpoint 带上残差范数定义版本；旧定义（或没有版本）写出的基准与当前残差不可比，不做种子。"""
     from autoflowcfd.core.time_integration.residual_norm import RESIDUAL_NORM_VERSION

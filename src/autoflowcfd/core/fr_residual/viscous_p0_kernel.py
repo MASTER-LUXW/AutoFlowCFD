@@ -45,7 +45,6 @@ from autoflowcfd.core.fr_residual.face_point_jumps import (
 )
 
 
-
 @njit(cache=True, parallel=True)
 def compute_viscous_interface_correction_p0_kernel(
     Q: np.ndarray,             # (n_cells, 1, 5)
@@ -87,7 +86,9 @@ def compute_viscous_interface_correction_p0_kernel(
 ) -> None:
     """P0 专用粘性界面校正 kernel（颜色组 `face_indices` 的贡献累加进 `correction`）。
 
-    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
+    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，
+    `fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程
+    缓冲与归约。与 P>=1 界面核同一套颜色分组。
 
     与通用 compute_viscous_interface_correction_kernel 数学等价，
     但 n_sps=1 时：
@@ -291,4 +292,3 @@ def compute_viscous_interface_correction_p0_kernel(
             contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)  # (1,5)
             for v in range(5):
                 correction[nc, 0, v] += contrib_neighbor[0, v] / dj
-

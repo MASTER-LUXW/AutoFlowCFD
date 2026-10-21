@@ -244,7 +244,8 @@ def step_newton_krylov(
         budget = block_precond.stale_budget() if block_precond is not None else None
         # 复核点（`gmres.py`）：复用的块在过时预算处；刚装配的块在还有补救可做（对角位移未启用）时取一个
         # 重启周期——外推到容差还要更久就不把预算烧完，直接补救
-        review = budget if budget is not None or block_precond is None or not block_precond.recoverable             else gmres_restart
+        review = (budget if budget is not None or block_precond is None or not block_precond.recoverable
+                  else gmres_restart)
         du, iters, ginfo, linear_rel = _solve_direction(
             jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm,
             review_at=None if review is None or review >= gmres_max_iter else review)

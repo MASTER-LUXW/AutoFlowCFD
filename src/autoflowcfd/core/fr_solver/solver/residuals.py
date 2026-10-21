@@ -21,7 +21,7 @@ class _SolverResidualMixin:
     def _init_turbulence_models(self, n_cells: int, n_sps: int):
         """初始化湍流模型（委托给 fr_solver_turbulence）。"""
         fr_solver_turbulence.init_turbulence_models(self, n_cells, n_sps)
-    
+
     def _build_boundary_ghost_provider(self, bc_overrides: Dict[str, Dict[str, Any]]):
         """构建边界幽灵态提供者 (BD-01)，委托给 fr_solver_boundary。"""
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
@@ -193,5 +193,3 @@ class _SolverResidualMixin:
             return mu_t
         mu_av = self.state.U[..., 0] * nu_av
         return mu_av if mu_t is None else mu_t + mu_av
-
-    

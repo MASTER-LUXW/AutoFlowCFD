@@ -178,7 +178,8 @@ def format_scaled_residual_line(diag: "ResidualDiagnostics",
     for i in range(min(n_vars, len(MEAN_FLOW_EQUATIONS))):
         parts.append(f"{MEAN_FLOW_EQUATIONS[i]}={diag.scaled_rms_per_var[i]:.3e}")
     scaled_str = " ".join(parts)
-    var_name = MEAN_FLOW_EQUATIONS[diag.max_abs_var] if diag.max_abs_var < len(MEAN_FLOW_EQUATIONS) else f"var{diag.max_abs_var}"
+    var_name = (MEAN_FLOW_EQUATIONS[diag.max_abs_var] if diag.max_abs_var < len(MEAN_FLOW_EQUATIONS)
+                else f"var{diag.max_abs_var}")
     loc = f"{var_name}@cell{diag.max_abs_cell}"
     pct = volume_percentile
     if pct is not None and diag.max_abs_cell < pct.size:

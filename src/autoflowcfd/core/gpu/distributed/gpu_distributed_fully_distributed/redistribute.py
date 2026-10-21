@@ -157,7 +157,8 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
         compact_mesh_stub = types.SimpleNamespace(
             face_connectivity=types.SimpleNamespace(n_faces=solver.dist_flat_face.base_flat.n_faces)
         )
-        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
+        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub,
+                                                                       solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
             solver._wall_mask_gpu = cp.asarray(wall_mask_np)
             solver._open_mask_gpu = cp.asarray(open_mask_np)

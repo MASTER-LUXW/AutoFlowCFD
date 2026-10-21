@@ -118,7 +118,7 @@ class _Built(Exception):
 ])
 @pytest.mark.parametrize("override,expected", [(None, False), (True, True)])
 def test_distributed_rebuild_paths_receive_the_switch(tmp_path, multi_gpu, fully_distributed, target,
-                                                     override, expected):
+                                                      override, expected):
     """四条分布式重建路径（CPU-MPI 传统/完全分布式、多 GPU 传统/完全分布式）都拿到同一个解析结果。"""
     from autoflowcfd.cli.solve.distributed_checkpoint_io import rebuild_distributed_solver_from_checkpoint
 

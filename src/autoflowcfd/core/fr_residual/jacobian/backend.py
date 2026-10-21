@@ -29,8 +29,6 @@ from .assemble import MeanFlowLinearization, assemble_mean_flow_blocks
 from .coupling import CouplingBlocks, CouplingGroup
 
 
-
-
 def unsupported_reason(*, order: int) -> Optional[str]:
     """解析装配不覆盖当前离散时返回原因（块 Jacobi 回到着色差分装配，精确、只是贵）。"""
     if int(order) < 1:

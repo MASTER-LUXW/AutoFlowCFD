@@ -43,7 +43,6 @@ def compute_inviscid_residual_fv_p0(
     from .inviscid import conserved_to_primitive
     from .inviscid_p0_kernel import _p0_inviscid_kernel
 
-
     n_cells = mesh.n_cells
     if mesh.cell_volumes is None:
         raise RuntimeError(

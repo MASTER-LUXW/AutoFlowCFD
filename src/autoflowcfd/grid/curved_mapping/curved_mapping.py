@@ -123,7 +123,8 @@ def cube_to_tet_rst(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> Tuple[np.nda
     return r, s, t
 
 
-def tet_barycentric(r: np.ndarray, s: np.ndarray, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def tet_barycentric(r: np.ndarray, s: np.ndarray, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                                                          np.ndarray]:
     """参考四面体重心坐标（对应顶点 v1,v2,v3,v4），恒满足 L1+L2+L3+L4=1。"""
     L1 = -(1.0 + r + s + t) / 2.0
     L2 = (1.0 + r) / 2.0

@@ -88,8 +88,10 @@ def _cross_check(U, mesh, mach_ref=0.2):
     from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
     from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
 
-    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
-    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=mach_ref, boundary_ghost_provider=DefaultGhostProvider())
+    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=mach_ref,
+                                                boundary_ghost_provider=DefaultGhostProvider())
+    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=mach_ref,
+                                                    boundary_ghost_provider=DefaultGhostProvider())
     gpu_residual_np = np.asarray(gpu_residual)
     return cpu_residual, gpu_residual_np
 

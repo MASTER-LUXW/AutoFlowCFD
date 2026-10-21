@@ -134,7 +134,7 @@ def _write_header(f, volume_mesh) -> None:
         volume_mesh: VolumeMeshData 对象
     """
     from datetime import datetime
-    
+
     # 注释行如实写明来源（2026-10-09 以前写的是 "$ANSA_VERSION;21.0.1;" 与 "file created by ANSA"——
     # 文件并不是 ANSA 生成的；没有任何解析器依赖这两行，ANSA 导入标准 Nastran bulk data 也不需要它们）
     timestamp = datetime.now().strftime("%a %b %d %H:%M:%S %Y")
@@ -283,5 +283,3 @@ def _write_pentahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: in
 
     logger.info(f"  Total pentahedral elements written: {n_prism:,}")
     return n_prism
-
-

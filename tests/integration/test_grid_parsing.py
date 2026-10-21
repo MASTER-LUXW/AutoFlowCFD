@@ -32,59 +32,59 @@ CTRIA3,6,1,7,8,4
         nas_file = tmp_path / "test_mesh.nas"
         nas_file.write_text(nas_content)
         return nas_file
-    
+
     def test_complete_parsing_workflow(self, sample_nas_file: Path) -> None:
         """从文件到校验后网格的完整解析流程。"""
         # Step 1: Parse NAS file
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Verify basic structure
         assert grid.node_count == 8
         assert grid.cell_count == 6
         assert grid.metadata.file_format == "v24"
-        
+
         # Verify data types
         assert grid.nodes.x.dtype == np.float64
         assert grid.cells.connectivity.dtype == np.int32
-        
+
         # Verify metadata
         assert grid.metadata.node_count == 8
         assert grid.metadata.cell_count == 6
         assert len(grid.metadata.boundary_groups) > 0
-    
+
     def test_parse_and_validate_workflow(self, sample_nas_file: Path) -> None:
         """解析之后做质量校验。"""
         # Parse
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Validate
         validator = GridValidator(grid)
         results = validator.validate()
-        
+
         # Check validation completed
         assert 'passed' in results
         assert 'aspect_ratio' in results
         assert 'skewness' in results
         assert 'jacobian' in results
         assert 'summary' in results
-    
+
     def test_hdf5_roundtrip(self, sample_nas_file: Path, tmp_path: Path) -> None:
         """经 HDF5 保存并读回网格。"""
         pytest.importorskip("h5py")
-        
+
         # Parse original
         parser = NASParser(str(sample_nas_file))
         original_grid = parser.parse()
-        
+
         # Save to HDF5
         h5_file = tmp_path / "grid.h5"
         original_grid.save_hdf5(str(h5_file))
-        
+
         # Load from HDF5
         loaded_grid = type(original_grid).load_hdf5(str(h5_file))
-        
+
         # Verify data integrity
         assert loaded_grid.node_count == original_grid.node_count
         assert loaded_grid.cell_count == original_grid.cell_count
@@ -95,71 +95,71 @@ CTRIA3,6,1,7,8,4
             loaded_grid.cells.connectivity,
             original_grid.cells.connectivity
         )
-    
+
     def test_boundary_mapping(self, sample_nas_file: Path) -> None:
         """边界条件映射。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Check boundaries exist
         assert len(grid.boundaries.groups) > 0
-        
+
         # Check BC types are valid
         for bc_type in grid.boundaries.bc_types.values():
             assert bc_type in {"INLET", "OUTLET", "WALL", "SYMMETRY", "FARFIELD"}
-    
+
     def test_coordinate_range(self, sample_nas_file: Path) -> None:
         """坐标落在预期范围内。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Check bounding box
         bbox = grid.metadata.bounding_box
         assert bbox is not None
-        
+
         # 顺序与 parser_core.py 的 _compute_bounding_box 一致：
         # (min_x, max_x, min_y, max_y, min_z, max_z)。
         min_x, max_x, min_y, max_y, min_z, max_z = bbox
-        
+
         # Verify bounds match actual data
         assert abs(min_x - np.min(grid.nodes.x)) < 1e-10
         assert abs(max_x - np.max(grid.nodes.x)) < 1e-10
         assert abs(min_y - np.min(grid.nodes.y)) < 1e-10
         assert abs(max_y - np.max(grid.nodes.y)) < 1e-10
-    
+
     def test_connectivity_validity(self, sample_nas_file: Path) -> None:
         """单元连接关系引用的都是有效节点。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # 全部节点索引都应有效
         max_node_idx = np.max(grid.cells.connectivity)
         assert max_node_idx < grid.node_count
-        
+
         # No negative indices
         assert np.min(grid.cells.connectivity) >= 0
-    
+
     def test_memory_layout_contiguous(self, sample_nas_file: Path) -> None:
         """数组采用连续内存布局。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Check SoA arrays are contiguous
         assert grid.nodes.x.flags['C_CONTIGUOUS']
         assert grid.nodes.y.flags['C_CONTIGUOUS']
         assert grid.nodes.z.flags['C_CONTIGUOUS']
         assert grid.cells.connectivity.flags['C_CONTIGUOUS']
         assert grid.cells.cell_type.flags['C_CONTIGUOUS']
-    
+
     def test_large_mesh_performance(self, tmp_path: Path) -> None:
         """较大网格（1 万节点）的性能。"""
         import time
-        
+
         # Generate a larger mesh
         lines = []
         nx, ny = 100, 100
         node_id = 1
-        
+
         for j in range(ny):
             for i in range(nx):
                 x = i / (nx - 1)
@@ -167,7 +167,7 @@ CTRIA3,6,1,7,8,4
                 z = 0.0
                 lines.append(f"GRID,{node_id},,{x:.6f},{y:.6f},{z:.6f}")
                 node_id += 1
-        
+
         cell_id = 1
         for j in range(ny - 1):
             for i in range(nx - 1):
@@ -179,28 +179,28 @@ CTRIA3,6,1,7,8,4
                 cell_id += 1
                 lines.append(f"CTRIA3,{cell_id},1,{n2},{n4},{n3}")
                 cell_id += 1
-        
+
         nas_content = "\n".join(lines)
         nas_file = tmp_path / "large_mesh.nas"
         nas_file.write_text(nas_content)
-        
+
         # Measure parsing time
         start_time = time.time()
         parser = NASParser(str(nas_file))
         grid = parser.parse()
         parse_time = time.time() - start_time
-        
+
         # Verify mesh size
         assert grid.node_count == nx * ny
         assert grid.cell_count == 2 * (nx - 1) * (ny - 1)
-        
+
         # 性能检查（1 万节点应在合理时间内完成）
         # 这个规模允许最多 5 秒
         assert parse_time < 5.0, f"Parsing took {parse_time:.2f}s, expected < 5s"
-        
+
         print(f"\nParsed {grid.node_count:,} nodes in {parse_time:.3f}s")
         print(f"Throughput: {grid.node_count / parse_time / 1000:.1f}k nodes/sec")
-    
+
     def test_error_handling_corrupt_file(self, tmp_path: Path) -> None:
         """损坏/不完整文件的错误处理。"""
         # 写一个只含部分数据的文件
@@ -210,39 +210,39 @@ GRID,2,,1.0,0.0,0.0
         # Missing cells
         nas_file = tmp_path / "corrupt.nas"
         nas_file.write_text(nas_content)
-        
+
         parser = NASParser(str(nas_file))
-        
+
         # Should raise appropriate error
         with pytest.raises(Exception):  # NASParseError
             parser.parse()
-    
+
     def test_metadata_consistency(self, sample_nas_file: Path) -> None:
         """元数据与实际数据一致。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         # Metadata should match actual counts
         assert grid.metadata.node_count == len(grid.nodes.x)
         assert grid.metadata.cell_count == len(grid.cells.connectivity)
-        
+
         # Boundary groups should match
         assert len(grid.metadata.boundary_groups) == len(grid.boundaries.groups)
-    
+
     def test_quality_metrics_reasonable(self, sample_nas_file: Path) -> None:
         """质量指标落在合理范围内。"""
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
-        
+
         validator = GridValidator(grid)
         results = validator.validate()
-        
+
         # Aspect ratio should be >= 1
         assert results['aspect_ratio']['min'] >= 1.0
-        
+
         # Skewness should be in [0, 1]
         assert 0.0 <= results['skewness']['min'] <= 1.0
         assert 0.0 <= results['skewness']['max'] <= 1.0
-        
+
         # 有效网格的 Jacobian 应为正
         assert results['jacobian']['min'] >= 0.0

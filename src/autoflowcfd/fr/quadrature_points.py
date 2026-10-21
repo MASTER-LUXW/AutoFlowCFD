@@ -43,40 +43,40 @@ def gauss_legendre(n: int) -> Tuple[np.ndarray, np.ndarray]:
 def gauss_lobatto(n: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     生成 1D Gauss-Lobatto 求积点和权重（包含端点 -1 和 1）。
-    
+
     Args:
         n: 点数
-        
+
     Returns:
         points: 求积点坐标 [-1, 1]
         weights: 求积权重
     """
     if n < 2:
         raise ValueError("Gauss-Lobatto requires at least 2 points")
-    
+
     # 使用 Chebyshev 节点作为初值进行 Newton-Raphson 迭代
     points = np.cos(np.pi * np.arange(n) / (n - 1))
-    
+
     for _ in range(20):
         p_val = np.polynomial.legendre.Legendre.basis(n - 1)(points)
         dp_val = np.polynomial.legendre.Legendre.basis(n - 1).deriv()(points)
-        
+
         delta = p_val / dp_val
         points -= delta
-        
+
         if np.max(np.abs(delta)) < 1e-14:
             break
-            
+
     points.sort()
-    
+
     # 确保端点精确为 -1 和 1
     points[0] = -1.0
     points[-1] = 1.0
-    
+
     # 计算 Lobatto 权重
     weights = np.zeros(n)
     P_n_minus_1 = np.polynomial.legendre.Legendre.basis(n - 1)(points)
     for i in range(n):
         weights[i] = 2.0 / (n * (n - 1) * P_n_minus_1[i]**2)
-        
+
     return points, weights

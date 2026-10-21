@@ -122,7 +122,7 @@ def parse_boundary_properties(
             property_names=property_names,
             parameters={}
         )
-        
+
     except Exception as e:
         raise NASParseError(f"Failed to parse boundaries: {str(e)}") from e
 
@@ -130,14 +130,14 @@ def parse_boundary_properties(
 def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
     """解析 $ANSA_NAME_COMMENT 卡片以提取 PID 到名称的映射。"""
     pid_to_name = {}
-    
+
     with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
         for line in f:
             line_stripped = line.strip()
-            
+
             if not line_stripped or not line_stripped.startswith('$'):
                 continue
-            
+
             # 检查是否为 ANSA_NAME_COMMENT 卡片
             # 格式：$ANSA_NAME_COMMENT;PID;PSHELL;name;;NO;NO;NO;NO;
             if line_stripped.upper().startswith('$ANSA_NAME_COMMENT'):
@@ -157,7 +157,7 @@ def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
                             logger.debug(f"Found Property: PID={pid}, Name='{prop_name}'")
                     except (ValueError, IndexError):
                         pass
-    
+
     return pid_to_name
 
 
@@ -218,12 +218,12 @@ def _parse_cell_to_pid_mapping(cells_data: list) -> Dict[int, int]:
 def _group_cells_by_pid(cell_to_pid: Dict[int, int]) -> Dict[int, List[int]]:
     """按属性 ID 分组单元。"""
     pid_to_cells = {}
-    
+
     for cell_idx, pid in cell_to_pid.items():
         if pid not in pid_to_cells:
             pid_to_cells[pid] = []
         pid_to_cells[pid].append(cell_idx)
-    
+
     return pid_to_cells
 
 
