@@ -46,7 +46,8 @@ def _threads_after_import(**env_vars):
     env = {k: v for k, v in os.environ.items() if k not in _THREAD_VARS}
     env.update(env_vars)
     code = "import os, autoflowcfd; print(os.environ['OMP_NUM_THREADS'], os.environ['OPENBLAS_NUM_THREADS'])"
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    out = subprocess.run([sys.executable, "-c", code], env=dict(env, PYTHONIOENCODING="utf-8"), capture_output=True,
+                         text=True, encoding="utf-8", errors="replace", check=True)
     return out.stdout.split()[-2:]
 
 

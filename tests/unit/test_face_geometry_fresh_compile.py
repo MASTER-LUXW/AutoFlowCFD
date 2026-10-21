@@ -27,9 +27,9 @@ _SNIPPET = textwrap.dedent(
 
 def test_mixed_mesh_face_geometry_builds_with_an_empty_numba_cache(tmp_path):
     root = str(Path(__file__).resolve().parents[2])
-    env = dict(os.environ, AFCFD_NUMBA_CACHE_ROOT=str(tmp_path / "numba_cache"))
+    env = dict(os.environ, AFCFD_NUMBA_CACHE_ROOT=str(tmp_path / "numba_cache"), PYTHONIOENCODING="utf-8")
     env.pop("NUMBA_CACHE_DIR", None)
     res = subprocess.run([sys.executable, "-c", _SNIPPET.format(root=root)], capture_output=True, text=True,
-                         timeout=1800, env=env, cwd=root)
+                         encoding="utf-8", errors="replace", timeout=1800, env=env, cwd=root)
     assert res.returncode == 0 and "FRESH_COMPILE_OK" in res.stdout, (
         f"全新编译建面几何失败（返回码 {res.returncode}）：\n{res.stderr[-3000:]}")

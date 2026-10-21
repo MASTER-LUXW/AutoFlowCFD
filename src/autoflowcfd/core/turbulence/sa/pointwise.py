@@ -84,8 +84,10 @@ def sa_source_terms(nu_tilde, nu, d_wall, omega_mag, production_factor, xp):
     denom = (C_V3 - 2.0 * C_V2) * omega_mag - s_bar
     s_mod = omega_mag + omega_mag * (C_V2 * C_V2 * omega_mag + C_V3 * s_bar) / _safe(denom, xp)
     s_tilde = xp.where(s_bar >= -C_V2 * omega_mag, omega_mag + s_bar, s_mod)
-    pos_s = s_tilde > 0.0
-    r = xp.where(pos_s, xp.minimum(nu_tilde / _safe(s_tilde * kd2, xp), R_LIM), R_LIM)
+    # r 只在正支（nu_t~ >= 0 且 S~ > 0）按定义取值；负支不用 f_w（见下面 destruction / damping 的 where），
+    # 那里 nu_t~/(S~ kappa^2 d^2) 可以是很大的负数，g ~ r^6 会溢出成 inf 再参与被丢弃分支的运算
+    r_ok = (s_tilde > 0.0) & (nu_tilde >= 0.0)
+    r = xp.where(r_ok, xp.minimum(nu_tilde / _safe(s_tilde * kd2, xp), R_LIM), R_LIM)
     g = r + C_W2 * (r ** 6 - r)
     f_w = g * ((1.0 + _CW3_6) / (g ** 6 + _CW3_6)) ** (1.0 / 6.0)
     ratio2 = (nu_tilde / d) ** 2

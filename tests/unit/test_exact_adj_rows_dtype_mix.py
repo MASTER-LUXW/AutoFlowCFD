@@ -35,6 +35,7 @@
 断言子进程的返回码 —— 修复前 139、修复后 0。
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -73,8 +74,8 @@ _REPO_ROOT_SNIPPET = textwrap.dedent(
 def _run_in_subprocess(tet_dtype: str, prism_dtype: str, src: str):
     code = _REPO_ROOT_SNIPPET.format(
         src=src, tet_dtype=tet_dtype, prism_dtype=prism_dtype)
-    return subprocess.run([sys.executable, "-c", code],
-                          capture_output=True, text=True, timeout=900)
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=900)
 
 
 @pytest.fixture(scope="module")
@@ -157,8 +158,8 @@ def test_pure_tet_mesh_builds_face_geometry(tmp_path):
             assert m.face_flux_points is not None
         print("OK")
     """)
-    r = subprocess.run([sys.executable, "-c", code],
-                       capture_output=True, text=True, timeout=1800)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=1800)
     assert r.returncode == 0, (
         f"纯四面体网格建面几何子进程返回码 {r.returncode}"
         f"（139 = 段错误）\nstderr: {r.stderr[-3000:]}")

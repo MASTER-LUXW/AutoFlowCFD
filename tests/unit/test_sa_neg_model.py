@@ -87,6 +87,18 @@ def test_vectorized_source_matches_scalar_reference():
     assert np.all(damp >= 0.0)
 
 
+def test_negative_branch_does_not_overflow():
+    """负支不用 f_w：nu_t~ < 0 且 S~ 走修正分支（很小的正数）时 nu_t~/(S~ kappa^2 d^2) 是很大的负数，不能让 g ~ r^6 溢出。"""
+    nt = np.array([-3e-5, -1e-4])
+    d = np.array([1e-6, 1e-6])
+    Om = np.array([1.0, 1.0])            # s_bar << -c_v2 Omega：S~ 走修正分支约 0.1 Omega，r 约 -2e9
+    with np.errstate(over="raise", invalid="raise"):
+        src, damp = sa_source_terms(nt, NU, d, Om, 1.0, np)
+    ref = np.array([_reference_source(a, NU, b, c) for a, b, c in zip(nt, d, Om)])
+    np.testing.assert_allclose(src, ref, rtol=1e-12)
+    assert np.all(np.isfinite(damp)) and np.all(damp >= 0.0)
+
+
 def test_branches_are_continuous_at_zero():
     d, Om = np.array([1e-3]), np.array([50.0])
     eps = 1e-14 * NU
