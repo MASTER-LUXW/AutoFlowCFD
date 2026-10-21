@@ -19,7 +19,6 @@ checkpoint_callback 是否正确调用、绝对迭代数是否正确、最终保
 调用），不重新验证网格加载/求解器构造这些底层机制本身。
 """
 
-from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -242,7 +241,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
             return_value=(fake_solver, 500, fake_metadata),
         ), patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
-        ) as mock_results:
+        ):
             runner = CliRunner()
             result = runner.invoke(
                 cli,

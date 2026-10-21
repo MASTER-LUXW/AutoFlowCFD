@@ -9,7 +9,6 @@
 import numpy as np
 
 from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
-from autoflowcfd.core.time_integration.implicit.blocks.block_budget import plan_for_budget
 import pytest
 
 from autoflowcfd.core.time_integration.implicit.blocks import block_jacobi as BJ

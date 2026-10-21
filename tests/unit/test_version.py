@@ -1,6 +1,5 @@
 """包元数据与版本信息的单元测试。"""
 
-import pytest
 from autoflowcfd import __version__, get_version, get_info
 
 

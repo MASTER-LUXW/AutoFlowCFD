@@ -2,8 +2,7 @@
 
 import pytest
 import numpy as np
-from pathlib import Path
-from autoflowcfd.grid.nas_io.parser import NASParser, NASFormatError, NASParseError
+from autoflowcfd.grid.nas_io.parser import NASParser, NASParseError
 
 
 class TestNASParser:

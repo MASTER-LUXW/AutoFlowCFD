@@ -25,7 +25,6 @@ def test_points_lie_exactly_on_the_given_face_plane():
     验证：排除的那个顶点分量应为零。"""
     n1d = 3
     sps_1d, _ = gauss_legendre(n1d)
-    from autoflowcfd.grid.curved_mapping.curved_mapping import tet_barycentric
 
     for excluded_vertex in range(4):
         pts = native_tet_face_points_physical(n1d, excluded_vertex, TET_NODES, sps_1d)

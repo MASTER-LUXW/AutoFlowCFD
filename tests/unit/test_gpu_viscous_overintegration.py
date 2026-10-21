@@ -5,7 +5,6 @@ import pytest
 
 from autoflowcfd.core.gpu.residual.gpu_viscous.volume import _viscous_volume_term_gpu
 
-from tests.unit._module_source import module_source
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
 

@@ -149,7 +149,7 @@ class TestRestoreDistributedStateFromCheckpoint:
         from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
         mesh, ops = mesh_and_ops
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        n_cells = mesh.n_cells
         rho_inf, vel_inf, p_inf = 1.225, 33.33, 101325.0
         gamma = 1.4
         e = p_inf / ((gamma - 1.0) * rho_inf) + 0.5 * vel_inf ** 2

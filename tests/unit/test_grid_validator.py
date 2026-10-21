@@ -265,16 +265,13 @@ class TestGridValidator:
     def test_custom_thresholds(self, simple_grid: GridData) -> None:
         """使用自定义质量阈值。"""
         validator = GridValidator(simple_grid)
-        
-        # Customize thresholds
-        validator.thresholds['aspect_ratio_max'] = 50.0
-        validator.thresholds['skewness_max'] = 0.99
-        validator.thresholds['jacobian_min'] = 1e-8
-        
-        results = validator.validate()
-        
-        # Should use custom thresholds
-        assert validator.thresholds['aspect_ratio_max'] == 50.0
+        base = validator.validate()
+
+        # 阈值收紧到实际最大长宽比之下：同一张网格必须判为不通过，且失败原因是长宽比
+        validator.thresholds['aspect_ratio_max'] = 0.5 * base['aspect_ratio']['max']
+        tightened = validator.validate()
+        assert not tightened['passed']
+        assert 'Aspect ratio' in tightened['summary']
     
     def test_validation_with_negative_jacobian(self) -> None:
         """处理绕向不一致（翻转）的单元。

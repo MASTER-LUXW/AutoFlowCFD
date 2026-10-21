@@ -6,10 +6,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.native_tet.overintegration import build_native_tet_overintegration_operators
-from autoflowcfd.fr.native_tet.basis import (
-    build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
-    restricted_tet_modes,
-)
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, map_native_tet_to_physical
 from autoflowcfd.fr.overintegration_order import overintegration_order
 
 TET_NODES = np.array([

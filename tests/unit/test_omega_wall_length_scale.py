@@ -33,7 +33,6 @@ resolved 保持 `min`（放大式的既有标定，逐位不变）；auto 用 `m
 `d1` 必须基本一致，而 `min` 口径必然随阶数单调变小。
 """
 
-import os
 
 import numpy as np
 import pytest

@@ -239,7 +239,6 @@ class TestDistributedDtMatchesSingleMachine:
             fc = mesh.face_connectivity
             cp_ = np.arange(mesh.n_cells) % 2
             part = build_distributed_partition(fc, cp_, rank=rank, n_ranks=2)
-            dist_fc = build_distributed_flat_face(mesh, ops, part, cell_partition=cp_)
             mu_t_local = mu_t_global[part.local_cells]
             dt, gids = _distributed_dt_for_rank(
                 mesh, ops, U, rank, 2, order, mu_t_local=mu_t_local)

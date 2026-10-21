@@ -8,7 +8,7 @@ P2 只有 1/10.3 / 1/7.30，步长随之放大同样的倍数：单 GPU 的实�
 
 import numpy as np
 
-from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 import pytest
 
 from autoflowcfd.core.time_integration import TimeIntegrationScheme

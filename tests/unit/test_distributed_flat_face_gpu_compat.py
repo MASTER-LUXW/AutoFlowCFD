@@ -16,7 +16,6 @@
 
 import numpy as np
 import pytest
-from contextlib import contextmanager
 from unittest.mock import patch
 
 from autoflowcfd.core.mpi.partition import build_distributed_partition

@@ -40,7 +40,6 @@ import subprocess
 import sys
 import textwrap
 
-import numpy as np
 import pytest
 
 _REPO_ROOT_SNIPPET = textwrap.dedent(

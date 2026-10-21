@@ -27,7 +27,6 @@ exp(1-25)=4e-11，只要域宽 >= 5 倍涡核半径，远场壁面反射误差�
 组合后，一个真正非定常、真正弯曲的二维流动结构能否在一个周期内被
 准确平动而不产生虚假耗散/频散/周期面处的伪反射。
 """
-from types import SimpleNamespace
 
 import numpy as np
 

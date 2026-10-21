@@ -59,8 +59,6 @@ class TestFROperators:
         """测试P=1阶算子生成"""
         order = 1
         ops = generate_fr_operators(order)
-        
-        n = order + 1  # SPs数量
 
         # 检查形状
         assert ops.n_sps == sps_width(order)
@@ -70,8 +68,6 @@ class TestFROperators:
         """测试P=2阶算子生成"""
         order = 2
         ops = generate_fr_operators(order)
-        
-        n = order + 1
 
         # 检查形状
         assert ops.n_sps == sps_width(order)

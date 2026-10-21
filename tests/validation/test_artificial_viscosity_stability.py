@@ -26,15 +26,12 @@ core/fr_operators/artificial_viscosity.py 与 solver.py 的 CFL/
 
 import numpy as np
 
-from tests.validation._channel_mesh import build_face_exact_ghost_provider, build_channel_mesh_prism
 from tests.validation.test_couette import _build_couette_solver
 from tests.validation.test_tgv import (
     N_STEPS, RHO_INF, _analytic_tgv_dissipation, _build_tgv_solver,
     _kinetic_energy, _set_tgv_ic,
 )
 
-from autoflowcfd.core.fr_solver import FRSolver
-from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 
 def test_couette_stable_from_wrong_ic_with_artificial_viscosity():

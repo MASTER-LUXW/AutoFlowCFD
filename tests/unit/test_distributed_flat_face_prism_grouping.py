@@ -97,19 +97,9 @@ class TestPrismGroupedCompactOrdering:
         fc = mesh.face_connectivity
 
         partition = build_distributed_partition(fc, cell_partition, rank=0, n_ranks=2)
-        n_halo = partition.n_halo
-        native_ids = (
-            np.concatenate([partition.local_cells, partition.halo_cells])
-            if n_halo > 0 else partition.local_cells
-        )
-        is_prism_native = native_ids < mesh.n_prism_cells
-        # rank0 拥有全局 cell 0(棱柱)和 2(四面体)，原生顺序是 [0,2,...]
-        # -> [棱柱, 四面体, ...]，即便这恰好已经是"前棱柱后四面体"，halo
-        # （若存在）大概率打破这个顺序——用 assert 显式记录这个场景下
-        # 原生顺序与排列后顺序是否不同，而不是盲目假设一定不同。
+        # rank0 拥有全局 cell 0(棱柱)和 2(四面体)，原生顺序是 [0,2,...] -> [棱柱, 四面体, ...]；halo 打破
+        # "前棱柱后四面体"这个顺序，所以这里需要重排。
         dist_flat = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
-        native_is_prism_grouped = bool(np.all(is_prism_native[: int(np.sum(is_prism_native))]))
-        permuted_is_prism_grouped = True  # 已在上面的测试里独立验证过
         # 至少要确认 perm 不是恒等置换（如果是恒等置换，说明这个测试
         # 网格没有真正触发需要重排的场景，需要换一个更能暴露问题的
         # cell_partition）。

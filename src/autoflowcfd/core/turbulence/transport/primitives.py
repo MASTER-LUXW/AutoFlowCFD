@@ -51,8 +51,6 @@ class CpuScalarTransport:
     def __init__(self, solver_like, conv_geom=None, flat_face_override=None):
         self.solver = solver_like
         self.flat = flat_face_override
-        flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(
-            solver_like.mesh, solver_like.ops)
         self.conv_geom = conv_geom if conv_geom is not None else prepare_convection_geometry(
             solver_like, flat_face_override)
         self.wall_zero = _compute_wall_dirichlet_face_mask(solver_like)

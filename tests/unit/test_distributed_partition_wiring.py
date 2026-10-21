@@ -11,7 +11,6 @@
 """
 
 import numpy as np
-import pytest
 
 from autoflowcfd.core.mpi.partition import build_distributed_partition
 

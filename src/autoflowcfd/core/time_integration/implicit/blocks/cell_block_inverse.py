@@ -108,8 +108,8 @@ def _apply_inverse_blocks(inv, rows, v, out):
                 acc = 0.0
                 for t in range(n_real):
                     rt = rows[b, t]
-                    for l in range(nv):
-                        acc += inv[b, i, t * nv + l] * v[rt, l]
+                    for q in range(nv):
+                        acc += inv[b, i, t * nv + q] * v[rt, q]
                 out[rs, k] = acc
 
 

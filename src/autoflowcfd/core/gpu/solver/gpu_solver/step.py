@@ -9,6 +9,7 @@
 from functools import partial
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
     newton_step_ok,
@@ -149,7 +150,6 @@ class _GPUSolverStepMixin:
             # （implicit/newton/coupled_step.py），否则只解平均流（implicit/newton/mean_flow_step.py），这里只提供
             # GPU 的残差、归约（cupy）与面相邻关系。稳态一步一个 Newton 步；双时间步每个物理步做若干个
             # 带 BDF 物理时间项的 Newton 步（implicit/newton/physical_time.py）。
-            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors, gpu_coupling_graph
             from autoflowcfd.core.fr_residual.jacobian.backend import (
                 MeanFlowBlockAssembler, unsupported_reason,
@@ -223,7 +223,6 @@ class _GPUSolverStepMixin:
 
         red = LocalReductions(cp)
         is_prism = np.arange(n_cells) < int(self.mesh.n_prism_cells)
-        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 
         residual_norm, self._residual_per_equation = monitor_residuals(
             red, residual0_raw, is_prism, order_from_n_sps(n_sps), _reference_scales(self.freestream, self.n_vars))

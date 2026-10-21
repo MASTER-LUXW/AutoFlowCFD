@@ -25,7 +25,6 @@ SST 拆包时拆包工具丢掉了 `_strain_vorticity_magnitude_kernel` 的
 import ast
 import importlib
 import io
-import os
 import pathlib
 
 import pytest

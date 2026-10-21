@@ -239,7 +239,6 @@ def parse_nodes_from_nas(
         logger.error("No valid GRID cards found")
         return (NodeArray(x=np.array([]), y=np.array([]), z=np.array([])), {})
 
-    total_grid_lines = node_count + parse_errors + skipped_lines
     dropped = parse_errors + skipped_lines
     if dropped:
         detail = "; ".join(f"第 {n} 行: {t}" for n, t in problems)

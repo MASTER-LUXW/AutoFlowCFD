@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 from autoflowcfd.core.probes import read_probe_series

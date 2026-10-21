@@ -3,7 +3,6 @@
 本身隔离：从不调用 tetgen 来产生这些异常（直接构造异常来测翻译逻辑）。
 """
 
-import pytest
 
 from autoflowcfd.grid.mesh_gen.tetgen.mesh_tetgen_error_translation import translate_tetgen_failure
 

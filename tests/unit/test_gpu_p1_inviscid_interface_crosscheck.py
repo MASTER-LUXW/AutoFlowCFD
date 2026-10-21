@@ -27,7 +27,6 @@ from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     primitive_to_conserved,
 )
-from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -93,7 +92,6 @@ def test_gpu_split_prism_quad_face_no_duplicate_counting():
     算出错误通量。用 order=2 的混合网格（含棱柱，_build_synthetic_
     mixed_mesh 保证棱柱四边形侧面被拆分）覆盖。"""
     mesh = _build_synthetic_mixed_mesh(2)
-    flat = mesh.face_connectivity
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     flat_geom = get_flat_face_geometry(mesh, mesh.operators)
     n_split = int(np.sum(~flat_geom.owner_is_primary) + np.sum(~flat_geom.neighbor_is_primary))

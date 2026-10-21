@@ -3,7 +3,7 @@
 import numpy as np
 
 from autoflowcfd.fr.face_flux_points.locate import locate_native_tet_face_point
-from autoflowcfd.grid.curved_mapping.curved_mapping import tet_barycentric, cube_to_tet_rst
+from autoflowcfd.grid.curved_mapping.curved_mapping import tet_barycentric
 
 TET_NODES = np.array([[0.1, -0.3, 0.2], [1.2, 0.0, -0.1], [-0.1, 1.1, 0.0], [0.0, 0.1, 1.3]], dtype=float)
 

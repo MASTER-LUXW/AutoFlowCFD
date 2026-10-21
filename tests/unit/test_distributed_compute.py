@@ -16,8 +16,6 @@ class TestDistributedComputeImport:
         from autoflowcfd.core.mpi.distributed_compute import (
             DistributedMeshAdapter,
             distributed_compute_inviscid_residual,
-            distributed_compute_viscous_residual,
-            distributed_mesh_adapter,
         )
         assert DistributedMeshAdapter is not None
         assert distributed_compute_inviscid_residual is not None
@@ -133,7 +131,7 @@ class TestNonMPIDegradation:
 
     def test_mpi_available_check(self):
         """验证 MPI 可用性检查。"""
-        from autoflowcfd.core.mpi import mpi_available, get_rank, get_size
+        from autoflowcfd.core.mpi import get_rank, get_size
         # 在非 MPI 环境中，这些函数应该返回安全的默认值
         rank = get_rank()
         size = get_size()

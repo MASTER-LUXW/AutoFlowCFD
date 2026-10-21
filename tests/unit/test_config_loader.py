@@ -64,7 +64,6 @@ class TestConfigLoaderTemplateRoundTrip:
         yaml_path.write_text("mode: steady\n", encoding="utf-8")
 
         from loguru import logger
-        import sys
 
         messages = []
         handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")

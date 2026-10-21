@@ -197,7 +197,6 @@ class TestEquivalenceWithPaddedVersion:
     @pytest.mark.parametrize("order", [1, 2])
     def test_padded_slots_are_zero(self, order):
         """直接验证不变量本身：真实块之外全为零。"""
-        oo = _over_order(order)
         ops = generate_fr_operators(order)
         n_nat_sps = (order + 1) * (order + 2) * (order + 3) // 6
         # interp 的列（粗轴）在 n_nat_sps 之后必须全零

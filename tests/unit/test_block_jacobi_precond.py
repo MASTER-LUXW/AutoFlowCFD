@@ -14,7 +14,6 @@
 """
 
 import numpy as np
-import pytest
 
 from autoflowcfd.core.time_integration.implicit.blocks import block_budget as bb
 from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache

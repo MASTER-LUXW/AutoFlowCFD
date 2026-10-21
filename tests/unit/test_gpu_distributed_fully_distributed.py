@@ -31,12 +31,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
-from autoflowcfd.core.mpi.distributed_mesh_loader import (
-    build_fully_distributed_rank_package,
-    distributed_mesh_load_v2,
-)
-from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
-from autoflowcfd.core.mpi.partition import build_distributed_partition
+from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
 from autoflowcfd.fr.operators import generate_fr_operators
 import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdfd_mod
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
@@ -246,7 +241,6 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
         `build_multi_gpu_solver_from_fully_distributed_package`（不是
         重新实现一遍逻辑）。"""
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
-        import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
 
         captured = {}
 
@@ -428,7 +422,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
 
         mesh, ops = mesh_and_ops
         root_context = self._make_root_context(mesh, ops)
-        rho_inf, vel_inf, p_inf = 1.225, 33.33, 101325.0
+        rho_inf, vel_inf = 1.225, 33.33
         n_local = mesh.n_cells
 
         solver = types.SimpleNamespace()
@@ -473,7 +467,6 @@ class TestGpuInterpolateDispatchesFullyDistributed:
         from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
             gpu_interpolate_to_new_order,
         )
-        import autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation as oc_mod
 
         captured = {}
 

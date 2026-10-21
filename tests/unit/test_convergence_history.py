@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF, VEL_INF
+from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, P_INF, RHO_INF
 import pytest
 
 from autoflowcfd.cli.solve.checkpoint_io.write import write_checkpoint

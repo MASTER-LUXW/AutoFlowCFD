@@ -7,7 +7,6 @@
 """
 
 import numpy as np
-import pytest
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.thermo import GAMMA

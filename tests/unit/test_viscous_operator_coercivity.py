@@ -76,7 +76,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 _TESTS_DIR = str(Path(__file__).resolve().parents[1])
 if _TESTS_DIR not in sys.path:

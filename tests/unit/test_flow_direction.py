@@ -50,19 +50,19 @@ class TestDegeneratesToPlusX:
         assert v.tolist() == [33.33, 0.0, 0.0]
 
     def test_wind_axes_are_exactly_the_unit_basis(self):
-        d, s, l = wind_axes(0.0, 0.0)
+        d, s, lift = wind_axes(0.0, 0.0)
         assert d.tolist() == [1.0, 0.0, 0.0]
         assert s.tolist() == [0.0, 1.0, 0.0]
-        assert l.tolist() == [0.0, 0.0, 1.0]
+        assert lift.tolist() == [0.0, 0.0, 1.0]
 
     def test_coefficient_projection_matches_old_component_pick(self):
         """风轴系投影在零攻角下必须逐位等于"直接取 F[0]/F[2]/F[1]"。"""
         rng = np.random.default_rng(7)
-        d, s, l = wind_axes(0.0, 0.0)
+        d, s, lift = wind_axes(0.0, 0.0)
         for _ in range(50):
             F = rng.normal(size=3) * 1e4
             assert float(np.dot(F, d)) == F[0]
-            assert float(np.dot(F, l)) == F[2]
+            assert float(np.dot(F, lift)) == F[2]
             assert float(np.dot(F, s)) == F[1]
 
 
@@ -73,19 +73,19 @@ class TestWindAxesAreOrthonormal:
     @pytest.mark.parametrize("aoa", [-30.0, -5.0, 0.0, 2.5, 15.0, 45.0, 89.0])
     @pytest.mark.parametrize("aos", [-20.0, 0.0, 7.5, 60.0])
     def test_orthonormal(self, aoa, aos):
-        d, s, l = wind_axes(aoa, aos)
-        for name, v in (("d", d), ("s", s), ("l", l)):
+        d, s, lift = wind_axes(aoa, aos)
+        for name, v in (("d", d), ("s", s), ("l", lift)):
             assert abs(np.linalg.norm(v) - 1.0) < 1e-14, f"{name} 不是单位向量"
         assert abs(np.dot(d, s)) < 1e-14
-        assert abs(np.dot(d, l)) < 1e-14
-        assert abs(np.dot(s, l)) < 1e-14
+        assert abs(np.dot(d, lift)) < 1e-14
+        assert abs(np.dot(s, lift)) < 1e-14
 
     @pytest.mark.parametrize("aoa,aos", [(10.0, 0.0), (0.0, 10.0), (12.0, -7.0)])
     def test_decomposition_preserves_force_magnitude(self, aoa, aos):
         """正交分解必须保模：Cd^2+Cl^2+Cs^2 == |F|^2（乘同一个分母）。"""
-        d, s, l = wind_axes(aoa, aos)
+        d, s, lift = wind_axes(aoa, aos)
         F = np.array([1234.0, -567.0, 890.0])
-        parts = np.array([np.dot(F, d), np.dot(F, s), np.dot(F, l)])
+        parts = np.array([np.dot(F, d), np.dot(F, s), np.dot(F, lift)])
         assert abs(np.dot(parts, parts) - np.dot(F, F)) < 1e-8
 
     def test_drag_direction_equals_freestream_direction(self):
@@ -117,16 +117,16 @@ class TestSignConventions:
         """升力方向按定义落在 x-z 平面内（y 分量恒为零）。"""
         for aoa in (-20.0, 0.0, 5.0, 30.0):
             for aos in (-15.0, 0.0, 15.0):
-                _d, _s, l = wind_axes(aoa, aos)
-                assert l[1] == 0.0
+                _d, _s, lift = wind_axes(aoa, aos)
+                assert lift[1] == 0.0
 
     def test_lift_is_perpendicular_to_freestream_in_xz_plane(self):
         """零侧滑时升力方向必须是来流方向在 x-z 平面内逆时针转 90 度。"""
         aoa = 12.0
         d = freestream_direction(aoa, 0.0)
-        _d, _s, l = wind_axes(aoa, 0.0)
+        _d, _s, lift = wind_axes(aoa, 0.0)
         # 逆时针转 90 度：(x,z) -> (-z,x)
-        assert np.allclose(l, [-d[2], 0.0, d[0]], atol=1e-14)
+        assert np.allclose(lift, [-d[2], 0.0, d[0]], atol=1e-14)
 
 
 class TestValidation:

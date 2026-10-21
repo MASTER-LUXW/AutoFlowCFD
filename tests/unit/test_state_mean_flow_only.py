@@ -65,7 +65,6 @@ def test_cpu_and_gpu_report_the_same_residual_norm_for_sst():
 
 
 def test_old_seven_column_checkpoint_restores_the_mean_flow(tmp_path):
-    from types import SimpleNamespace
 
     from autoflowcfd.cli.solve.checkpoint_io import restore_solver_state_from_fields
 

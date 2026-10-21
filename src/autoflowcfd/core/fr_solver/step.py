@@ -9,6 +9,7 @@ from functools import partial
 
 import numpy as np
 
+from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.registry import has_transport_equations
@@ -236,7 +237,6 @@ def step(solver, dt: float) -> float:
             # 模型时平均流与湍流紧耦合（`implicit/newton/coupled_step.py`），否则只解平均流 5 个变量
             # （`implicit/newton/mean_flow_step.py`）。稳态一步一个 Newton 步；双时间步每个
             # 物理步做若干个带 BDF 物理时间项的 Newton 步（`implicit/newton/physical_time.py`）。
-            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
                 step_mean_flow_newton,
             )
@@ -303,7 +303,6 @@ def step(solver, dt: float) -> float:
         # 逐方程 RMS 留给求解循环记进收敛历史（`convergence_history.py`，每个物理步一条）
         red = LocalReductions(np)
         is_prism = np.arange(n_cells) < int(solver.mesh.n_prism_cells)
-        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 
         residual_norm, solver._residual_per_equation = monitor_residuals(
             red, solver.state.dU_dt, is_prism, order_from_n_sps(n_sps), _reference_scales(solver.freestream, n_vars))

@@ -65,8 +65,8 @@ def test_iddes_keeps_rans_in_attached_boundary_layer():
     nu_t = np.full((n, m), 1e-2)                  # r_dt = 1e-2 / (0.168 * 2.5e-3 * 10) ~ 2.4 -> f_dt ~ 0
     g = _shear(n, m, 10.0)
     F1 = np.full((n, m), 0.5)
-    l = IDDESModel().length_scale(np, k, omega, nu_t, 1.5e-5, d, g, F1, h_max, 0, BETA_STAR, h_wn=h_max)
-    assert l[0, 0] == pytest.approx(l_rans, rel=1e-6)
+    length = IDDESModel().length_scale(np, k, omega, nu_t, 1.5e-5, d, g, F1, h_max, 0, BETA_STAR, h_wn=h_max)
+    assert length[0, 0] == pytest.approx(l_rans, rel=1e-6)
 
 
 def test_iddes_switches_to_les_away_from_walls_without_shielding():
@@ -80,8 +80,8 @@ def test_iddes_switches_to_les_away_from_walls_without_shielding():
     nu_t = np.full((n, m), 1e-9)
     g = _shear(n, m, 10.0)
     F1 = np.zeros((n, m))
-    l = IDDESModel().length_scale(np, k, omega, nu_t, 1.5e-5, d, g, F1, h_max, order, BETA_STAR, h_wn=h_max)
-    assert l[0, 0] == pytest.approx(0.61 * 0.03 / (order + 1), rel=1e-6)
+    length = IDDESModel().length_scale(np, k, omega, nu_t, 1.5e-5, d, g, F1, h_max, order, BETA_STAR, h_wn=h_max)
+    assert length[0, 0] == pytest.approx(0.61 * 0.03 / (order + 1), rel=1e-6)
 
 
 def test_wall_points_are_rans():
@@ -134,10 +134,10 @@ def test_sst_destruction_uses_lengths_from_the_same_evaluation(model_cls):
 
     k_safe, omega_safe = model_evaluation_fields(model.k_field, model.omega_field,
                                                  model._omega_realizability_min, np)
-    l = model_cls().length_scale(np, k_safe, omega_safe, model.nu_t, mu / rho, d, grad_U, model._last_F1, h,
+    length = model_cls().length_scale(np, k_safe, omega_safe, model.nu_t, mu / rho, d, grad_U, model._last_F1, h,
                                  order_from_n_sps(m), model.beta_star, h_wn=h * 0.3)
     k = model.k_field
-    expected = (rho * model.beta_star * k * omega_safe - rho * k * np.sqrt(k) / l
-                + rho * k_inf ** 1.5 / l - rho * model.beta_star * k_inf * omega_inf)
+    expected = (rho * model.beta_star * k * omega_safe - rho * k * np.sqrt(k) / length
+                + rho * k_inf ** 1.5 / length - rho * model.beta_star * k_inf * omega_inf)
     np.testing.assert_allclose(Sk_des - Sk_rans, expected, rtol=1e-10, atol=1e-12 * np.abs(Sk_rans).max())
     assert np.max(np.abs(Sk_des - Sk_rans)) > 1e-3 * np.abs(Sk_rans).max()

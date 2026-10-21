@@ -1,6 +1,5 @@
 """CLI 模块的单元测试。"""
 
-import pytest
 from click.testing import CliRunner
 from autoflowcfd.cli.main import cli
 

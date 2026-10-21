@@ -7,7 +7,6 @@
 import numpy as np
 from typing import Optional
 from dataclasses import dataclass
-from loguru import logger
 
 
 @dataclass

@@ -3,7 +3,7 @@
 import numpy as np
 
 
-from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_1axis

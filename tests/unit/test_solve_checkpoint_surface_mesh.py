@@ -17,7 +17,6 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from unittest.mock import patch, MagicMock
 
 import numpy as np
-import pytest
 
 from autoflowcfd.cli.solve.checkpoint_io import write_checkpoint, rebuild_solver_from_checkpoint
 

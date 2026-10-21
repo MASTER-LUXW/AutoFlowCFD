@@ -160,7 +160,7 @@ class TestGpuSolverInterpolateToNewOrder:
         solver = _make_solver(2, turb_model="none")
         assert solver.current_order == 2
 
-        rho_inf, vel_inf, p_inf = 1.225, 33.33, 101325.0
+        rho_inf, vel_inf = 1.225, 33.33
 
         solver._interpolate_to_new_order(0)
 

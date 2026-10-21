@@ -7,7 +7,7 @@ AutoFlowCFD V2.0 - FRSolver 局部时间步长计算
 
 import numpy as np
 
-from autoflowcfd.core.thermo import GAMMA, sound_speed
+from autoflowcfd.core.thermo import sound_speed
 
 
 def compute_local_time_step(solver, return_physical_too: bool = False):

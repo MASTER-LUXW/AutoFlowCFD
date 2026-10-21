@@ -11,7 +11,6 @@
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 
 def run_pytest(test_path: str, verbose: bool = True) -> str:
