@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.gpu_time_integration import compute_local_cfl_step_gpu
 
 
 class _MultiGPUTimeStepMixin:
@@ -83,55 +82,27 @@ class _MultiGPUTimeStepMixin:
                 "mesh_data 缺少 cell_volumes——紧凑网格视图构造有误，"
                 "不能静默回退到全局 cell volumes（索引空间不同）")
 
-        det_jacs_gpu = self.mesh_data.get('det_jacs')
-        adj_j_gpu = self.mesh_data.get('adj_j')
-        metric_flux_scale_gpu = None
-        if adj_j_gpu is not None:
-            cached = getattr(self, '_metric_flux_scale_gpu_cache', None)
-            expected_shape = adj_j_gpu.shape[:2]
-            if cached is None or cached.shape != expected_shape:
-                adj_row_norms = cp.linalg.norm(adj_j_gpu, axis=-1)
-                cached = cp.sum(adj_row_norms, axis=-1)
-                self._metric_flux_scale_gpu_cache = cached
-            metric_flux_scale_gpu = cached
+        # 度量通量尺度只依赖网格几何，缓存（按形状失效：换阶时解点数改变）
+        adj_j_gpu = self.mesh_data['adj_j']
+        metric_flux_scale_gpu = getattr(self, '_metric_flux_scale_gpu_cache', None)
+        if metric_flux_scale_gpu is None or metric_flux_scale_gpu.shape != adj_j_gpu.shape[:2]:
+            metric_flux_scale_gpu = cp.sum(cp.linalg.norm(adj_j_gpu, axis=-1), axis=-1)
+            self._metric_flux_scale_gpu_cache = metric_flux_scale_gpu
 
-        n_compact = self.U_gpu.shape[0]
-        n_sps = self.U_gpu.shape[1]
-        precond = getattr(self, "low_mach_precond_enabled", False)
-
-        # 粘性限制：有效粘度（compact 排列）与各向异性长度尺度，公式与 CPU 同一个
-        # 函数（`core/fr_solver/cfl_viscous.py`）。2026-10-01 以前这里不传 mu_eff，
-        # 粘性限制整段不生效；阶数也误读了 `self.order` 而非当前阶数。
+        # 三项限制与 CPU 同一个函数（`core/fr_solver/cfl_limits.py`），整场（compact 排列）一次算出逐解点步长；
+        # 有效粘度经 halo 交换重排到 compact，状态取 compact 排列（与残差同一个索引空间）
+        from autoflowcfd.core.fr_solver.cfl_limits import local_time_step_limits
         from autoflowcfd.core.fr_solver.cfl_viscous import viscous_length_scale_sq
-        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell,
-                                           is_boundary, areas_gpu)
-        mu_eff = self._effective_viscosity_compact_gpu(nu_av_compact)
-        poly_order = int(getattr(self, "current_order", self.order))
-        dt_all = cp.zeros((n_compact, n_sps), dtype=cp.float64)
-        dt_phys_all = cp.zeros((n_compact, n_sps), dtype=cp.float64) if precond else None
+        from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
 
-        for sp in range(n_sps):
-            U_sp = self.U_gpu[:, sp:sp + 1, :]
-            det_sp = det_jacs_gpu[:, sp] if det_jacs_gpu is not None else None
-            mfs_sp = (metric_flux_scale_gpu[:, sp]
-                      if metric_flux_scale_gpu is not None else None)
-            out_sp = compute_local_cfl_step_gpu(
-                U_sp, cell_volumes,
-                owner_cell, neighbor_cell, is_boundary,
-                normals_gpu, areas_gpu,
-                None, None,
-                cfl=self._current_cfl(),
-                mu_eff=mu_eff[:, sp], visc_Lc2=visc_Lc2,
-                poly_order=poly_order,
-                det_jacs_sp=det_sp,
-                metric_flux_scale_sp=mfs_sp,
-                mach_ref=(self.freestream["mach_ref"] if precond else None),
-                return_physical_too=precond,
-            )
-            if dt_phys_all is not None:
-                dt_all[:, sp], dt_phys_all[:, sp] = out_sp
-            else:
-                dt_all[:, sp] = out_sp
+        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell, is_boundary, areas_gpu)
+        poly_order = int(getattr(self, "current_order", self.order))
+        precond = getattr(self, "low_mach_precond_enabled", False)
+        dt_phys_all, dt_all = local_time_step_limits(
+            conserved_to_primitive_gpu(self.U_gpu[..., :5]), cell_volumes, owner_cell, neighbor_cell, is_boundary,
+            normals_gpu, areas_gpu, self.mesh_data['det_jacs'], metric_flux_scale_gpu,
+            self._effective_viscosity_compact_gpu(nu_av_compact), visc_Lc2, self._current_cfl(), poly_order,
+            mach_ref=self.freestream["mach_ref"] if precond else None)
 
         # 单元内取最小值时**只看真实自由度**（2026-09-15 系统性审计）：
         # native 四面体的 n_sps 槽位里只有前 n_native=(p+1)(p+2)(p+3)/6 个
@@ -167,7 +138,7 @@ class _MultiGPUTimeStepMixin:
         if not return_physical_too:
             return uniform_time_step(self, dt_mean, False, reduce_min=allreduce_min, owned=owned)
         dt_phys = (reduce_per_cell_over_real_sps(
-            dt_phys_all, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
+            dt_phys_all, _np_cells, _p, 'min', xp=cp) if dt_all is not dt_phys_all else dt_mean)
         return uniform_time_step(self, (dt_mean, dt_phys), True, reduce_min=allreduce_min, owned=owned)
 
     def _effective_viscosity_compact_gpu(self, nu_av_compact=None):

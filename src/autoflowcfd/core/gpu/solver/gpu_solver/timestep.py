@@ -10,9 +10,6 @@ from typing import Any
 
 import numpy as np
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.gpu_time_integration import (
-    compute_local_cfl_step_gpu,
-)
 
 
 class _GPUSolverTimeStepMixin:
@@ -44,68 +41,28 @@ class _GPUSolverTimeStepMixin:
 
         cell_volumes = self._cell_volumes_gpu()
 
-        # 几何/度量 CFL 限制所需数据（与 CPU 侧 cfl.py 的 dt_geometric
-        # 同一机制，见 compute_local_cfl_step_gpu 参数文档）：det_jacs 已
-        # 在 upload_mesh_data 里常驻显存，metric_flux_scale 只依赖网格
-        # 几何（与流场状态无关），缓存后避免每步重复计算——与 CPU 侧
-        # solver_geometry.py::_get_metric_flux_scale 同一缓存策略。
-        det_jacs_gpu = self.mesh_data.get('det_jacs')
-        adj_j_gpu = self.mesh_data.get('adj_j')
+        # 度量通量尺度只依赖网格几何，缓存（按形状失效：换阶时解点数改变）
+        adj_j_gpu = self.mesh_data['adj_j']
         metric_flux_scale_gpu = getattr(self, '_metric_flux_scale_gpu_cache', None)
-        # 第四次评审第二轮复核发现：只用 `is None` 判断缓存是否有效，
-        # 完全没有形状比较——CPU 侧 solver_geometry.py::_get_metric_flux_scale
-        # 曾因"只比较 shape[0]、漏比 n_sps 维度"复现过跨阶数切换后返回
-        # 陈旧形状缓存值的真实 bug（Order Continuation 切换阶数后 n_sps
-        # 改变），这里连 shape[0] 都没比，是同一类问题的更宽松版本。
-        # 当前 GPU 路径还没有接入 Order Continuation（CLI 直接以目标阶数
-        # 一次性构造 GPUFRSolver），这个缺陷现在不会被触发，但保持与
-        # CPU 侧同等的防御水位，不留一个"看起来复制了修复、实际没复制
-        # 关键部分"的陷阱。
-        if (metric_flux_scale_gpu is None or metric_flux_scale_gpu.shape != (n_cells, n_sps)) \
-                and adj_j_gpu is not None:
-            adj_row_norms = cp.linalg.norm(adj_j_gpu, axis=-1)  # (n_cells,n_sps,3)
-            metric_flux_scale_gpu = cp.sum(adj_row_norms, axis=-1)  # (n_cells,n_sps)
+        if metric_flux_scale_gpu is None or metric_flux_scale_gpu.shape != (n_cells, n_sps):
+            metric_flux_scale_gpu = cp.sum(cp.linalg.norm(adj_j_gpu, axis=-1), axis=-1)  # (n_cells,n_sps)
             self._metric_flux_scale_gpu_cache = metric_flux_scale_gpu
 
-        # 粘性限制：有效粘度（分子 + 湍流涡粘 + 人工粘性）与各向异性长度尺度，
-        # 公式与 CPU 同一个函数（`core/fr_solver/cfl_viscous.py`）。2026-10-01
-        # 以前这里不传 mu_eff，粘性限制整段不生效。
+        # 三项限制与 CPU 同一个函数（`core/fr_solver/cfl_limits.py`），整场一次算出逐解点步长
+        from autoflowcfd.core.fr_solver.cfl_limits import local_time_step_limits
         from autoflowcfd.core.fr_solver.cfl_viscous import viscous_length_scale_sq
+        from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+
         visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell, is_boundary, areas_gpu)
-        mu_eff = self._effective_viscosity_gpu(nu_av)
         # 当前阶数（Order Continuation 期间与目标阶数不同；此前误读 `self.order`）
         _co = getattr(self, "current_order", None)
         poly_order = int(self.order if _co is None else _co)
-
-        # 使用所有 SP 计算谱半径（取最大值），而非仅 SP0
-        # 对每个 SP 独立计算 CFL 步长，然后取 cell 内最小值
-        dt_all_sps = cp.zeros((n_cells, n_sps), dtype=cp.float64)
         precond = getattr(self, "low_mach_precond_enabled", False)
-        dt_phys_all_sps = (cp.zeros((n_cells, n_sps), dtype=cp.float64)
-                           if precond else None)
-        for sp in range(n_sps):
-            U_sp = self.U_gpu[:, sp:sp+1, :]  # (n_cells, 1, n_vars)
-            det_jacs_sp = det_jacs_gpu[:, sp] if det_jacs_gpu is not None else None
-            metric_flux_scale_sp = (
-                metric_flux_scale_gpu[:, sp] if metric_flux_scale_gpu is not None else None
-            )
-            out_sp = compute_local_cfl_step_gpu(
-                U_sp, cell_volumes,
-                owner_cell, neighbor_cell, is_boundary,
-                normals_gpu, areas_gpu,
-                None, None,
-                cfl=self._current_cfl(),
-                mu_eff=mu_eff[:, sp], visc_Lc2=visc_Lc2,
-                poly_order=poly_order,
-                det_jacs_sp=det_jacs_sp,
-                metric_flux_scale_sp=metric_flux_scale_sp,
-                mach_ref=(self.freestream["mach_ref"] if precond else None),
-                return_physical_too=precond,
-            )
-            if dt_phys_all_sps is not None:
-                dt_all_sps[:, sp], dt_phys_all_sps[:, sp] = out_sp
-            else:
-                dt_all_sps[:, sp] = out_sp
+        dt_phys_all_sps, dt_all_sps = local_time_step_limits(
+            conserved_to_primitive_gpu(self.U_gpu[..., :5]), cell_volumes, owner_cell, neighbor_cell, is_boundary,
+            normals_gpu, areas_gpu, self.mesh_data['det_jacs'], metric_flux_scale_gpu,
+            self._effective_viscosity_gpu(nu_av), visc_Lc2, self._current_cfl(), poly_order,
+            mach_ref=self.freestream["mach_ref"] if precond else None)
 
         # 单元内取最小值时**只看真实自由度**（2026-09-15 系统性审计）：
         # native 四面体的 n_sps 槽位里只有前 n_native=(p+1)(p+2)(p+3)/6 个
@@ -137,7 +94,7 @@ class _GPUSolverTimeStepMixin:
         if not return_physical_too:
             return uniform_time_step(self, dt_mean, False)
         dt_phys = (reduce_per_cell_over_real_sps(
-            dt_phys_all_sps, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
+            dt_phys_all_sps, _np_cells, _p, 'min', xp=cp) if dt_all_sps is not dt_phys_all_sps else dt_mean)
         return uniform_time_step(self, (dt_mean, dt_phys), True)
 
     def _face_geometry_gpu(self):

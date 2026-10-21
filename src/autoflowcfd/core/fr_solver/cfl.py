@@ -7,15 +7,6 @@ AutoFlowCFD V2.0 - FRSolver 局部时间步长计算
 
 import numpy as np
 
-from autoflowcfd.core.thermo import sound_speed
-
-
-def _require_state_shape(field: np.ndarray, state_shape: tuple, what: str) -> None:
-    """逐解点量必须与当前状态同形 `(n_cells, n_sps)`（同一组解点）。"""
-    if tuple(field.shape) != tuple(state_shape):
-        raise ValueError(f"CFL 步长计算：{what} 的形状 {tuple(field.shape)} 与当前状态 {tuple(state_shape)} 不符"
-                         "——几何与状态不在同一组解点上（换阶时须同步切换）")
-
 
 def compute_local_time_step(solver, return_physical_too: bool = False):
     """
@@ -65,38 +56,11 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
         return_physical_too=True: (dt_mean_flow, dt_physical)——前者可能是
             预处理后的（未启用预处理时两者是同一个数组对象）
     """
-    n_cells, n_sps, n_vars = solver.state.U.shape
+    from .cfl_limits import local_time_step_limits
+    from .cfl_viscous import viscous_length_scale_sq
 
-    # 提取速度和声速。solver.state.Q 存的是原始变量 (rho, u, v, w, p)
-    # （见 core/fr_solver/state.py::_update_primitives），不是守恒变量——此前这里
-    # 把已经是 u/p 的 Q[1]/Q[4] 当 rho*u/rho*E 又转换了一次，实测使
-    # 声速被系统性低估（214.8 应为 340.3，来流 rho=1.225,u=30,p=101325
-    # 时），对流/几何 CFL 步长被高估约 1.55 倍。直接读取即可。
-    rho = solver.state.Q[:, :, 0]
-    u = solver.state.Q[:, :, 1]
-    v = solver.state.Q[:, :, 2]
-    w = solver.state.Q[:, :, 3]
-    p = solver.state.Q[:, :, 4]
-    a = sound_speed(np, rho, p)          # 密度已在状态换算里取下限（与残差同一个换算）
-
-    vel_mag = np.sqrt(u**2 + v**2 + w**2)
-
-    # 物理声速用于 CFL 估计（2026-08-24 修复）：
-    # 此前用 Weiss-Smith 预处理后的 c_precond 替代物理声速 a 计算 CFL，
-    # 导致 dt 被高估 ~10 倍（Mach 0.1 下 c_precond≈36 m/s vs a≈340 m/s），
-    # 有效 CFL 从目标的 0.1 飙到 ~0.54，远超 SSP-RK3 稳定极限。
-    # 诊断复现：CFL=0.1 在 Step 2 发散，CFL=0.05 在 Step 3 发散，
-    # CFL=0.01（有效 CFL≈0.054）才稳定——与"有效 CFL ~0.5 触发失稳"
-    # 精确吻合。
-    #
-    # 原理：显式 SSP-RK3 积分的是物理通量（AUSM+up 用真实声速 a 计算
-    # 数值通量），其稳定性由物理通量的谱半径决定（|u_n|+a），不由
-    # 预处理后的谱半径（|u_n|+c_precond）决定。预处理改善的是伪时间
-    # 系统的条件数（加速收敛），不改变显式积分的稳定性限制。
-    #
-    # Weiss-Smith 预处理仍用于 AUSM+up 通量本身（改善低 Mach 数值
-    # 耗散特性），但 CFL 估计必须用物理波速。
-    wave_speed = np.maximum(vel_mag + a, 1e-10)
+    Q = solver.state.Q            # 原始变量 (rho, u, v, w, p)（`core/fr_solver/state.py::_update_primitives`）
+    n_cells, n_sps = Q.shape[:2]
 
     # 基于面的谱半径（face-based spectral radius），
     # 替代此前的 V^(1/3) 各向同性假设。对于边界层薄棱柱单元，V^(1/3)
@@ -122,52 +86,16 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 对象**，例如诊断脚本/测试 stub；这一档会打一次警告，不再静默）。
     from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
     CFL = current_cfl_number(solver)
-
-    # 阶数相关的 CFL 收紧：基于面的谱半径已经考虑了单元几何，
-    # 但显式 FR/DG 格式的稳定性极限仍随阶数增长（微分矩阵谱半径随 p 增大），
-    # 标准结果：对流项 CFL ~ 1/(2p+1)，粘性项 CFL ~ 1/(2p+1)^2。
     poly_order = getattr(solver, "current_order", 0)
-    order_factor_advective = 1.0 / (2 * poly_order + 1)   # 粘性那一份在 cfl_viscous.py
-
     volumes = solver.mesh.get_all_cell_volumes()
-
     fc = solver.mesh.face_connectivity
-    face_areas = fc.area  # (n_faces,) 物理面面积
-    face_normals = fc.normal  # (n_faces, 3) 面法向量（模=面积，单位化后得法向）
-    # 归一化得到单位法向
-    face_norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
-    face_unit_normals = face_normals / np.maximum(face_norms, 1e-30)
+    face_normals = np.asarray(fc.normal)     # (n_faces, 3) 面法向量（模=面积，单位化后得法向）
+    unit_normals = face_normals / np.maximum(np.linalg.norm(face_normals, axis=1, keepdims=True), 1e-30)
 
-    # 对流谱半径逐解点计算（2026-10-09）：此前只取每个单元第 0 个解点的速度与声速，单元内流动变化大时
-    # （边界层单元里速度从 0 到外缘值）低估谱半径；两个 GPU 后端一直是逐解点算的。
-    from .cfl_spectral import face_spectral_sum_kernel
-
-    owner_cells = np.ascontiguousarray(fc.owner_cell, dtype=np.int64)
-    neighbor_cells = np.ascontiguousarray(fc.neighbor_cell, dtype=np.int64)   # 边界面为 -1（核里不读）
-    is_bnd = np.ascontiguousarray(fc.is_boundary, dtype=np.bool_)
-    face_unit_normals = np.ascontiguousarray(face_unit_normals, dtype=np.float64)
-    face_areas = np.ascontiguousarray(face_areas, dtype=np.float64)
-    u_c, v_c, w_c = (np.ascontiguousarray(x, dtype=np.float64) for x in (u, v, w))
-
-    def _advective_step(sound):
-        spectral = face_spectral_sum_kernel(u_c, v_c, w_c, np.ascontiguousarray(sound, dtype=np.float64),
-                                            owner_cells, neighbor_cells, is_bnd, face_unit_normals, face_areas)
-        return CFL * order_factor_advective * volumes[:, np.newaxis] / np.maximum(spectral, 1e-30)
-
-    dt_advective = _advective_step(a)
-
-    # 粘性稳定性限制（见上方文档 2）：分子粘度 + 当前湍流模型给出的
-    # 涡粘（若有）
-    # dt_visc = 0.25*CFL*rho*Lc2/mu_eff，Lc2 见下方（各向异性正确的
-    # `6*V^2/sum_f A_f^2`，立方体上等于 V^(2/3)）。
-    # 湍流涡粘 + 人工粘性（rho*nu_av），见 `_get_cfl_viscosity_field` 文档
+    # 有效粘度：分子粘度 + 湍流涡粘 + 人工粘性（rho*nu_av），见 `_get_cfl_viscosity_field` 文档
     mu_t_field = solver._get_cfl_viscosity_field()  # None 或 (n_cells, n_sps)
-    mu_molecular = solver.mu_molecular
-    if mu_t_field is not None:
-        _require_state_shape(mu_t_field, rho.shape, "涡粘 / 人工粘性场")
-        mu_eff = mu_molecular + mu_t_field
-    else:
-        mu_eff = np.full_like(rho, mu_molecular)
+    mu_eff = (np.full((n_cells, n_sps), solver.mu_molecular) if mu_t_field is None
+              else solver.mu_molecular + mu_t_field)
     # 粘性长度尺度平方：**各向异性正确**的形式（2026-09-23 修复）。
     #
     # ## 曾经错在哪
@@ -206,9 +134,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # ~ (A_cap*dy)^(2/3)，比值按 `dy^(-4/3)` 增长 —— dy=1e-6 量级时高估
     # 三个数量级以上。这就是"本算例不咬人、真实网格会咬"的根据。
     # 公式本身在 `cfl_viscous.py`（CPU 与 GPU 后端共用一份）。
-    from .cfl_viscous import viscous_length_scale_sq, viscous_time_step_limit
-
-    Lc2 = viscous_length_scale_sq(volumes, owner_cells, neighbor_cells, is_bnd, face_areas)
+    Lc2 = viscous_length_scale_sq(volumes, fc.owner_cell, fc.neighbor_cell, fc.is_boundary, fc.area)
     # **IP 罚项的刚性必须折进来**（2026-09-23，与内部面罚项同批）：
     # 罚项对粘性算子谱半径的贡献是 `c_ip*mu/h * A_f/V ~ c_ip*mu*A_f^2/V^2`，
     # 与基础扩散项 `mu/h^2` 同阶、只差一个 `c_ip` 量级的因子。实测拟合
@@ -227,19 +153,18 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 在折进罚项刚性之后仍然**一个单元都不是约束方**（最坏单元 dt_visc
     # 1.466e-07 vs 最坏 dt_adv 1.612e-09，余量 91 倍），全场 dt 由声学
     # 对流限制定在 4.9e-08。折进去是纯安全margin，不牺牲收敛速度。
-    dt_visc = viscous_time_step_limit(rho, Lc2[:, np.newaxis], mu_eff, CFL, poly_order)
-
-    metric_flux_scale = solver._get_metric_flux_scale()  # (n_cells,n_sps)
-    det_jacs = solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell)
     # 度量与状态必须在同一组解点上（换阶时 `mesh.set_order` 与状态同步切换）。2026-10-21（I-76）以前不一致时
     # 把度量平铺 / 裁剪到状态宽度：不同阶数的解点下标互不对应，那样拼出的度量没有意义
-    _require_state_shape(det_jacs, rho.shape, "网格 det(J)")
-    _require_state_shape(metric_flux_scale, rho.shape, "度量通量尺度")
-    dt_geometric = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed, 1e-300)
+    precond = getattr(solver, "low_mach_precond_enabled", False)
+    dt_physical_sp, dt_mean_sp = local_time_step_limits(
+        Q, volumes, fc.owner_cell, fc.neighbor_cell, fc.is_boundary, unit_normals, fc.area,
+        solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell),
+        solver._get_metric_flux_scale(), mu_eff, Lc2, CFL, poly_order,
+        mach_ref=solver.freestream["mach_ref"] if precond else None)
 
-    # 一个单元一个步长：对流、粘性、几何三项限制逐解点求出后，在单元的**真实**解点上取最小值再广播回全部
-    # 槽位（原生四面体的零填充槽位冻结在初值，不参与）。2026-10-09 以前返回逐解点各不相同的步长：同一个
-    # 单元的自由度由同一个多项式耦合，各走各的伪时间步与两个 GPU 后端（一直是单元内取最小）不是同一个离散。
+    # 一个单元一个步长：三项限制逐解点求出后，在单元的**真实**解点上取最小值再广播回全部槽位（原生四面体的零
+    # 填充槽位冻结在初值，不参与）。2026-10-09 以前返回逐解点各不相同的步长：同一个单元的自由度由同一个多项式
+    # 耦合，各走各的伪时间步与两个 GPU 后端（一直是单元内取最小）不是同一个离散。
     from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_per_cell_over_real_sps
 
     n_prism = int(solver.mesh.n_prism_cells)
@@ -249,18 +174,6 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
         cell_min = reduce_per_cell_over_real_sps(dt_sp, n_prism, sp_order, 'min')
         return np.repeat(cell_min[:, np.newaxis], n_sps, axis=1)
 
-    dt_physical = _per_cell(np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric))
-
-    if not getattr(solver, "low_mach_precond_enabled", False):
-        return (dt_physical, dt_physical) if return_physical_too else dt_physical
-
-    # 预处理后的平均流步长：对流项与几何项里的声速换成有效声速（只有 Gamma 真的作用到平均流残差上时才成立，
-    # 见函数文档）；粘性限制与声速无关，原样复用。
-    from autoflowcfd.core.utils.preconditioning import preconditioned_sound_speed
-    mach_ref = solver.freestream["mach_ref"]
-    c_pre_sp = preconditioned_sound_speed(vel_mag, a, mach_ref)
-    wave_speed_p = np.maximum(vel_mag + c_pre_sp, 1e-10)
-    dt_geo_p = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed_p, 1e-300)
-
-    dt_mean = _per_cell(np.minimum(np.minimum(_advective_step(c_pre_sp), dt_visc), dt_geo_p))
+    dt_physical = _per_cell(dt_physical_sp)
+    dt_mean = dt_physical if dt_mean_sp is dt_physical_sp else _per_cell(dt_mean_sp)
     return (dt_mean, dt_physical) if return_physical_too else dt_mean

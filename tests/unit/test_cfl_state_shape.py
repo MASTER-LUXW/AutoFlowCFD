@@ -15,7 +15,7 @@ def test_viscosity_field_on_another_set_of_solution_points_is_rejected(monkeypat
     solver = _channel_solver(0.1, adaptive=False)
     n_cells, n_sps = solver.state.U.shape[:2]
     monkeypatch.setattr(solver, "_get_cfl_viscosity_field", lambda: np.full((n_cells, 1), 1e-4))
-    with pytest.raises(ValueError, match="涡粘"):
+    with pytest.raises(ValueError, match="粘度"):
         compute_local_time_step(solver)
 
 

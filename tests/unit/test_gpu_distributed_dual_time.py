@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
-import autoflowcfd.core.gpu.gpu_time_integration as gti_mod
+import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
@@ -18,7 +18,7 @@ from tests.unit._numpy_as_cupy import NumpyAsCupy
 def _patch_get_cupy(monkeypatch):
     shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, gd_mod, shim)
-    patch_module_get_cupy(monkeypatch, gti_mod, shim)
+    patch_module_get_cupy(monkeypatch, gpu_flux_mod, shim)
 
 
 def _make_target(n_local, n_sps, rng):

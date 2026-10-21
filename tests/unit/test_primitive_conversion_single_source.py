@@ -29,6 +29,9 @@ def test_sound_speed_has_no_dimensional_floor():
 
 
 def test_both_cfl_paths_use_the_shared_sound_speed():
-    assert "sound_speed(np," in module_source("autoflowcfd.core.fr_solver.cfl")
-    gpu = module_source("autoflowcfd.core.gpu.gpu_time_integration")
-    assert "sound_speed(cp," in gpu and "conserved_to_primitive_gpu" in gpu and ", 1.0)" not in gpu
+    # 全部后端的 CFL 步长经同一个函数（`cfl_limits.local_time_step_limits`，I-115），声速在里面按数组模块算；
+    # GPU 后端先用与残差同一个换算得到原始变量
+    assert "sound_speed(xp," in module_source("autoflowcfd.core.fr_solver.cfl_limits")
+    for mod in ("autoflowcfd.core.gpu.solver.gpu_solver", "autoflowcfd.core.gpu.distributed.gpu_distributed"):
+        src = module_source(mod)
+        assert "local_time_step_limits(" in src and "conserved_to_primitive_gpu(self.U_gpu" in src, mod

@@ -8,7 +8,7 @@
 
 ## 为什么抽出来（2026-10-01）
 
-此前 GPU 有一份自己的粘性限制（`gpu_time_integration.compute_local_cfl_step_gpu`），
+此前 GPU 有一份自己的粘性限制（已删除的 `gpu_time_integration.compute_local_cfl_step_gpu`），
 停留在 CPU 早已修掉的旧形式（各向同性 `V^(2/3)`、不含罚项刚性）；而且单机 GPU
 与多 GPU 两个调用方都**没有传有效粘度**，粘性限制整段不生效。粘性系数一旦远大于
 分子粘度（湍流涡粘、问题单元人工粘性可达分子粘度的上千倍），显式推进就会失稳。
