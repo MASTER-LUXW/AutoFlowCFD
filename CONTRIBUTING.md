@@ -51,7 +51,7 @@
 - GPU: NVIDIA A100 40GB
 
 ### 复现步骤
-1. 运行命令 `autoflowcfd solve --grid test.nas`
+1. 运行命令 `autoflowcfd solve steady volume.pkl --order 1 -o out`
 2. 观察到...
 
 ### 预期行为
@@ -95,10 +95,7 @@ Traceback (most recent call last):
 3. **编写代码**：实现你的功能或修复
 4. **编写测试**：为新代码添加单元测试
 5. **更新文档**：如果修改了API，同步更新文档
-6. **提交代码**：遵循 [Conventional Commits](https://www.conventionalcommits.org/) 规范
-   ```bash
-   git commit -m "feat: add new turbulence model plugin"
-   ```
+6. **提交代码**：提交信息格式见下文 [提交信息](#提交信息)
 7. **推送分支**：
    ```bash
    git push origin feature/your-feature-name
@@ -138,113 +135,34 @@ pre-commit install
 ### 验证安装
 
 ```bash
-# 运行单元测试
-poetry run pytest tests/unit -v
-
-# 运行代码检查
-poetry run black --check src/
-poetry run flake8 src/
-poetry run mypy src/
+# 运行单元测试（-o addopts= 去掉缺省的覆盖率统计）
+poetry run pytest tests/unit -q -o addopts=
+poetry run autoflowcfd utils doctor
 ```
 
 ---
 
 ## 代码规范
 
-### Python代码风格
+项目约定以 [开发者指南](docs/DEVELOPER_GUIDE.md#约定评审按这些检查) 为准，要点：
 
-- 遵循 **PEP 8** 规范
-- 使用 **Black** 自动格式化（行宽88字符）
-- 使用 **isort** 排序import语句
-- 强制类型注解，通过 **mypy** 严格检查
+- **同一语义只有一个事实来源**：常量、默认值、判据、枚举只定义一处，其余地方读它；发现重复就合并。
+- **不静默兜底**：缺失的输入与元数据报错，不用缺省值继续；决定物理算例的参数写进 checkpoint、续算缺失即报错。
+- **四个后端一致**：改 CPU / 单 GPU / CPU-MPI / 多 GPU 之一的算法，其余同步并加跨后端对照测试。
+- **单文件不超过 500 行**，超过按功能拆分成子包。
+- **注释与文档字符串用中文**（术语、公式、代码标识符除外），Google 风格的 Args / Returns / Raises；说明"为什么"。
+- 命名：模块 / 函数 / 变量 `snake_case`，类 `PascalCase`，常量 `UPPER_CASE`，内部成员前缀 `_`。
+- 行宽约 120 列；公共函数写类型注解。
 
-### 命名规范
+### 测试
 
-- **模块/函数/变量**：`snake_case`（小写+下划线）
-- **类名**：`PascalCase`（大驼峰）
-- **常量**：`UPPER_CASE`（大写+下划线）
-- **私有成员**：前缀 `_`（单下划线）
+- 每个缺陷修复带一个在修改前失败、修改后通过的测试（行为测试优先于源码文本检查）。
+- 提交前跑相关单元测试；改动 numba 核时用空的 `AFCFD_NUMBA_CACHE_ROOT` 再跑一遍。
+- 改动命令行选项、配置字段、输出文件或 checkpoint 格式时同步更新 `docs/` 与 `--help`。
 
-**示例**：
-```python
-# 模块名
-autoflowcfd/grid/parser.py
+### 提交信息
 
-# 类名
-class GridParser:
-    pass
-
-# 函数名
-def parse_nas_file(file_path: str) -> GridData:
-    pass
-
-# 变量名
-node_count = 1000
-
-# 常量
-MAX_ITERATIONS = 10000
-
-# 私有方法
-def _validate_grid(self) -> bool:
-    pass
-```
-
-### 注释规范
-
-- **模块级docstring**：说明模块用途
-- **函数docstring**：使用Google风格，包含参数、返回值、异常
-- **行内注释**：解释复杂逻辑，避免冗余注释
-
-**示例**：
-```python
-"""网格解析器模块
-
-支持ANSA .nas文件格式解析（v22/v23/v24）。
-"""
-
-def parse_nodes(file_path: str) -> NodeArray:
-    """解析节点数据
-    
-    Args:
-        file_path: NAS文件路径
-        
-    Returns:
-        NodeArray: 节点数组对象
-        
-    Raises:
-        FileNotFoundError: 文件不存在
-        ValueError: 文件格式错误
-    """
-    pass
-```
-
-### Git提交规范
-
-遵循 **Conventional Commits** 规范：
-
-```
-<type>(<scope>): <description>
-
-[optional body]
-
-[optional footer(s)]
-```
-
-**Type类型**：
-- `feat`: 新功能
-- `fix`: Bug修复
-- `docs`: 文档更新
-- `style`: 代码格式（不影响功能）
-- `refactor`: 重构（非新功能、非Bug修复）
-- `test`: 测试相关
-- `chore`: 构建过程或辅助工具变动
-
-**示例**：
-```bash
-git commit -m "feat(grid): add NAS v24 format support"
-git commit -m "fix(solver): fix divergence issue in DES model"
-git commit -m "docs(api): update Solver class docstring"
-```
+首行 `V2 - <中文概述>（问题编号）`；正文写缺陷现象与根因、改动内容、测试结果（含修改前失败的核对）。一个提交只做一件事。
 
 ---
 
@@ -319,7 +237,7 @@ Reviewer将检查以下内容：
 ### 发布步骤
 
 1. **更新CHANGELOG.md**：记录所有变更
-2. **更新版本号**：在 `pyproject.toml` 和 `__init__.py` 中更新
+2. **更新版本号**：只改 `pyproject.toml`（包内 `__version__` 从包元数据读取）
 3. **打Tag**：
    ```bash
    git tag -a v0.1.0 -m "Release v0.1.0 - MVP version"

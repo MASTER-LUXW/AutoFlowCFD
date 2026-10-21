@@ -4,10 +4,15 @@
 
 AutoFlowCFD团队高度重视项目安全性。如果你发现安全漏洞，请**不要**通过公开Issue报告，而应通过以下方式私下联系我们：
 
-- **邮箱**：security@autoflowcfd.org
+- **邮箱**：luxw_chd@126.com（项目联系人 Mr Lu，邮件标题注明"安全"）
 - **GitHub Security Advisories**：[创建安全公告](https://github.com/AutoFlowCFD/AutoFlowCFD/security/advisories/new)
 
 我们将在 **48小时内** 确认收到报告，并在 **7天内** 提供初步评估和修复计划。
+
+## 已知的使用注意
+
+- `.pkl` 体网格与 `final_state.pkl` 是 Python pickle：反序列化会执行文件中的代码，只加载自己生成或可信来源的文件。
+- checkpoint（HDF5）与 `.nas` / `.yaml` 按数据解析，不执行代码；YAML 用安全加载器读取。
 
 ## 支持版本
 
@@ -170,9 +175,8 @@ jobs:
 
 ## 联系方式
 
-- **安全邮箱**：security@autoflowcfd.org
+- **安全联系**：luxw_chd@126.com
 - **GitHub Issues**：[非安全问题](https://github.com/AutoFlowCFD/AutoFlowCFD/issues)
-- **社区讨论**：[GitHub Discussions](https://github.com/AutoFlowCFD/AutoFlowCFD/discussions)
 
 ---
 

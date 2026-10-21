@@ -90,7 +90,7 @@ config = SteadyConfig(order=3, turbulence="sa", time_scheme="newton-krylov", max
 run_steady(volume_mesh, config=None, *, aoa_deg=0.0, aos_deg=0.0, reference_area=None,
            skip_quality_check=False, **fields) -> SolverResult
 run_transient(volume_mesh, config=None, *, aoa_deg=0.0, aos_deg=0.0, reference_area=None,
-              skip_quality_check=False, **fields) -> SolverResult
+              skip_quality_check=False, probes=None, **fields) -> SolverResult
 ```
 
 | 参数 | 说明 |
@@ -101,6 +101,7 @@ run_transient(volume_mesh, config=None, *, aoa_deg=0.0, aos_deg=0.0, reference_a
 | `aoa_deg` / `aos_deg` | 攻角 / 侧滑角（度），约定同 CLI `--aoa/--aos` |
 | `reference_area` | 气动系数参考面积 (m²)，不给时按来流方向的迎风投影估算 |
 | `skip_quality_check` | 跳过求解前质量门（同 CLI `--skip-quality-check`，仅用于临时诊断） |
+| `probes` | 仅瞬态：探针位置 `(k, 3)`（米，同 CLI `--probe`），每个物理步在探针处求 FR 解多项式的值，写进 `output_dir/probes.csv` |
 
 **求解行为**
 - 求解前跑与 CLI 同一道质量门；不通过时抛 `MeshQualityGateError`。
@@ -116,6 +117,7 @@ run_transient(volume_mesh, config=None, *, aoa_deg=0.0, aos_deg=0.0, reference_a
 - 物理时间步数为 `config.n_steps`：给了 `total_time` 时取 `total_time/dt`，否则为 `max_iter`。
 - 跑满全部物理步，不以残差下降为停止条件。
 - 给了 `init_from_checkpoint` 时，以该 checkpoint 的场为初场。
+- 物理时间随时间精确推进累计，写进 checkpoint（`post transient-*` 的时间轴）。
 
 `SolverResult` 字段：`converged`、`iterations`、`final_residual`。解场在 `api.solver` 上。
 
@@ -177,4 +179,4 @@ resume_simulation(checkpoint_file, max_iter=0, *, dt=None, tol=1e-6, backend=Non
 
 ---
 
-**最后更新**: 2026-10-19
+**最后更新**: 2026-10-21

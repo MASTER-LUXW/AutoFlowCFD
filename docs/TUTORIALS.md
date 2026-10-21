@@ -1,1070 +1,201 @@
-# AutoFlowCFD 算例教程
+# AutoFlowCFD 教程
 
-本文档提供完整的 CFD 仿真算例教程，从简单的立方体绕流到复杂的汽车外流场仿真，帮助用户快速掌握 AutoFlowCFD 的使用。
-
----
-
-## 📋 目录
-
-- [算例概览](#算例概览)
-- [算例 1: 立方体绕流验证](#算例-1-立方体绕流验证)
-- [算例 2: Ahmed Body 标准算例](#算例-2-ahmed-body-标准算例)
-- [算例 3: 完整轿车外流场](#算例-3-完整轿车外流场)
-- [算例 4: 瞬态尾流分析](#算例-4-瞬态尾流分析)
-- [算例 5: 参数化优化研究](#算例-5-参数化优化研究)
-- [结果对比与验证](#结果对比与验证)
+用仓库自带的网格与验证算例走一遍完整流程。命令都可以原样运行；文中给出的数值是记录在案的实测结果（注明网格、
+阶数与模型），不是期望值或文献值。命令选项以 `--help` 为准，配置字段见 [配置指南](CONFIGURATION_GUIDE.md)。
 
 ---
 
-## 算例概览
+## 目录
 
-| 算例 | 难度 | 网格规模 | 仿真类型 | 预计耗时 | 学习目标 |
-|------|------|---------|---------|---------|---------|
-| 立方体绕流 | ⭐ | 50万 | 稳态 RANS | 5分钟 | 基础流程 |
-| Ahmed Body | ⭐⭐ | 100万 | 稳态 RANS | 15分钟 | 标准验证 |
-| 完整轿车 | ⭐⭐⭐ | 500万 | 稳态 RANS | 2小时 | 工程应用 |
-| 瞬态尾流 | ⭐⭐⭐ | 200万 | 瞬态 DDES | 4小时 | 非定常流动 |
-| 参数优化 | ⭐⭐⭐⭐ | 100万×10 | 批量仿真 | 8小时 | 自动化流程 |
-
----
-
-## 算例 1: 立方体绕流验证
-
-### 目标
-
-验证求解器基本功能，学习标准工作流程。
-
-### 问题描述
-
-- **几何**: 边长 1m 的立方体
-- **来流速度**: 10 m/s
-- **雷诺数**: Re = 6.7×10⁵（基于立方体边长）
-- **湍流模型**: SST k-ω
-
-### 网格准备
-
-```bash
-# 使用项目自带网格
-ls examples/cube_demo/cube.nas
-```
-
-**网格统计**：
-- 单元数: ~500,000
-- 节点数: ~600,000
-- 边界层: 5 层棱柱层
-- y+: 30-50
-
-### 运行仿真
-
-#### 方式一: CLI
-
-```bash
-# 步骤 1: 生成体网格
-poetry run autoflowcfd grid generate-volume examples/cube_demo/cube.nas \
-    -o examples/cube_demo/cube_volume.pkl
-
-# 步骤 2: 运行稳态求解
-poetry run autoflowcfd solve steady examples/cube_demo/cube_volume.pkl \
-    --backend cpu \
-    --turbulence-model sst \
-    --order 2 \
-    --max-iter 2000 \
-    -o ./results/cube_steady
-```
-
-#### 方式二: Python API
-
-```python
-from autoflowcfd import AutoFlowCFDAPI
-import matplotlib.pyplot as plt
-
-# 初始化
-api = AutoFlowCFDAPI(verbose=True)
-
-# 加载网格
-print("加载网格...")
-grid = api.load_grid("examples/cube_demo/cube.nas")
-print(f"网格: {grid.node_count} 节点, {grid.cell_count} 单元")
-
-# 运行仿真
-print("\n运行稳态仿真...")
-result = api.run_steady(
-    grid,
-    backend="cpu",
-    turbulence="sst_kw",
-    order=2,
-    max_iter=2000,
-    output_dir="./results/cube_steady"
-)
-
-# 检查结果
-print(f"\n收敛状态: {'✅ 已收敛' if result.converged else '❌ 未收敛'}")
-print(f"迭代次数: {result.iterations}")
-print(f"最终残差: {result.final_residual:.6e}")
-
-# 计算气动系数
-coeffs = api.calculate_coefficients(result)
-print(f"\n风阻系数 Cd: {coeffs['Cd']:.4f}")
-print(f"升力系数 Cl: {coeffs['Cl']:.4f}")
-
-# 导出结果
-api.export_vtk(result, output_file="./results/cube_steady/result.vtu")
-
-# 绘制收敛曲线
-df_conv = api.export_convergence_history(result)
-plt.figure(figsize=(10, 6))
-plt.semilogy(df_conv['iteration'], df_conv['residual'])
-plt.xlabel('Iteration')
-plt.ylabel('Residual')
-plt.title('Cube Flow - Convergence History')
-plt.grid(True, alpha=0.3)
-plt.savefig("./results/cube_steady/convergence.png")
-plt.show()
-
-print("\n✅ 仿真完成！")
-```
-
-### 预期结果
-
-- **收敛步数**: ~1500 步
-- **风阻系数 Cd**: ~2.05（立方体典型值）
-- **升力系数 Cl**: ~0.0（对称几何）
-
-### 可视化
-
-使用 ParaView 打开 `result.vtu`：
-
-1. **压力云图**: 显示前缘高压区和后缘低压区
-2. **速度流线**: 观察流动分离和尾流区
-3. **涡量等值面**: 识别涡系结构
-
-### 验证要点
-
-- ✅ 残差下降 6 个数量级
-- ✅ Cd 值在合理范围（1.8-2.2）
-- ✅ 流场对称性良好
-- ✅ 无数值振荡
+- [教程 1：立方体绕流稳态 RANS](#教程-1立方体绕流稳态-rans)
+- [教程 2：续算、升阶与换格式](#教程-2续算升阶与换格式)
+- [教程 3：瞬态 DDES、探针与压力谱](#教程-3瞬态-ddes探针与压力谱)
+- [教程 4：GPU 与分布式](#教程-4gpu-与分布式)
+- [教程 5：Python API 批量计算](#教程-5python-api-批量计算)
+- [教程 6：Ahmed 体](#教程-6ahmed-体)
+- [验证算例](#验证算例)
+- [常见问题](#常见问题)
 
 ---
 
-## 算例 2: Ahmed Body 标准算例
+## 教程 1：立方体绕流稳态 RANS
 
-### 目标
-
-学习汽车外流场仿真标准流程，验证仿真精度。
-
-### 问题描述
-
-Ahmed Body 是汽车空气动力学标准验证算例：
-
-- **几何**: 简化车体，尾部有 25° 斜背
-- **来流速度**: 30 m/s (108 km/h)
-- **雷诺数**: Re = 4.3×10⁶（基于车长）
-- **湍流模型**: SST k-ω
-
-![Ahmed Body Geometry](../examples/ahmed_demo/ahmed_body_diagram.png)
-
-### 网格准备
+`examples/cube_demo/cube_demo.nas`：带圆角的立方体（边长 1 m）放在风洞里，4 个边界组 inlet / outlet / tunnel / body，
+坐标单位米。
 
 ```bash
-ls examples/ahmed_demo/car_model.nas
+# 1. 体网格（边界层棱柱 + 四面体），打印质量报告
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --units m -o cube/cube_volume.nas
+
+# 2. 稳态 SA，P0 -> P1 逐阶爬坡，隐式 Newton-Krylov
+poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas --units m \
+    --order 1 --turbulence-model sa --time-scheme newton-krylov --max-iter 300 --checkpoint-interval 20 -o cube/steady
 ```
 
-**网格统计**：
-- 单元数: ~1,000,000
-- 节点数: ~1,200,000
-- 边界层: 8 层棱柱层
-- y+: 30-80
+每步日志一行：残差、相对本阶段起点的下降倍数、CFL、Newton 诊断（GMRES 次数、步长）、压力积分力系数
+`Cd_p / Cl_p / Cs_p`；第 1 步与之后每 10 步另附逐方程缩放残差、最大残差所在单元，以及累计伪时间相对流动特征时间的比例。
+残差下降到 `--tol`（缺省 1e-6）倍即收敛。
 
-### 配置文件
+**实测**（37.4 万单元、来流 33.33 m/s、SA、P1）：残差比 P1 起点下降约 1e6 倍，`Cd ≈ 0.89`、`Cl`、`Cs` 接近 0。这个
+立方体带圆角，阻力明显低于尖棱立方体（约 1.05）。剩余残差主要在物体侧面分离区的 nu_tilde 方程（缓慢的涡粘模态）。
 
-创建 `configs/ahmed_steady.yaml`:
-
-```yaml
-simulation:
-  name: "Ahmed Body Steady RANS"
-  description: "Standard Ahmed body at 30 m/s with 25° slant angle"
-
-grid:
-  file: "examples/ahmed_demo/car_model.nas"
-  validate: true
-
-compute:
-  backend: "gpu"
-
-solver:
-  type: "steady"
-  fr_order: 2
-  turbulence_model: "sst_kw"
-  max_iterations: 5000
-  convergence_tolerance: 1.0e-6
-  cfl:
-    initial: 0.1
-    maximum: 5.0
-    adaptive: true
-
-boundary_conditions:
-  inlet:
-    type: "INLET"
-    velocity: {x: 30.0, y: 0.0, z: 0.0}
-    pressure: 101325.0
-  
-  outlet:
-    type: "OUTLET"
-    pressure: 101325.0
-  
-  car_body:
-    type: "WALL"
-    wall_function: "enhanced"
-  
-  ground:
-    type: "WALL"
-    moving: true
-    velocity: {x: 30.0, y: 0.0, z: 0.0}
-  
-  symmetry:
-    type: "SYMMETRY"
-
-output:
-  directory: "./results/ahmed_steady"
-  fields:
-    enabled: true
-    interval: 100
-  coefficients:
-    enabled: true
-  convergence:
-    enabled: true
-```
-
-### 运行仿真
+后处理：
 
 ```bash
-poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
-    -c configs/ahmed_steady.yaml
+poetry run autoflowcfd post coefficients --case cube/steady --reference-area 1.0 --reference-length 1.0 \
+    --moment-center 0.5 0 0 --groups body
+poetry run autoflowcfd post export-vtk --case cube/steady -o cube/steady/flow.vtu \
+    --variables velocity --variables pressure --variables q_criterion
+poetry run autoflowcfd post export-vtk --case cube/steady --boundaries-only -o cube/steady/walls.vtu
+poetry run autoflowcfd post convergence --case cube/steady --variables residual --variables coefficients -o conv.png
 ```
 
-### 预期结果
-
-根据文献数据（Ahmed et al., 1984）：
-
-| 参数 | 实验值 | AutoFlowCFD | 误差 |
-|------|--------|------------|------|
-| Cd | 0.320 | 0.315-0.325 | <2% |
-| Cl | -0.050 | -0.045~-0.055 | <10% |
-
-### 详细分析
-
-#### 1. 收敛性分析
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-df = pd.read_csv("./results/ahmed_steady/convergence.csv")
-
-fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-# 残差曲线
-axes[0].semilogy(df['iteration'], df['residual'])
-axes[0].set_xlabel('Iteration')
-axes[0].set_ylabel('Residual')
-axes[0].set_title('Residual Convergence')
-axes[0].grid(True, alpha=0.3)
-
-# 气动系数曲线
-axes[1].plot(df['iteration'], df['Cd'], label='Cd')
-axes[1].plot(df['iteration'], df['Cl'], label='Cl')
-axes[1].set_xlabel('Iteration')
-axes[1].set_ylabel('Coefficient')
-axes[1].set_title('Aerodynamic Coefficients')
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("./results/ahmed_steady/convergence_analysis.png", dpi=150)
-plt.show()
-```
-
-#### 2. 表面压力分布
-
-```python
-# 提取车身表面压力系数
-import pyvista as pv
-
-grid = pv.read("./results/ahmed_steady/fields/field_iter_005000.vtu")
-
-# 计算 Cp
-pressure = grid.point_data['pressure']
-rho = 1.225  # kg/m³
-U_inf = 30.0  # m/s
-q_inf = 0.5 * rho * U_inf**2
-Cp = (pressure - 101325.0) / q_inf
-
-grid.point_data['Cp'] = Cp
-
-# 提取车身表面
-car_surface = grid.extract_surface()
-
-# 绘制 Cp 云图
-plotter = pv.Plotter()
-plotter.add_mesh(car_surface, scalars='Cp', cmap='coolwarm')
-plotter.add_title('Surface Pressure Coefficient (Cp)')
-plotter.show()
-```
-
-#### 3. 尾流分析
-
-```python
-# 提取尾流截面（x = 车后 0.5m）
-slice_x = grid.slice(normal='x', origin=[-0.5, 0, 0])
-
-plotter = pv.Plotter()
-plotter.add_mesh(slice_x, scalars='velocity_magnitude', cmap='viridis')
-plotter.add_title('Wake Velocity Distribution')
-plotter.show()
-```
-
-### 与实验数据对比
-
-```python
-# 实验数据（Ahmed et al., 1984）
-experimental_Cd = 0.320
-experimental_Cl = -0.050
-
-# 仿真结果
-simulated_Cd = coeffs['Cd']
-simulated_Cl = coeffs['Cl']
-
-# 误差计算
-Cd_error = abs(simulated_Cd - experimental_Cd) / experimental_Cd * 100
-Cl_error = abs(simulated_Cl - experimental_Cl) / abs(experimental_Cl) * 100
-
-print(f"Cd 误差: {Cd_error:.2f}%")
-print(f"Cl 误差: {Cl_error:.2f}%")
-
-# 判断是否满足工程精度要求
-if Cd_error < 3.0:
-    print("✅ Cd 精度满足工程要求（<3%）")
-else:
-    print("⚠️  Cd 精度需改进")
-```
+ParaView 打开 `flow.vtu`：`Pressure` 着色看前缘滞止区与侧面负压区；`Velocity` 做流线看尾流回流区；`QCriterion`
+取正的等值面看涡结构。`walls.vtu` 带 `BoundaryID` 与组名图例，可按组筛选。
 
 ---
 
-## 算例 3: 完整轿车外流场
+## 教程 2：续算、升阶与换格式
 
-### 目标
-
-学习复杂几何的工程级仿真，掌握网格处理和边界条件配置。
-
-### 问题描述
-
-- **几何**: 完整轿车模型（含后视镜、底盘细节）
-- **来流速度**: 40 m/s (144 km/h)
-- **雷诺数**: Re = 1.2×10⁷
-- **湍流模型**: SST k-ω + 增强壁面函数
-
-### 网格准备
-
-完整轿车网格通常较大，建议：
-
-- **网格规模**: 300-500 万单元
-- **边界层**: 10-15 层棱柱层
-- **y+**: 30-100（壁面函数适用）
-- **网格格式**: ANSA 生成 .nas 文件
-
-### 配置文件
-
-创建 `configs/sedan_full.yaml`:
-
-```yaml
-simulation:
-  name: "Full Sedan External Flow"
-  description: "Complete sedan model with mirrors and underbody details"
-
-grid:
-  file: "grids/sedan_full.nas"
-  validate: true
-
-compute:
-  backend: "gpu"
-  device_id: 0
-
-solver:
-  type: "steady"
-  fr_order: 2
-  turbulence_model: "sst_kw"
-  max_iterations: 8000
-  convergence_tolerance: 1.0e-6
-  cfl:
-    initial: 0.05
-    maximum: 8.0
-    adaptive: true
-
-boundary_conditions:
-  inlet:
-    type: "INLET"
-    velocity: {x: 40.0, y: 0.0, z: 0.0}
-    pressure: 101325.0
-    turbulence:
-      ke: 2.0
-      omega: 150.0
-  
-  outlet:
-    type: "OUTLET"
-    pressure: 101325.0
-  
-  car_body:
-    type: "WALL"
-    wall_function: "enhanced"
-    roughness: 0.05  # mm
-  
-  wheels:
-    type: "WALL"
-    rotating: true
-    angular_velocity: 80.0  # rad/s
-  
-  ground:
-    type: "WALL"
-    moving: true
-    velocity: {x: 40.0, y: 0.0, z: 0.0}
-  
-  symmetry_plane:
-    type: "SYMMETRY"
-  
-  farfield:
-    type: "FARFIELD"
-    velocity: {x: 40.0, y: 0.0, z: 0.0}
-    pressure: 101325.0
-
-output:
-  directory: "./results/sedan_full"
-  fields:
-    enabled: true
-    interval: 200
-    variables:
-      - "pressure"
-      - "velocity"
-      - "vorticity"
-      - "wall_shear_stress"
-  coefficients:
-    enabled: true
-  convergence:
-    enabled: true
-```
-
-### 运行仿真
+**续算**：物理参数（来流、粘度、湍流模型、近壁处理、合成湍流入口涡核数……）一律取自 checkpoint，缺失即报错；CFL 等
+纯数值参数每次可以重新给。
 
 ```bash
-# GPU 加速（推荐）
-poetry run autoflowcfd solve steady grids/sedan_full_volume.pkl \
-    -c configs/sedan_full.yaml
-
-# 预计耗时: 2-4 小时（GPU A100）
+poetry run autoflowcfd solve resume cube/steady/checkpoints/checkpoint_iter_000300.h5 --max-iter 200 --cfl-start 3000
 ```
 
-### 结果分析
+**换稳态格式**：`--time-scheme rk3 / newton-krylov` 在两个稳态格式之间切换（时间精确的瞬态算例不能换）。
 
-#### 1. 气动系数分解
+**升阶**：`solve resume` 不改目标阶数；要在收敛的 P1 解上直接算 P2，用 `--init-from`（解与湍流场精确延拓到新阶数，
+不重走爬坡）：
 
-```python
-# 计算各部件对总阻力的贡献
-components = ['body', 'wheels', 'mirrors', 'underbody']
-
-for comp in components:
-    # 提取部件表面
-    comp_surface = extract_component_surface(result, comp)
-    
-    # 计算该部件的阻力
-    Cd_comp = calculate_component_drag(comp_surface)
-    print(f"{comp:15s}: Cd = {Cd_comp:.4f}")
+```bash
+poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --order 2 --turbulence-model sa \
+    --time-scheme newton-krylov --init-from cube/steady/checkpoints/checkpoint_iter_000300.h5 -o cube/steady_p2
 ```
 
-典型结果：
-```
-body           : Cd = 0.180
-wheels         : Cd = 0.065
-mirrors        : Cd = 0.025
-underbody      : Cd = 0.050
--------------------------------
-Total          : Cd = 0.320
-```
-
-#### 2. 表面摩擦应力
-
-```python
-# 可视化壁面剪应力
-import pyvista as pv
-
-grid = pv.read("./results/sedan_full/fields/field_iter_008000.vtu")
-wss = grid.point_data['wall_shear_stress']
-
-plotter = pv.Plotter()
-plotter.add_mesh(grid, scalars=wss, cmap='hot')
-plotter.add_title('Wall Shear Stress Distribution')
-plotter.show()
-```
-
-#### 3. 流动分离检测
-
-```python
-# 识别流动分离区域
-velocity = grid.point_data['velocity']
-normal = grid.point_data['normal']
-
-# 计算速度与法向的点积
-dot_product = np.einsum('ij,ij->i', velocity, normal)
-
-# 分离区：速度反向
-separation_mask = dot_product < 0
-
-print(f"分离区面积占比: {separation_mask.sum() / len(separation_mask) * 100:.2f}%")
-```
-
-### 工程建议
-
-基于仿真结果提出改进方案：
-
-1. **降低车轮阻力**: 添加轮罩或优化轮毂设计
-2. **改善尾流**: 调整尾部造型减少分离
-3. **底盘平整化**: 减少底部湍流
-4. **后视镜优化**: 采用流线型设计
+内存随阶数快速增长：37.4 万单元的 SA P2 隐式需要 45 GB 以上；内存不够时用分布式（教程 4）分摊。
 
 ---
 
-## 算例 4: 瞬态尾流分析
+## 教程 3：瞬态 DDES、探针与压力谱
 
-### 目标
-
-学习非定常流动仿真，捕捉尾流涡脱落现象。
-
-### 问题描述
-
-- **几何**: Ahmed Body（25° 斜背角）
-- **来流速度**: 30 m/s
-- **仿真类型**: 瞬态 DDES
-- **时间步长**: Δt = 1×10⁻⁴ s
-- **总时间**: 0.1 s（1000 时间步）
-
-### 为什么需要瞬态仿真？
-
-稳态 RANS 无法准确捕捉：
-- 周期性涡脱落
-- 非定常尾流结构
-- 气动噪声源
-
-DDES（延迟分离涡模拟）结合：
-- RANS：近壁面边界层
-- LES：分离区大尺度涡
-
-### 配置文件
-
-创建 `configs/ahmed_transient_ddes.yaml`:
-
-```yaml
-simulation:
-  name: "Ahmed Body Transient DDES"
-  description: "Unsteady wake analysis using DDES"
-
-grid:
-  file: "examples/ahmed_demo/car_model.nas"
-  validate: true
-
-compute:
-  backend: "gpu"
-
-solver:
-  type: "transient"
-  fr_order: 2
-  turbulence_model: "ddes"
-  time_integration:
-    scheme: "BE"
-    dt: 1.0e-4
-    total_time: 0.1
-  statistics:
-    enabled: true
-    start_time: 0.05  # 前 0.05s 为过渡期
-    interval: 5
-
-boundary_conditions:
-  inlet:
-    type: "INLET"
-    velocity: {x: 30.0, y: 0.0, z: 0.0}
-    pressure: 101325.0
-    turbulence:
-      ke: 1.0
-      omega: 100.0
-  
-  outlet:
-    type: "OUTLET"
-    pressure: 101325.0
-  
-  car_body:
-    type: "WALL"
-    wall_function: "enhanced"
-  
-  ground:
-    type: "WALL"
-    moving: true
-    velocity: {x: 30.0, y: 0.0, z: 0.0}
-
-output:
-  directory: "./results/ahmed_transient"
-  fields:
-    enabled: true
-    interval: 10  # 每 10 步输出一次
-    variables:
-      - "pressure"
-      - "velocity"
-      - "vorticity"
-  coefficients:
-    enabled: true
-  convergence:
-    enabled: false  # 瞬态不监控残差
-```
-
-### 运行仿真
+从稳态解起步做 SST-DDES，速度入口自动注入合成湍流：
 
 ```bash
-poetry run autoflowcfd solve transient examples/ahmed_demo/ahmed_volume.pkl \
-    -c configs/ahmed_transient_ddes.yaml
-
-# 预计耗时: 4-6 小时（GPU A100）
+poetry run autoflowcfd solve transient cube/steady/volume_mesh.pkl --order 1 --turbulence-model ddes \
+    --time-method dual-time --dt 1e-3 --physical-time 0.5 --checkpoint-interval 10 \
+    --init-from cube/steady/checkpoints/checkpoint_iter_000300.h5 \
+    --probe 1.5 0.0 0.0 --probe 2.5 0.3 0.0 -o cube/ddes
 ```
 
-### 结果分析
+- `dual-time`：每个物理步若干个带 BDF2 物理时间项的隐式 Newton 步（`--dual-time-inner-iter` 为上限，残差降到物理步
+  起点的 1e-3 即提前结束）。实测立方体 SA P1 从收敛解起步、dt = 1e-3：每步 2 次内迭代。
+- `rk3`：显式、全场同一物理步长的时间精确推进（每个 `--dt` 切成若干显式稳定的子步）。
+- `--probe`：每个物理步在探针处求 FR 解多项式的值，写进 `cube/ddes/probes.csv`（time、iteration、各探针 p u v w）；续算
+  从 checkpoint 时刻接着写。
 
-#### 1. 时均气动系数
+统计与频谱（`--warmup-time` 排除起动瞬态，按 checkpoint 记录的物理时间）：
+
+```bash
+poetry run autoflowcfd post transient-mean --case cube/ddes --warmup-time 0.1        # MeanVelocity / MeanPressure + Cd/Cl/Cs 时均
+poetry run autoflowcfd post transient-rms --case cube/ddes --warmup-time 0.1         # VelocityRMS / PressureRMS
+poetry run autoflowcfd post transient-psd --case cube/ddes --warmup-time 0.1 -o psd.csv   # 探针压力的 Welch 谱
+```
+
+时均与 RMS 的样本是各个 checkpoint，样本间隔即 `--checkpoint-interval` 个物理步；压力谱的样本是每个物理步的探针值。
+
+---
+
+## 教程 4：GPU 与分布式
+
+```bash
+# 单 GPU
+poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --backend gpu --order 1 --turbulence-model sa
+
+# CPU MPI：每个 rank 加载完整网格（传统模式）；只让 root 加载、其余 rank 只收切好的紧凑数据：加 --fully-distributed
+mpirun -np 8 poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --n-ranks 8 --order 1 --turbulence-model sa
+
+# 多 GPU：每个 rank 一块 GPU（不给 --gpu-device 时按 rank % GPU 数分配）
+mpirun -np 4 poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --backend gpu --multi-gpu --n-ranks 4
+```
+
+四个后端是同一套算法、同一个求解循环、同一份 checkpoint 格式：分布式的 checkpoint 可以单机续算，反之亦然
+（`solve resume ... --n-ranks N`）。BLAS 线程数缺省为"本节点核数 / 本节点 rank 数"，numba 线程数由 `--threads` 给出。
+
+---
+
+## 教程 5：Python API 批量计算
+
+参数名就是配置字段；每个算例写到自己的输出目录，checkpoint 可用 `solve resume` 续算。
 
 ```python
 from autoflowcfd import AutoFlowCFDAPI
 
 api = AutoFlowCFDAPI()
+volume_mesh = api.generate_volume_mesh(api.load_grid("examples/cube_demo/cube_demo.nas", units="m"))
 
-# 加载瞬态结果
-result = api.load_transient_result("./results/ahmed_transient")
+rows = []
+for aoa in (0.0, 5.0, 10.0):
+    result = api.run_steady(volume_mesh, order=1, turbulence="sa", time_scheme="newton-krylov", max_iter=300,
+                            output_dir=f"./sweep/aoa_{aoa:g}", aoa_deg=aoa)
+    c = api.calculate_coefficients(reference_area=1.0)
+    rows.append((aoa, result.converged, c["Cd"], c["Cl"]))
 
-# 计算时均值（排除过渡期）
-mean_coeffs = api.calculate_mean_coefficients(result, start_time=0.05)
-
-print(f"时均 Cd: {mean_coeffs['Cd']:.4f}")
-print(f"时均 Cl: {mean_coeffs['Cl']:.4f}")
-
-# 计算脉动量（RMS）
-rms_coeffs = api.calculate_rms_coefficients(result, start_time=0.05)
-print(f"Cd RMS: {rms_coeffs['Cd']:.4f}")
-print(f"Cl RMS: {rms_coeffs['Cl']:.4f}")
+for aoa, ok, cd, cl in rows:
+    print(f"aoa={aoa:4.1f}  converged={ok}  Cd={cd:.4f}  Cl={cl:.4f}")
 ```
 
-#### 2. 功率谱密度分析
-
-```python
-# PSD 分析识别主导频率
-psd_data = api.calculate_psd(result, variable='Cl', start_time=0.05)
-
-import matplotlib.pyplot as plt
-
-freq = psd_data['frequency']
-psd = psd_data['power']
-
-plt.figure(figsize=(10, 6))
-plt.loglog(freq, psd)
-plt.xlabel('Frequency (Hz)')
-plt.ylabel('Power Spectral Density')
-plt.title('Power Spectrum of Lift Coefficient')
-plt.grid(True, alpha=0.3)
-
-# 识别峰值频率
-peak_idx = np.argmax(psd[100:])  # 忽略低频
-peak_freq = freq[peak_idx + 100]
-print(f"主导频率: {peak_freq:.2f} Hz")
-
-plt.axvline(peak_freq, color='r', linestyle='--', label=f'Peak: {peak_freq:.2f} Hz')
-plt.legend()
-plt.savefig("./results/ahmed_transient/psd.png")
-plt.show()
-```
-
-#### 3. 涡结构可视化
-
-```python
-# Q 准则识别涡结构
-import pyvista as pv
-
-# 加载某个时间步
-grid = pv.read("./results/ahmed_transient/fields/field_step_00800.vtu")
-
-# 计算 Q 准则
-velocity = grid.point_data['velocity']
-grad_u = np.gradient(velocity.reshape(-1, 3), axis=0)
-
-S = 0.5 * (grad_u + grad_u.T)  # 应变率张量
-Omega = 0.5 * (grad_u - grad_u.T)  # 旋转率张量
-
-Q = 0.5 * (np.trace(Omega @ Omega.T) - np.trace(S @ S.T))
-grid.point_data['Q_criterion'] = Q
-
-# 提取涡结构等值面
-vortex_iso = grid.contour(isosurfaces=[100], scalars='Q_criterion')
-
-plotter = pv.Plotter()
-plotter.add_mesh(vortex_iso, color='blue', opacity=0.6)
-plotter.add_title('Vortex Structures (Q-Criterion)')
-plotter.show()
-```
-
-#### 4. 尾流速度剖面
-
-```python
-# 提取不同位置的尾流速度剖面
-x_locations = [-0.5, -1.0, -2.0, -3.0]  # 车后距离
-
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-for i, x_pos in enumerate(x_locations):
-    ax = axes[i // 2][i % 2]
-    
-    # 提取截面
-    slice_data = extract_wake_slice(result, x=x_pos)
-    
-    # 绘制速度剖面
-    ax.plot(slice_data['z'], slice_data['velocity_x'], label=f'x={x_pos}m')
-    ax.set_xlabel('Height (z) [m]')
-    ax.set_ylabel('Velocity (U) [m/s]')
-    ax.set_title(f'Wake Profile at x={x_pos}m')
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-
-plt.tight_layout()
-plt.savefig("./results/ahmed_transient/wake_profiles.png")
-plt.show()
-```
-
-### 关键发现
-
-典型瞬态 DDES 结果：
-
-- **主导频率**: ~15-20 Hz（对应尾流涡脱落）
-- **Cd 脉动**: RMS ≈ 0.02-0.03
-- **Cl 脉动**: RMS ≈ 0.05-0.08（大于 Cd 脉动）
-- **涡脱落模式**: 交替涡街（类似卡门涡街）
+`aoa_deg` / `aos_deg` 是来流方向（攻角绕 y 轴、抬头为正；侧滑角绕 z 轴），来流边界、初场、合成湍流入口、气动力的风轴系
+分解与自动参考面积都按它构造。
 
 ---
 
-## 算例 5: 参数化优化研究
+## 教程 6：Ahmed 体
 
-### 目标
-
-学习批量仿真和参数优化流程，实现自动化设计探索。
-
-### 问题描述
-
-研究 Ahmed Body 斜背角对气动性能的影响：
-
-- **变量**: 斜背角 α = [10°, 15°, 20°, 25°, 30°, 35°]
-- **固定参数**: 来流速度 30 m/s
-- **目标**: 最小化 Cd
-
-### 准备工作
-
-#### 1. 生成不同角度的网格
-
-```python
-# 使用参数化网格生成工具（需要额外脚本）
-angles = [10, 15, 20, 25, 30, 35]
-
-for angle in angles:
-    generate_ahmed_mesh(angle=angle, output=f"grids/ahmed_{angle}deg.nas")
-```
-
-#### 2. 创建批量仿真脚本
-
-```python
-# scripts/batch_optimization.py
-import os
-import json
-import numpy as np
-from autoflowcfd import AutoFlowCFDAPI
-import pandas as pd
-
-def run_angle_sweep():
-    """斜背角参数扫描"""
-    
-    api = AutoFlowCFDAPI(verbose=False)
-    
-    angles = [10, 15, 20, 25, 30, 35]
-    results = []
-    
-    for angle in angles:
-        print(f"\n{'='*60}")
-        print(f"运行角度: {angle}°")
-        print(f"{'='*60}")
-        
-        # 加载网格
-        grid_file = f"grids/ahmed_{angle}deg.nas"
-        if not os.path.exists(grid_file):
-            print(f"⚠️  网格文件不存在: {grid_file}")
-            continue
-        
-        grid = api.load_grid(grid_file, validate=False)
-        
-        # 运行仿真
-        result = api.run_steady(
-            grid,
-            backend="gpu",
-            turbulence="sst_kw",
-            order=2,
-            max_iter=3000,
-            output_dir=f"./results/optimization/angle_{angle}"
-        )
-        
-        # 提取结果
-        coeffs = api.calculate_coefficients(result)
-        
-        results.append({
-            'angle': angle,
-            'Cd': coeffs['Cd'],
-            'Cl': coeffs['Cl'],
-            'converged': result.converged,
-            'iterations': result.iterations
-        })
-        
-        print(f"Cd: {coeffs['Cd']:.4f}, Cl: {coeffs['Cl']:.4f}")
-    
-    # 保存结果
-    df_results = pd.DataFrame(results)
-    df_results.to_csv("./results/optimization/param_sweep_results.csv", index=False)
-    
-    print(f"\n{'='*60}")
-    print("参数扫描完成！")
-    print(f"{'='*60}")
-    print(df_results)
-    
-    return df_results
-
-if __name__ == "__main__":
-    results = run_angle_sweep()
-```
-
-### 运行批量仿真
+`examples/ahmed_demo/ahmed_body_demo.nas`：Ahmed 体 + 地面 + 风洞（组 body / ground / inlet / outlet / tunnel，毫米），
+`config_example.yaml` 是对应的配置文件：
 
 ```bash
-poetry run python scripts/batch_optimization.py
-
-# 预计耗时: 6-8 小时（6 个算例，GPU）
+poetry run autoflowcfd grid generate-volume examples/ahmed_demo/ahmed_body_demo.nas -o ahmed/ahmed_volume.nas \
+    --target-yplus 30 --ref-velocity 40 --ref-length 1.044
+poetry run autoflowcfd solve steady ahmed/ahmed_volume.nas --surface-mesh examples/ahmed_demo/ahmed_body_demo.nas \
+    --config examples/ahmed_demo/config_example.yaml
 ```
 
-### 结果分析
-
-#### 1. 参数影响曲线
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-df = pd.read_csv("./results/optimization/param_sweep_results.csv")
-
-fig, axes = plt.subplots(2, 1, figsize=(10, 8))
-
-# Cd vs 角度
-axes[0].plot(df['angle'], df['Cd'], 'o-', linewidth=2, markersize=8)
-axes[0].set_xlabel('Slant Angle (deg)', fontsize=12)
-axes[0].set_ylabel('Drag Coefficient (Cd)', fontsize=12)
-axes[0].set_title('Drag Coefficient vs Slant Angle', fontsize=14)
-axes[0].grid(True, alpha=0.3)
-
-# Cl vs 角度
-axes[1].plot(df['angle'], df['Cl'], 's-', linewidth=2, markersize=8, color='orange')
-axes[1].set_xlabel('Slant Angle (deg)', fontsize=12)
-axes[1].set_ylabel('Lift Coefficient (Cl)', fontsize=12)
-axes[1].set_title('Lift Coefficient vs Slant Angle', fontsize=14)
-axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("./results/optimization/param_sweep_curves.png", dpi=150)
-plt.show()
-
-# 找到最优角度
-optimal_idx = df['Cd'].idxmin()
-optimal_angle = df.loc[optimal_idx, 'angle']
-optimal_Cd = df.loc[optimal_idx, 'Cd']
-
-print(f"\n最优斜背角: {optimal_angle}°")
-print(f"最小 Cd: {optimal_Cd:.4f}")
-```
-
-典型结果趋势：
-- **小角度（10-20°）**: 附着流动，Cd 较低
-- **临界角度（~25°）**: 流动开始分离，Cd 急剧上升
-- **大角度（30-35°）**: 完全分离，Cd 达到平台
-
-#### 2. 代理模型构建
-
-```python
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.linear_model import LinearRegression
-import numpy as np
-
-# 构建二次代理模型
-X = df['angle'].values.reshape(-1, 1)
-y = df['Cd'].values
-
-poly = PolynomialFeatures(degree=2)
-X_poly = poly.fit_transform(X)
-
-model = LinearRegression()
-model.fit(X_poly, y)
-
-# 预测更细粒度的曲线
-angles_fine = np.linspace(10, 35, 100).reshape(-1, 1)
-Cd_predicted = model.predict(poly.transform(angles_fine))
-
-plt.figure(figsize=(10, 6))
-plt.plot(df['angle'], df['Cd'], 'ro', label='Simulation Data', markersize=10)
-plt.plot(angles_fine, Cd_predicted, 'b-', label='Surrogate Model', linewidth=2)
-plt.xlabel('Slant Angle (deg)', fontsize=12)
-plt.ylabel('Drag Coefficient (Cd)', fontsize=12)
-plt.title('Surrogate Model for Cd Prediction', fontsize=14)
-plt.legend(fontsize=12)
-plt.grid(True, alpha=0.3)
-plt.savefig("./results/optimization/surrogate_model.png", dpi=150)
-plt.show()
-
-# 使用代理模型快速优化
-from scipy.optimize import minimize
-
-def surrogate_Cd(angle):
-    return model.predict(poly.transform([[angle]]))[0]
-
-result = minimize(surrogate_Cd, x0=20, bounds=[(10, 35)])
-print(f"代理模型预测最优角度: {result.x[0]:.2f}°")
-print(f"预测最小 Cd: {result.fun:.4f}")
-```
-
-#### 3. 敏感性分析
-
-```python
-# 计算 Cd 对角度的敏感性
-sensitivity = np.gradient(df['Cd'], df['angle'])
-
-plt.figure(figsize=(10, 6))
-plt.plot(df['angle'], sensitivity, '^-', linewidth=2, markersize=8)
-plt.xlabel('Slant Angle (deg)', fontsize=12)
-plt.ylabel('d(Cd)/d(Angle)', fontsize=12)
-plt.title('Sensitivity of Cd to Slant Angle', fontsize=14)
-plt.grid(True, alpha=0.3)
-plt.axhline(0, color='k', linestyle='--', alpha=0.3)
-plt.savefig("./results/optimization/sensitivity.png", dpi=150)
-plt.show()
-
-# 找出敏感度最大的区域
-max_sensitivity_idx = np.argmax(np.abs(sensitivity))
-print(f"最大敏感度出现在: {df['angle'][max_sensitivity_idx]}°")
-print(f"敏感度值: {sensitivity[max_sensitivity_idx]:.4f} /deg")
-```
-
-### 工程启示
-
-基于参数扫描结果：
-
-1. **最优设计**: 斜背角 20-22° 时 Cd 最低
-2. **临界现象**: 25° 附近发生流动分离突变
-3. **设计裕度**: 避免接近临界角度，留出安全余量
-4. **权衡考虑**: 兼顾造型美学和气动性能
+地面按固定壁面处理（不支持移动地面）。这个算例目前只演示流程，还没有与 Ahmed 实验数据做过对比验证。
 
 ---
 
-## 结果对比与验证
+## 验证算例
 
-### 与实验数据对比
+`tests/validation/` 下的算例有精确解、关联式或守恒量可以定量核对（`poetry run pytest tests/validation -q -o addopts=`）：
 
-| 算例 | 参数 | 实验值 | AutoFlowCFD | 误差 |
-|------|------|--------|------------|------|
-| 立方体绕流 | Cd | 2.05 | 2.02-2.08 | <2% |
-| Ahmed Body (25°) | Cd | 0.320 | 0.315-0.325 | <2% |
-| Ahmed Body (25°) | Cl | -0.050 | -0.045~-0.055 | <10% |
-| 完整轿车 | Cd | 0.280 | 0.275-0.290 | <4% |
+| 算例 | 核对的量 | 实测 |
+|------|---------|------|
+| Blasius 层流平板（`test_blasius.py`） | 壁面摩阻与速度剖面对 Blasius 精确解 | — |
+| 平面 Couette（`test_couette.py`） | 线性速度剖面 | — |
+| 湍流平板近壁处理（`test_flat_plate_wall_treatment.py`） | 局部摩阻对 White 关联式（0.5 < x < 1.8，P1 SST） | 第一层 2e-5 / 2e-4 / 2e-3 m（形心 y+ 约 1.8 / 19 / 190）：`auto` -6.4% / +2.0% / +1.8%，`resolved` -13.2% / -77.5% / -97.3% |
+| 等熵涡（`test_isentropic_vortex.py`） | 涡平动后的位置与形状 | — |
+| 双时间步时间精度（`test_dual_time_temporal_order.py`） | 等熵涡 P2，dt 减半误差比 | 时间阶数 2.05 / 2.10 |
+| Taylor-Green 涡（`test_tgv.py`） | 粘性动能衰减、周期域质量 / 能量守恒 | — |
+| 周期边界（`test_periodic_bc.py`） | 周期面配对与自一致性 | — |
+| 贴壁层涡粘（`test_wall_layer_eddy_viscosity.py`） | 壁面外插负涡粘不向贴壁层注入动量 | 贴壁层最大速度 30.8 m/s（来流 30 m/s） |
 
-### 与商业软件对比
-
-| 软件 | Ahmed Body Cd | 计算时间（100万网格） |
-|------|--------------|---------------------|
-| AutoFlowCFD (GPU) | 0.318 | 15 分钟 |
-| STAR-CCM+ | 0.320 | 20 分钟 |
-| Fluent | 0.319 | 25 分钟 |
-| OpenFOAM | 0.322 | 40 分钟 |
-
-### 网格收敛性研究
-
-```python
-# 不同网格密度的结果对比
-mesh_sizes = ['coarse', 'medium', 'fine']
-Cd_values = [0.325, 0.318, 0.316]
-cell_counts = [500000, 1000000, 2000000]
-
-plt.figure(figsize=(10, 6))
-plt.plot(cell_counts, Cd_values, 'o-', linewidth=2, markersize=10)
-plt.xlabel('Cell Count', fontsize=12)
-plt.ylabel('Drag Coefficient (Cd)', fontsize=12)
-plt.title('Grid Convergence Study', fontsize=14)
-plt.grid(True, alpha=0.3)
-plt.savefig("grid_convergence.png", dpi=150)
-plt.show()
-
-# Richardson 外推
-from scipy.optimize import curve_fit
-
-def richardson(N, Cd_inf, C, p):
-    return Cd_inf + C * N**(-p)
-
-params, _ = curve_fit(richardson, cell_counts, Cd_values)
-Cd_extrapolated = params[0]
-print(f"外推至无限网格: Cd = {Cd_extrapolated:.4f}")
-```
+"—" 表示判据写在测试里（通过即满足），没有单独记录的数值。
 
 ---
 
 ## 常见问题
 
-### Q1: 仿真不收敛怎么办？
+**不收敛** —— 看每步日志里最大残差所在单元：在畸形单元上时先改网格；显式格式调低 `--cfl-start`；复杂几何用
+`--time-scheme newton-krylov`；先在低阶收敛再 `--init-from` 升阶。
 
-**A**: 
-- 检查网格质量（`autoflowcfd grid validate`）
-- 降低初始 CFL 数（`--cfl-init 0.05`）
-- 增加最大迭代次数
-- 确认边界条件合理
+**选哪个湍流模型** —— 稳态 RANS：SA（高阶隐式收敛最好）或 SST；分离与尾流的非定常：DDES / IDDES；壁面解析 LES 网格
+代价高，壁面附近网格不够时用 WMLES。近壁网格第一层 y+ 不在 1 附近时保持 `--wall-treatment auto`。
 
-### Q2: 如何选择合适的湍流模型？
-
-**A**:
-- **稳态工程**: SST k-ω（平衡精度与速度）
-- **瞬态尾流**: DDES（捕捉非定常涡）
-- **高精度研究**: LES（计算成本高）
-
-### Q3: GPU 显存不足怎么办？
-
-**A**:
-- 降低 FR 阶数（3 → 2）
-- 减少输出变量数量
-- 降低检查点频率
-
-### Q4: 如何提高仿真精度？
-
-**A**:
-- 细化网格（特别是边界层和尾流区）
-- 提高 FR 阶数（2 → 3）
-- 使用更严格的收敛容差
+**显存 / 内存不够** —— 降阶、用 `--n-ranks` 分到多个进程或多台机器，或用多 GPU。
 
 ---
 
-## 下一步
-
-- 📖 阅读 [API 参考](API.md) 了解高级功能
-- 🔧 查看 [配置指南](CONFIGURATION_GUIDE.md) 学习参数调优
-- 💻 参与 [开发者指南](DEVELOPER_GUIDE.md) 贡献代码
-- 🤝 分享您的算例至社区
-
----
-
-**最后更新**: 2026-08-17  
-**版本**: AutoFlowCFD v0.2.0 (V2.0 系统改造版)
+下一步：[后处理指南](POSTPROCESSING_GUIDE.md)、[API 文档](API.md)、[配置指南](CONFIGURATION_GUIDE.md)。

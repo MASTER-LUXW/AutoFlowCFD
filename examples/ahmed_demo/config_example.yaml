@@ -1,99 +1,32 @@
-# AutoFlowCFD Configuration Example
-# This file demonstrates the configuration structure for CFD simulations
+# AutoFlowCFD 配置文件示例：Ahmed 体稳态 RANS
+#
+# 平铺的 "键: 值"，字段名与 src/autoflowcfd/config/solver_config.py 的配置类一致，未知字段直接报错。
+# 全部字段与缺省值见 docs/CONFIGURATION_GUIDE.md。校验：autoflowcfd config validate examples/ahmed_demo/config_example.yaml
+#
+# 用法（命令行显式给出的选项优先于本文件）：
+#   autoflowcfd grid generate-volume examples/ahmed_demo/ahmed_body_demo.nas -o ahmed/ahmed_volume.nas
+#   autoflowcfd solve steady ahmed/ahmed_volume.nas --surface-mesh examples/ahmed_demo/ahmed_body_demo.nas \
+#       --config examples/ahmed_demo/config_example.yaml
+#
+# 边界条件类型来自网格的组名（body / ground / inlet / outlet / tunnel），不在配置文件里设置。
 
-solver:
-  # Simulation mode: steady or transient
-  mode: steady
-  
-  # Turbulence model: sst_kw, des, ddes
-  turbulence: sst_kw
-  
-  # Compute backend: cpu or gpu
-  backend: cpu
-  
-  # FR discretization order (1, 2, or 3)
-  order: 2
+mode: steady
 
-mesh:
-  # Path to ANSA .nas grid file
-  file: examples/ahmed_body.nas
-  
-  # Geometry scale factor (1.0 = no scaling)
-  scale: 1.0
-  
-  # Coordinate system rotation (degrees)
-  rotation:
-    x: 0.0
-    y: 0.0
-    z: 0.0
+backend: cpu
+order: 2                    # 从 P0 逐阶爬坡到 P2（Order Continuation）
+turbulence: sa              # SA-neg；高阶隐式稳态推荐
+wall_treatment: auto        # 平衡壁面模型，第一层 y+ 从 1 到对数层都可用
+time_scheme: newton_krylov  # 隐式稳态；显式为 ssp_rk3
+max_iter: 2000
+convergence_tol: 1.0e-6     # 残差相对初值下降 1e6 倍即收敛
 
-numerics:
-  # Maximum iterations for steady, time steps for transient
-  max_iterations: 10000
-  
-  # Convergence tolerance (residual reduction)
-  convergence_tol: 1.0e-6
-  
-  # CFL number (Courant-Friedrichs-Lewy)
-  cfl: 1.0
-  
-  # Time step size (for transient only, in seconds)
-  dt: 1.0e-4
-  
-  # Total physical time (for transient only, in seconds)
-  total_time: 0.1
+# 来流（Ahmed 体实验常用 40 m/s）
+vel_inf: 40.0
+rho_inf: 1.225
+p_inf: 101325.0
+mu_molecular: 1.8e-5
+turbulence_intensity: 0.01
+viscosity_ratio: 5.0
 
-boundary_conditions:
-  # Inlet velocity (m/s)
-  inlet_velocity: 30.0
-  
-  # Outlet pressure (Pa, gauge)
-  outlet_pressure: 0.0
-  
-  # Wall treatment: standard_wf, enhanced_wf
-  wall_treatment: standard_wf
-  
-  # Farfield distance (m)
-  farfield_distance: 10.0
-
-reference:
-  # Reference area for coefficient calculation (m²)
-  area: 2.2
-  
-  # Reference length (m)
-  length: 4.0
-  
-  # Fluid density (kg/m³)
-  density: 1.225
-  
-  # Dynamic viscosity (Pa·s)
-  viscosity: 1.789e-5
-
-output:
-  # Output directory
-  directory: ./results
-  
-  # Output formats: json, csv, vtk
-  formats:
-    - json
-    - csv
-    - vtk
-  
-  # Output interval (every N iterations)
-  interval: 100
-  
-  # Save checkpoint for restart
-  checkpoint: true
-  
-  # Checkpoint interval (every N iterations)
-  checkpoint_interval: 500
-
-logging:
-  # Log level: DEBUG, INFO, WARNING, ERROR
-  level: INFO
-  
-  # Log to file
-  file: autoflowcfd.log
-  
-  # Console output
-  console: true
+output_dir: ./ahmed_results
+checkpoint_interval: 100

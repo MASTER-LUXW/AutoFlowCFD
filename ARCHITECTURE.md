@@ -1,475 +1,84 @@
-# 系统架构文档
+# AutoFlowCFD 架构
 
-## 1. 概述
-
-AutoFlowCFD是一款专注于汽车外流场仿真的开源CFD软件，采用模块化设计，支持CPU/GPU异构计算。本文档描述系统的整体架构、模块划分和技术选型。
-
-### 1.1 设计目标
-
-- **高性能**：通过Numba CPU并行和CUDA GPU加速实现快速求解
-- **高精度**：采用FR（Flux Reconstruction）高阶格式，支持1-3阶精度
-- **易用性**：提供CLI命令行和Python API双接口
-- **可扩展**：插件化架构，易于新增湍流模型和后处理功能
-- **AI友好**：便于Agent工具化集成和自动化流水线
-
-### 1.2 技术栈
-
-|层级|技术选型|说明|
-|---|---|---|
-|语言|Python 3.10+|顶层业务逻辑|
-|数值计算|NumPy/CuPy|CPU/GPU数组计算|
-|并行加速|Numba/CUDA|CPU多线程/GPU kernel|
-|CLI框架|Click|命令行接口|
-|配置管理|PyYAML|YAML配置文件|
-|数据序列化|HDF5/h5py|检查点存储|
-|可视化|VTK/pyvista|场数据导出|
-|日志|loguru|结构化日志|
-|测试|pytest|单元测试框架|
+本文说明各模块的职责、一次求解的数据流，以及贯穿全仓库的几个设计约束。目录树与扩展步骤见
+[docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md)；算法细节以各模块的文档字符串为准。
 
 ---
 
-## 2. 系统架构图
+## 1. 分层
 
 ```
-+-----------------------------------------------------------------------+
-|                        User Interface Layer                           |
-+---------------------------+-------------------------------------------+
-|   CLI (Click)             |   Python API                              |
-|   autoflowcfd solve       |   from autoflowcfd import Solver          |
-|   autoflowcfd postprocess |   solver.run()                            |
-+------------+--------------+------------------+------------------------+
-             |                                 |
-             v                                 v
-+-----------------------------------------------------------------------+
-|                      Application Core Layer                           |
-+---------------------------+-------------------------------------------+
-|   Config Manager          |   Grid Parser      |   Postprocessor      |
-|   - YAML parsing          |   - NAS reader     |   - Cd calculation   |
-|   - Validation            |   - Quality check  |   - VTK export       |
-|   - Defaults              |   - BC mapping     |   - Convergence      |
-+------------+--------------+---------+----------+---------+------------+
-             |                          |                    |
-             v                          v                    v
-+-----------------------------------------------------------------------+
-|                       Solver Engine Layer                             |
-+---------------------------+-------------------------------------------+
-|   FR Discretization       |   Turbulence Models  |   Time Integration |
-|   - 1st/2nd/3rd order     |   - SST k-omega      |   - Backward Euler |
-|   - Riemann solver        |   - DES/DDES         |   - Runge-Kutta    |
-|   - Boundary treatment    |   - LES (plugin)     |                    |
-+------------+----------------------------------------------------------+
-             |
-             v
-+-----------------------------------------------------------------------+
-|                     Compute Backend Layer                             |
-+---------------------------+-------------------------------------------+
-|   CPU Backend (Numba)     |   GPU Backend (CUDA)                      |
-|   - Multi-threading       |   - Kernel functions                      |
-|   - Vectorization         |   - Memory management                     |
-|   - Cache optimization    |   - Stream processing                     |
-+------------+--------------+------------------+------------------------+
-             |                                 |
-             v                                 v
-+-----------------------------------------------------------------------+
-|                         Data Storage Layer                            |
-+---------------------------+-------------------------------------------+
-|   SoA Memory Layout       |   HDF5 Checkpoints   |   Output Files     |
-|   - NodeArray             |   - Solution state   |   - JSON (Cd)      |
-|   - CellArray             |   - Restart support  |   - CSV (history)  |
-|   - BoundaryMap           |   - Cross-backend    |   - VTK (fields)   |
-+-----------------------------------------------------------------------+
+命令行 cli/            Python API api/            配置 config/（字段即 YAML 键，命令行默认值读它）
+        \                  |                       /
+         `----- cli/solve/run.py（SolveRun -> 构造 -> 求解 -> 落盘）-----'
+                           |
+         求解器（四个后端，同一个求解循环 SolveLoopMixin）
+           FRSolver（CPU） GPUFRSolver（单 GPU） DistributedFRSolver（CPU MPI） MultiGPUDistributedSolver
+                           |
+   时间推进 core/time_integration   残差 core/fr_residual + core/fr_operators   湍流 core/turbulence
+                           |
+   FR 算子 fr/（基、解点、面通量点）     高阶网格 grid/high_order     边界 core/fr_solver/boundary + boundary/
+                           |
+   网格 grid/（.nas 解析、体网格生成、质量校验、连接关系）     后处理 postprocess/     checkpoint core/utils
 ```
 
 ---
 
-## 3. 模块详细说明
+## 2. 一次求解的数据流
 
-### 3.1 网格解析模块（grid/）
-
-**职责**：解析ANSA生成的.nas网格文件，构建内存数据结构
-
-**核心组件**：
-- `parser.py`：NAS文件解析器，支持v22/v23/v24格式
-- `structures.py`：网格数据结构（GridData、NodeArray、CellArray、BoundaryMap）
-- `validator.py`：网格质量校验器（长宽比、扭曲度、雅可比行列式）
-
-**关键特性**：
-- SoA（Structure of Arrays）内存布局，优化缓存命中率
-- 流式解析大文件（>1GB），避免内存溢出
-- 自动识别边界条件组并映射为标准BC类型
-
-**输入**：ANSA .nas文件  
-**输出**：GridData对象
-
-### 3.2 求解器核心模块（core/）
-
-**职责**：实现 FR 离散格式、黎曼求解器、粘性格式、湍流模型和时间积分算法
-
-**核心组件**：
-- `fr_solver.py`：FR 求解器主类（状态初始化、算子预计算、求解主循环）
-- `fr_residual_inviscid.py`：无粘残差（体积项 over-integration 去混叠 + 界面项 AUSM+up）
-- `fr_viscous_flux.py`：粘性残差（BR1 界面耦合 + 真实边界幽灵态）
-- `fr_kernels.py`：AUSM+up 黎曼求解器（含低马赫数 Mp/pu 修正）
-- `turbulence_sst.py`：SST k-ω 模型（F1/F2 混合函数、正性限制器、DES 长度尺度替换）
-- `turbulence_transport_kernel.py`：湍流输运 Numba kernel（标量场外插 + 校正量分配）
-- `face_coloring.py`：面图着色（消除 scatter-add 写冲突，替代 per-thread buffer）
-- `turbulence_des.py`：DDES 延迟分离涡模拟（屏蔽函数 + 有效长度尺度）
-- `turbulence_wmles.py`：WMLES 壁面模型（Spalding 律 + Newton-Raphson 迭代）
-- `turbulence_sgs.py`：WALE 亚格子应力模型
-- `time_integration.py`：SSP-RK2/RK3（Shu-Osher 形式）
-- `time_integration_imex.py`：IMEX Euler（显式对流 + 隐式粘性）
-- `time_integration_dual.py`：Dual-Time Stepping（BDF1/BDF2 + SSP-RK3 + CFL 自适应）
-- `order_continuation.py`：Order Continuation 策略（P0→P1→...→目标阶数）
-- `wall_distance.py`：壁面距离场（KD-Tree + Eikonal Dijkstra）
-- `mpi/`：MPI 域分解并行模块
-  - `__init__.py`：MPI 可选依赖检测（mpi4py 不可用时优雅降级）
-  - `comm.py`：通信封装（Allreduce/Allgather/Isend/Irecv + MPITimer）
-  - `partition.py`：METIS 网格分区 + DistributedPartition 数据结构
-  - `halo.py`：Halo 层管理与非阻塞数据交换
-  - `distributed_state.py`：分布式 FRState（local + halo 扩展数组）
-  - `distributed_flat_face.py`：分布式面几何（面分类 + 扩展索引）
-  - `distributed_solver.py`：分布式 FRSolver（组合模式）
-- `backend/`：计算后端抽象
-  - `fr_gpu_p0.py`：P0 有限体积 GPU kernel（P≥1 阶仍运行 CPU）
-
-**关键特性**：
-- 统一的求解器框架，支持稳态/瞬态无缝切换
-- 插件化湍流模型，通过注册机制扩展
-- Numba `prange` 多核并行，界面项/体积项全并行
-- 面图着色消除 scatter-add 冲突，内存从 O(n_threads × N) 降至 O(N)
-- MPI 域分解支持跨节点 HPC 集群扩展（METIS 分区 + Halo 交换）
-- 问题单元检测机制（残差异常抑制）
-
-**输入**：GridData + SolverConfig  
-**输出**：SolutionVector（流场变量）
-
-### 3.3 边界条件模块（boundary/）
-
-**职责**：实现幽灵态边界条件框架和合成湍流入口
-
-**核心组件**：
-- `fr_ghost_state.py`：幽灵态边界条件框架
-  - WALL：镜像构造（无滑移/滑移）
-  - FARFIELD/INLET/OUTLET：特征边界条件
-  - SYMMETRY：对称面镜像
-- `synthetic_inlet.py`：SEM 合成湍流入口（Cholesky 分解雷诺应力、涡核对流+再生）
-- `manager.py`：边界条件管理器
-- `config.py`：边界配置解析
-
-**关键特性**：
-- 基于边界组名称自动匹配幽灵态构造方式
-- InletSEMGhostState：SEM 与幽灵态的粘合层
-- 壁面无滑移通过镜像构造实现，无需壁面函数
-
-**输入**：BoundaryMap + 边界参数  
-**输出**：边界通量修正
-
-### 3.4 配置管理模块（config/）
-
-**职责**：解析和验证求解器配置
-
-**核心组件**：
-- `solver_config.py`：SolverConfig数据类
-- `yaml_parser.py`：YAML配置文件解析
-- `validator.py`：配置合法性校验
-
-**配置示例**：
-```yaml
-solver:
-  mode: steady          # steady / transient
-  turbulence: sst_kw    # sst_kw / des / ddes
-  order: 2              # FR格式阶数 1/2/3
-  backend: cpu          # cpu / gpu
-  
-mesh:
-  file: car_model.nas
-  scale: 1.0            # 几何缩放因子
-  
-numerics:
-  max_iterations: 10000
-  convergence_tol: 1e-6
-  cfl: 1.0              # CFL数
-  
-output:
-  format: vtk
-  interval: 100         # 输出间隔
-```
-
-### 3.5 后处理模块（postprocess/）
-
-**职责**：计算气动系数、导出可视化数据、分析收敛性
-
-**核心组件**：
-- `fr_coefficients.py`：FR 原生气动系数计算（直接在面通量点上积分压力+粘性力）
-- `vtk_export.py`：VTK 场数据导出（legacy + XML VTU，含边界分区）
-- `q_criterion.py`：Q-Criterion 涡识别准则（Green-Gauss 速度梯度重建）
-- `transient_stats.py`：瞬态统计（时均场、RMS、力系数时间平均）
-- `report.py`：收敛曲线分析
-
-**关键特性**：
-- 直接在 FR 求解器原生数据上积分，不经过单元中心近似
-- 支持 Q-Criterion 涡识别准则导出
-- 力系数时间平均统计（Welford 在线算法）
-- 同时输出 CELL_DATA（原始值）和 POINT_DATA（节点插值）
-
-**输入**：SolutionVector + 参考参数  
-**输出**：JSON/CSV/VTK文件
-
-### 3.6 CLI交互层（cli/）
-
-**职责**：提供命令行接口，便于Agent工具化调用
-
-**核心命令**：
-```bash
-# 网格处理
-autoflowcfd grid generate-volume <surface.nas> -o <volume.nas>
-autoflowcfd grid import-volume <volume.nas>
-
-# 求解
-autoflowcfd solve steady <volume.pkl> --order 2 --turbulence-model sst
-autoflowcfd solve transient <volume.pkl> --time-method dual-time --physical-time 0.1
-autoflowcfd solve resume <checkpoint.h5>
-
-# 后处理
-autoflowcfd post export-vtk --case <case_dir> --variables velocity pressure q_criterion
-autoflowcfd post coefficients --case <case_dir>
-autoflowcfd post report --case <case_dir>
-```
-
-**关键特性**：
-- Click框架实现，自动生成帮助文档
-- 结构化JSON输出，便于程序解析
-- 统一的退出码体系（0成功，非0失败）
-
-### 3.7 工具模块（utils/）
-
-**职责**：提供通用工具函数
-
-**核心组件**：
-- `logger.py`：loguru日志配置
-- `exceptions.py`：自定义异常层次结构
-- `performance.py`：性能计时和基准测试
-- `io_helpers.py`：文件I/O辅助函数
+1. **网格输入**（`cli/solve/mesh_loader.py`）：`.pkl` 体网格直接读；`.nas` 体网格按 `--units` 与 `--surface-mesh` 导入，
+   转存为输出目录下的米制 `volume_mesh.pkl`。求解前质量门（`grid/validation`）拦截畸形网格。
+2. **高阶网格**（`grid/high_order`）：按阶数生成解点物理坐标、度量（雅可比及其逆、细点度量）、面连接关系与面通量点
+   几何；直边四面体 / 三棱柱，原生基。
+3. **构造求解器**：单机 `cli/solve/solver_factory.py`，分布式 `cli/solve/distributed_build.py`（METIS 分区、halo、
+   传统模式或完全分布式加载）。来流、湍流模型、近壁处理、时间格式、CFL 策略（`adaptive_cfl/policy.py`）、低马赫预处理
+   在构造时确定；边界幽灵态提供者按网格的组与类型构造（`core/fr_solver/boundary/ghost.py`）。
+4. **初场**：均匀来流，或 `--init-from` 从 checkpoint 精确延拓；`solve resume` 从 checkpoint 恢复全部状态与物理参数。
+5. **求解循环**（`core/fr_solver/solver/solve_loop.py`）：目标阶数 >= 1 且从来流起步时走 Order Continuation
+   （`core/utils/order_continuation/run.py`，P0 起逐阶升阶），否则定阶循环。每步 `advance()`：
+   - 稳态显式：局部时间步 SSP-RK3；稳态隐式：一个 Newton-Krylov 步（`time_integration/implicit/newton/`：矩阵自由
+     GMRES、单元块 ILU 与多层粗校正预处理、伪时间步与线搜索、平均流与湍流紧耦合）；
+   - 瞬态 dual-time：每个物理步若干个带 BDF2 项的 Newton 内迭代（`newton/physical_time.py`）；瞬态显式：全场同一
+     物理步长的子步（`time_integration/time_accurate.py`），物理时间随之累计。
+   - 残差：无粘（AUSM+up，体积项过积分）+ 粘性（BR1）+ 湍流源项与输运；守恒的正性限制器。
+   - 每步记录收敛历史、可选的力系数与探针（`convergence_history.record_step`），按间隔写 checkpoint。
+6. **落盘**：`final_state.pkl`、结束时的 checkpoint、气动系数与壁面 y+ 报告；分布式由 root 汇总写出。
+7. **后处理**（`cli/post`、`postprocess/`）：从 checkpoint 读取或重建求解器，计算系数、导出 VTK、统计与频谱。
 
 ---
 
-## 4. 数据流图
+## 3. 模块职责
 
-### 4.1 稳态求解流程
-
-```
-[NAS File] 
-    |
-    v
-+-------------+
-| Grid Parser |----> GridData (SoA layout)
-+-------------+         |
-                        v
-                  +------------+
-                  | Validator  |----> Quality Report
-                  +------------+         |
-                                         v
-                                   +------------+
-                                   | Config     |----> SolverConfig
-                                   +------------+         |
-                                                          v
-                                                    +------------+
-                                                    | FR Solver  |
-                                                    | (CPU/GPU)  |
-                                                    +------------+
-                                                          |
-                                                          v
-                                                  +---------------+
-                                                  | SolutionVector|
-                                                  +---------------+
-                                                          |
-                                                          v
-                                                  +---------------+
-                                                  | Postprocessor |
-                                                  +---------------+
-                                                          |
-                                          +---------------+---------------+
-                                          v               v               v
-                                      [Cd.json]      [history.csv]    [fields.vtk]
-```
-
-### 4.2 瞬态求解流程
-
-```
-[NAS File] --> [Grid Parser] --> [GridData]
-                                      |
-                                      v
-                               [Time Loop Start]
-                                      |
-                                      v
-                              +----------------+
-                              | Time Step n    |
-                              | - FR Update    |
-                              | - BC Apply     |
-                              | - Turbulence   |
-                              +----------------+
-                                      |
-                                      v
-                              [Convergence Check]
-                                /            \
-                          Not Converged    Converged
-                              |                |
-                              v                v
-                         [Next Step]    [Sample Data]
-                                              |
-                                              v
-                                       [Time Loop End]
-                                              |
-                                              v
-                                      [Transient Stats]
-                                              |
-                                    +---------+---------+
-                                    v         v         v
-                                [Mean.vtk] [RMS.vtk] [PSD.csv]
-```
+| 模块 | 职责 |
+|------|------|
+| `fr/` | 与求解器状态无关的 FR 离散：原生四面体（Warp & Blend 节点、单纯形模态基）与原生三棱柱（三角形 × 线段）基、解点与面通量点、过积分阶数、阶数间延拓、任意参考点插值 |
+| `grid/nas_io` | `.nas` 解析与导出、单位、边界类型识别与显式指定 |
+| `grid/mesh_gen` | 体网格生成：边界层棱柱挤出（碰撞冻结、厚度限制、塌缩降级）、tetgen 核心区填充、合并与修复、面提取 |
+| `grid/high_order`、`grid/connectivity` | 高阶网格与度量、面连接关系（含周期面配对） |
+| `grid/validation` | 面网格与体网格质量校验、求解前质量门、退化单元判定 |
+| `core/fr_solver` | CPU 求解器、求解循环、单步推进、边界幽灵态、CFL 与局部时间步、收敛历史、伪时间预算诊断 |
+| `core/fr_residual`、`core/fr_operators` | 无粘 / 粘性残差（含 P0 专用核）与解析 Jacobian、numba 计算核、梯度、人工粘性 |
+| `core/time_integration` | 显式 RK、时间精确推进、隐式 Newton-Krylov 全套（Krylov、块预处理、粗校正、全局化、物理性限幅）、自适应 CFL、正性限制器、残差范数 |
+| `core/turbulence` | 模型族定义（`registry.py`）、SST k-ln(omega)、SA-neg、DDES / IDDES、WALE / WMLES、平衡壁面模型与近壁处理、湍流输运与湍流 Jacobian、输运模型统一接口（`transported.py`） |
+| `core/gpu` | 单 GPU 与多 GPU 求解器、CuPy 核、GPU halo 交换 |
+| `core/mpi` | 分区、halo、分布式状态与面几何、分布式求解器、完全分布式加载与换阶重新分发、分布式 checkpoint、全局归约 |
+| `core/utils` | checkpoint 读写与元数据（物理参数、时间状态、求解状态）、Order Continuation、壁距、面着色 |
+| `core/probes` | 探针定位、每步采样与时间序列文件 |
+| `boundary/` | 幽灵态函数（numpy / cupy 通用）、合成湍流入口（SEM）、物理无滑移固壁判定 |
+| `postprocess/` | 气动系数（按组、风轴系 / 体轴系）、VTK（低阶 / 高阶）、Q 准则、y+、瞬态统计、Welch 压力谱、报告 |
+| `cli/` | 命令行；`cli/solve/run.py` 是按后端执行的唯一流程，`distributed_build.py` 是分布式构造的唯一入口 |
+| `api/` | Python API，与命令行共用构造参数映射与写出函数 |
+| `config/` | 配置类与 YAML 加载器（未知字段报错） |
 
 ---
 
-## 5. 扩展机制
+## 4. 设计约束
 
-### 5.1 湍流模型插件
-
-新增湍流模型只需实现统一接口并注册：
-
-```python
-from autoflowcfd.core.turbulence import register_turbulence_model
-
-@register_turbulence_model("my_model")
-class MyTurbulenceModel:
-    def __init__(self, config):
-        pass
-    
-    def compute_source_terms(self, solution):
-        # 实现源项计算
-        pass
-```
-
-### 5.2 自定义边界条件
-
-```python
-from autoflowcfd.boundary import register_boundary_condition
-
-@register_boundary_condition("CUSTOM_INLET")
-class CustomInletBC:
-    def apply(self, boundary_nodes, time):
-        # 实现自定义边界逻辑
-        pass
-```
-
-### 5.3 后处理插件
-
-```python
-from autoflowcfd.postprocess import register_postprocessor
-
-@register_postprocessor("force_breakdown")
-class ForceBreakdownAnalyzer:
-    def analyze(self, solution, grid):
-        # 实现力分解分析
-        pass
-```
-
----
-
-## 6. 性能优化策略
-
-### 6.1 内存优化
-
-- **SoA布局**：提升CPU缓存命中率
-- **预分配内存池**：避免运行时频繁分配
-- **零拷贝传输**：CPU-GPU数据传输优化
-- **面图着色**：消除 scatter-add 的 per-thread buffer，内存从 O(n_threads × N) 降至 O(N)
-
-### 6.2 计算优化
-
-- **Numba JIT编译**：Python代码接近C性能（界面项、体积项、湍流输运全 kernel 化）
-- **CUDA Kernel融合**：减少kernel launch开销
-- **向量化操作**：充分利用SIMD指令
-- **prange 多核并行**：界面 kernel 采用 per-thread buffer + sum 归约
-
-### 6.3 MPI 并行计算
-
-- **METIS 网格分区**：最小化分区间切割边数（= 跨 rank halo 交换量）
-- **非阻塞通信**：Isend/Irecv 异步数据交换，可与体积项计算重叠
-- **预分配 buffer**：Halo 交换管理器预分配固定大小 send/recv buffer
-- **两级并行**：MPI 跨节点 + Numba 多线程，总并行度 = n_ranks × n_threads
-
-### 6.4 I/O优化
-
-- **异步写入**：不阻塞主计算线程
-- **压缩存储**：HDF5内置压缩
-- **增量输出**：仅输出变化数据
-
----
-
-## 7. 部署架构
-
-### 7.1 单机部署
-
-```
-+---------------------+
-|  AutoFlowCFD App    |
-|  + CLI Interface    |
-|  + Solver Engine    |
-|  + Postprocessor    |
-+----------+----------+
-           |
-           v
-+---------------------+
-|  Local Filesystem   |
-|  - Input grids      |
-|  - Output results   |
-+---------------------+
-```
-
-### 7.2 集群部署（MPI 域分解）
-
-```
-+-------------------+     +-------------------+
-|  Head Node        |     |  Worker Node 1    |
-|  - mpirun 启动    |---->|  - MPI Rank 0-3   |
-|  - 结果收集       |     |  - 4 threads/rank |
-+-------------------+     +-------------------+
-                          |  Worker Node 2    |
-                          |  - MPI Rank 4-7   |
-                          |  - 4 threads/rank |
-                          +-------------------+
-
-使用方式:
-  mpirun -np 8 autoflowcfd solve steady <grid_file> --n-ranks 8
-```
-
-**进程模型**：
-- 每个 MPI rank 是独立进程，内部用 Numba 多线程
-- 总并行度 = n_ranks × n_threads_per_rank
-- 典型配置：4 nodes × 16 ranks/node × 4 threads = 256 总并行度
-
----
-
-## 8. 安全考虑
-
-- **输入验证**：严格校验网格文件格式和内容
-- **沙箱执行**：在隔离环境中运行用户提供的网格
-- **资源限制**：限制最大内存使用和计算时间
-- **依赖审计**：定期扫描第三方库漏洞
-
-详见 [SECURITY.md](SECURITY.md)
-
----
-
-## 9. 相关文档
-
-- [需求规格说明书](ProjectFiles/2-1_需求规格说明书-Part1.md)
-- [数据结构设计](ProjectFiles/2-3_数据结构设计文档-Part1.md)
-- [接口文档](ProjectFiles/2-4_接口文档-Part1.md)
-- [部署文档](ProjectFiles/2-5_部署文档-Part1.md)
-- [编码规范](ProjectFiles/2-7_编码规范-Part1.md)
-
----
-
-**文档版本**：v2.0  
-**最后更新**：2026-08-17（HPC 并行计算优化更新）
+- **一个事实来源**：默认值、判据、模型族、边界类型、单位、插值矩阵等只定义一处；命令行默认值读配置类，四个后端共用
+  一个求解循环、一个 checkpoint 格式。
+- **四后端同一算法**：后端差异只经少数钩子进入求解循环（`step`、`host_view`、`pull_host_state` / `push_host_state`、
+  换阶），跨后端对照测试保证一致。
+- **不静默兜底**：缺失的输入与元数据报错而不是取缺省；决定物理算例的参数随 checkpoint 持久化，续算原样恢复。
+- **checkpoint 是唯一的结果载体**：解点状态、湍流场、收敛历史、物理与求解参数、时间状态、探针坐标都在其中；后处理与
+  续算只依赖 checkpoint 与 `volume_mesh.pkl`。
+- **数值缓存可信**：numba 磁盘缓存按全部核源码的内容哈希分目录，改动被内联的核后不会继续执行旧机器码。

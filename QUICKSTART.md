@@ -1,533 +1,240 @@
-# AutoFlowCFD 快速开始指南
+# AutoFlowCFD 快速开始
 
-<div align="center">
-
-**5 分钟完成安装与首次 CFD 仿真**
-
-</div>
+从安装到跑通第一个算例：面网格 -> 体网格 -> 稳态 / 瞬态求解 -> 后处理。文中命令都可以原样运行（以仓库自带的
+`examples/cube_demo` 立方体绕流为例）；每条命令的全部选项见 `autoflowcfd <命令组> <命令> --help`。
 
 ---
 
-## 📋 目录
+## 目录
 
 - [前置要求](#前置要求)
-- [安装步骤](#安装步骤)
-- [首次运行](#首次运行)
-- [结果可视化](#结果可视化)
+- [安装](#安装)
+- [第一个算例：命令行](#第一个算例命令行)
+- [配置文件](#配置文件)
+- [Python API](#python-api)
+- [输出文件](#输出文件)
+- [结果可视化与后处理](#结果可视化与后处理)
 - [常见问题](#常见问题)
-- [下一步学习](#下一步学习)
+- [下一步](#下一步)
 
 ---
 
 ## 前置要求
 
-### 必需软件
+| 软件 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.10 或 3.11 | scipy 的依赖声明只覆盖 Python < 3.12（`pyproject.toml`） |
+| Poetry | 1.6+ | 依赖管理 |
+| CUDA 12.x + NVIDIA 驱动 | 可选 | 单 GPU / 多 GPU 后端（CuPy `cupy-cuda12x`） |
+| MPI（OpenMPI / MS-MPI / MPICH） | 可选 | `--n-ranks > 1` 的分布式求解（mpi4py + pymetis） |
 
-| 软件 | 版本要求 | 说明 |
-|------|---------|------|
-| **Python** | 3.10+ | 推荐使用 Anaconda/Miniconda 管理环境 |
-| **Poetry** | 1.6+ | Python 依赖管理工具 |
-| **Git** | 2.0+ | 代码版本控制 |
+网格：ANSA 导出的 Nastran `.nas`（`CTRIA3` 面网格按 `PSHELL` 分组，或 `CTETRA` / `CPENTA` 体网格）。仓库自带三个算例：
 
-### 可选软件（GPU 加速）
-
-| 软件 | 版本要求 | 说明 |
-|------|---------|------|
-| **NVIDIA GPU** | CUDA Compute Capability 5.0+ | GTX 10 系列及以上推荐 |
-| **CUDA Toolkit** | 12.x | [下载地址](https://developer.nvidia.com/cuda-downloads) |
-| **NVIDIA 驱动** | 最新版本 | 确保与 CUDA 版本兼容 |
-
-### 网格准备
-
-- **ANSA 前处理器**：用于生成 `.nas` 格式网格文件（v22/v23/v24 版本）
-- **示例网格**：项目自带 Ahmed Body 标准算例，可直接体验
+| 目录 | 内容 |
+|------|------|
+| `examples/cube_demo/` | `cube_demo.nas`（圆角立方体 + 风洞的面网格，4 组：inlet / outlet / tunnel / body，米制） |
+| `examples/ahmed_demo/` | `ahmed_body_demo.nas`（Ahmed 体 + 地面 + 风洞的面网格，5 组），`config_example.yaml`（配置文件示例） |
+| `examples/plate_demo/` | `plate_demo.nas`（平板面网格） |
 
 ---
 
-## 安装步骤
-
-### 1️⃣ 克隆仓库
+## 安装
 
 ```bash
 git clone https://github.com/AutoFlowCFD/AutoFlowCFD.git
 cd AutoFlowCFD
+
+poetry install                 # CPU
+poetry install -E gpu          # 另装 GPU 后端（CuPy）
+poetry install -E mpi          # 另装分布式求解（mpi4py、pymetis）
 ```
 
-### 2️⃣ 安装 Poetry
-
-如果尚未安装 Poetry：
+验证：
 
 ```bash
-# 方式一：使用 pip（推荐）
-pip install poetry
-
-# 方式二：使用官方安装脚本
-curl -sSL https://install.python-poetry.org | python3 -
-```
-
-验证安装：
-```bash
-poetry --version
-# 应输出: Poetry (version 1.x.x)
-```
-
-### 3️⃣ 安装项目依赖
-
-```bash
-# 安装核心依赖（CPU 计算）
-poetry install
-
-# （可选）启用 GPU 支持
-poetry install -E gpu
-```
-
-> **提示**：首次安装可能需要 3-5 分钟，取决于网络速度。Poetry 会自动创建虚拟环境并安装所有依赖。
-
-### 4️⃣ 验证安装
-
-```bash
-# 查看版本信息
-poetry run autoflowcfd --version
-# 应输出: AutoFlowCFD, version 0.1.0（发布版本将更新为 2.0.0）
-
-# 检查可用后端
-poetry run python -c "from autoflowcfd.core.backend import get_available_backends; print(get_available_backends())"
-# 应输出: {'cpu': True} 或 {'cpu': True, 'gpu': True}（如果已安装 GPU 支持）
+poetry run autoflowcfd --version          # AutoFlowCFD, version 0.1.0
+poetry run autoflowcfd utils doctor       # 逐项核对 pyproject 声明的依赖与版本、GPU / MPI 是否可用
 ```
 
 ---
 
-## 首次运行
+## 第一个算例：命令行
 
-### 准备网格文件
-
-项目自带 Ahmed Body 标准算例，位于 `examples/ahmed_demo/` 目录：
+### 1. 面网格 -> 体网格
 
 ```bash
-ls examples/ahmed_demo/
-# 应看到: ahmed_body_demo.nas（面网格文件）
+poetry run autoflowcfd grid info examples/cube_demo/cube_demo.nas --units m
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube_demo.nas --units m \
+    -o cube/cube_volume.nas
 ```
 
-如果没有现成网格，可以使用我们提供的示例文件继续测试。
+`generate-volume` 生成边界层棱柱 + 四面体混合网格，导出为体网格 `.nas`（与输入同一单位），并打印质量报告。常用选项：
+`--bl-layers`（边界层层数）、`--first-layer-height`（第一层高度，米）或 `--target-yplus 1 --ref-velocity 40
+--ref-length 1`（按目标 y+ 推出第一层高度）、`--max-cell-size`、`--bc-type 组名=类型`（组名识别不了时指定边界类型）。
 
-> **注意**：V2.0 求解流程为：面网格(.nas) → 体网格(.pkl) → 求解。需先生成体网格。
-
-### 方式一：CLI 命令行（推荐新手）
-
-#### 🎯 稳态 RANS 仿真（CPU）
-
-V2.0 求解流程：先生成体网格，再进行求解。
+### 2. 稳态求解
 
 ```bash
-# 步骤 1: 从面网格生成体网格
-poetry run autoflowcfd grid generate-volume examples/ahmed_demo/ahmed_body_demo.nas \
-    -o examples/ahmed_demo/ahmed_volume.pkl
-
-# 步骤 2: 运行稳态求解
-poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
-    --backend cpu \
-    --order 1 \
-    --turbulence-model sst \
-    --max-iter 1000 \
-    -o ./results/steady \
-    --reference-area 1.0
+poetry run autoflowcfd solve steady cube/cube_volume.nas --surface-mesh examples/cube_demo/cube_demo.nas --units m \
+    --order 1 --turbulence-model sa --time-scheme newton-krylov --vel-inf 40 --max-iter 200 -o cube/steady
 ```
 
-**参数说明**：
-- `solve steady`：稳态求解子命令
-- `--turbulence-model sst`：SST k-ω 湍流模型
-- `--backend cpu`：使用 CPU 计算
-- `--order 1`：FR 一阶精度（P1，工程推荐 P2）
-- `--max-iter 1000`：最大迭代次数
-- `--reference-area 1.0`：气动系数参考面积 (m²)
+- 输入是体网格 `.nas` 时必须给 `--surface-mesh`（反推边界分组）与 `--units`；入口处把它转存为输出目录下的米制
+  `volume_mesh.pkl`，之后续算与后处理都用它（也可以直接把 `.pkl` 作为输入）。
+- `--order`：FR 目标阶数 0~3；>=1 时从 P0 逐阶爬坡（Order Continuation）。
+- `--time-scheme`：`rk3`（显式）或 `newton-krylov`（隐式，收敛步数由非线性程度决定，复杂网格推荐）。
+- `--turbulence-model`：`none / sst / sa / ddes / iddes / wmles / les`；RANS 的近壁处理 `--wall-treatment auto`（缺省，
+  平衡壁面模型，第一层 y+ 从 1 到对数层都可用）或 `resolved`（要求 y+ ~ 1）。
+- 来流：`--vel-inf --rho-inf --p-inf --mu-molecular`，攻角 / 侧滑角 `--aoa --aos`（度）。
+- `--reference-area`：气动系数参考面积 (m²)；不给时沿来流方向由物体面（物理无滑移固壁）的迎风投影自动估算。
+- 收敛判据 `--tol`（残差相对初值下降的倍数，缺省 1e-6）；`--checkpoint-interval` 步写一次中间 checkpoint。
+- GPU：`--backend gpu`；分布式：`mpirun -np 4 autoflowcfd solve steady ... --n-ranks 4`（多 GPU 另加
+  `--backend gpu --multi-gpu`，只让 root 加载完整网格加 `--fully-distributed`）。
 
-**近壁处理与 y+**（RANS：`sa`/`sst`/`ddes`/`iddes`）：
-- `--wall-treatment auto`（默认）：自动壁面处理——Spalding 平衡壁面模型给壁面剪应力，贴壁单元从粘性底层到
-  对数律层（形心 y+ 约 1~300）都适用；`resolved`：低雷诺数壁面处理，要求贴壁单元落在粘性底层（y+ < 5）
-- 生成体网格时可按目标 y+ 给第一层高度：`grid generate-volume ... --target-yplus 1 --ref-velocity 40 --ref-length 4.5`
-  （或直接 `--first-layer-height 2e-5`）
-- 求解结束时打印壁面 y+ 统计（贴壁单元形心高度），超出所选近壁处理的适用范围时给出警告
-
-#### ⚡ GPU 加速仿真
-
-如果您的系统支持 GPU：
+### 3. 续算
 
 ```bash
-poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
-    --backend gpu \
-    --order 2 \
-    --turbulence-model sst \
-    --max-iter 1000 \
-    -o ./results/steady_gpu \
-    --reference-area 1.0
+poetry run autoflowcfd solve resume cube/steady/checkpoints/checkpoint_iter_000200.h5 --max-iter 300
 ```
 
-#### 🌊 瞬态 DES/LES 仿真
+决定物理算例的参数（来流、粘度、湍流模型、近壁处理……）全部取自 checkpoint；CFL 等数值参数可重新给。缺省接着写进
+checkpoint 所在算例目录，`--output` 可改到别处。
 
-捕捉非定常流动特征：
+### 4. 瞬态求解
 
 ```bash
-poetry run autoflowcfd solve transient examples/ahmed_demo/ahmed_volume.pkl \
-    --backend cpu \
-    --order 1 \
-    --time-method dual-time \
-    --turbulence-model ddes \
-    --dt 1e-4 \
-    --physical-time 0.05 \
-    -o ./results/transient \
-    --reference-area 1.0
+poetry run autoflowcfd solve transient cube/steady/volume_mesh.pkl --order 1 --turbulence-model ddes \
+    --time-method dual-time --dt 1e-4 --physical-time 0.05 --vel-inf 40 \
+    --init-from cube/steady/checkpoints/checkpoint_iter_000200.h5 \
+    --probe 2.0 0.0 0.0 --probe 3.0 0.5 0.0 -o cube/transient
 ```
 
-**参数说明**：
-- `solve transient`：瞬态求解子命令
-- `--time-method dual-time`：Dual-Time 时间推进（支持 rk3/imex/dual-time）
-- `--turbulence-model ddes`：DDES 混合湍流模型（支持 sst/ddes/wmles/les）
-- `--dt 1e-4`：时间步长（秒）
-- `--physical-time 0.05`：总物理时间（秒）
+- `--time-method`：`dual-time`（缺省，每个物理步若干个带 BDF 物理时间项的隐式 Newton 步）或 `rk3`（显式，全场同一
+  物理步长的时间精确推进）。
+- `--init-from`：以稳态解为初场（阶数可低于 `--order`，精确延拓）。
+- `--probe X Y Z`（米，可重复）：每个物理步在该点求 FR 解多项式的值，写进 `probes.csv`，供 `post transient-psd`。
+- ddes / iddes / les / wmles 在速度入口注入合成湍流（`--sem-num-eddies` 指定涡核数，缺省按密度判据取）。
 
-#### 📝 使用配置文件（进阶）
+---
 
-创建 `config.yaml` 文件：
+## 配置文件
+
+YAML 是平铺的 `键: 值`，字段名与配置类一致，未知字段直接报错（全部字段见
+[配置指南](docs/CONFIGURATION_GUIDE.md)）：
+
+```bash
+poetry run autoflowcfd config init --template steady -o case.yaml   # 生成模板
+poetry run autoflowcfd config validate case.yaml                     # 校验
+poetry run autoflowcfd solve steady cube/steady/volume_mesh.pkl --config case.yaml
+```
 
 ```yaml
-solver:
-  backend: cpu
-  order: 2
-  turbulence: sst_kw
-  max_iter: 5000
-  cfl_init: 0.1
-  cfl_max: 5.0
-  convergence_tol: 1.0e-6
-  checkpoint_interval: 100
-  output_dir: ./results
-  
-boundary_conditions:
-  inlet:
-    type: INLET
-    velocity_x: 30.0  # m/s
-    pressure: 101325.0  # Pa
-    
-  outlet:
-    type: OUTLET
-    pressure: 101325.0
-    
-  body:
-    type: WALL
-    wall_function: enhanced
-    
-  ground:
-    type: WALL
-    moving: true  # 移动地面
-    velocity_x: 30.0
+mode: steady
+order: 2
+turbulence: sa
+time_scheme: newton_krylov
+max_iter: 3000
+vel_inf: 40.0
+checkpoint_interval: 100
+output_dir: ./results
 ```
 
-运行仿真：
+命令行显式给出的选项优先于文件，文件里写出的字段优先于命令行缺省值。边界条件类型来自网格的组名（或
+`grid generate-volume --bc-type`），不在配置文件里设置。
 
-```bash
-poetry run autoflowcfd solve steady volume_mesh.pkl -c config.yaml
-```
+---
 
-### 方式二：Python API（推荐开发者）
-
-创建 `run_simulation.py` 脚本（完整参考见 [API 文档](docs/API.md)）：
+## Python API
 
 ```python
 from autoflowcfd import AutoFlowCFDAPI
 
 api = AutoFlowCFDAPI()
-
-# 面网格 -> 体网格（与 `grid generate-volume` 同一入口）
-surface = api.load_grid("examples/ahmed_demo/ahmed_body_demo.nas")
+surface = api.load_grid("examples/cube_demo/cube_demo.nas", units="m")
 volume_mesh = api.generate_volume_mesh(surface)
 
-# 稳态求解（参数名同配置文件字段，见 docs/CONFIGURATION_GUIDE.md；求解前跑网格质量门）
-result = api.run_steady(volume_mesh, order=2, turbulence="sst", max_iter=1000, output_dir="./quick_test_output")
-print(f"收敛: {result.converged}  迭代: {result.iterations}  最终残差: {result.final_residual:.6e}")
+# 参数名就是配置文件字段（docs/CONFIGURATION_GUIDE.md）；求解前跑与 CLI 同一道网格质量门
+result = api.run_steady(volume_mesh, order=1, turbulence="sa", time_scheme="newton-krylov", vel_inf=40.0,
+                        max_iter=200, output_dir="./cube_api")
+print(result.converged, result.iterations, result.final_residual)
 
-# 气动系数（参考面积缺省按来流方向的迎风投影估算）
-coeffs = api.calculate_coefficients()
-print(f"Cd = {coeffs['Cd']:.4f}  Cl = {coeffs['Cl']:.4f}  Cs = {coeffs['Cs']:.4f}")
-
-# 导出 VTK（ParaView 打开）
-api.export_vtk("./quick_test_output/result.vtu")
+coeffs = api.calculate_coefficients()                 # 参考面积缺省按迎风投影估算
+print(coeffs["Cd"], coeffs["Cl"], coeffs["Cs"])
+api.export_vtk("./cube_api/flow.vtu")
 ```
 
-运行脚本：
-
-```bash
-poetry run python run_simulation.py
-```
+各方法的参数以 `help(AutoFlowCFDAPI.run_steady)` 等为准，完整说明见 [API 文档](docs/API.md)。
 
 ---
 
-## 结果可视化
+## 输出文件
 
-### 📁 输出文件结构
+| 文件 | 何时写出 | 内容 |
+|------|---------|------|
+| `volume_mesh.pkl` | 输入是 `.nas` 体网格时 | 米制体网格（含边界分组），续算与后处理的网格来源 |
+| `checkpoints/checkpoint_iter_XXXXXX.h5` | 每 `--checkpoint-interval` 步与结束时 | 全部解点状态、湍流场、收敛历史、物理与求解参数（续算 / 后处理用） |
+| `final_state.pkl` | 结束时 | 解点状态（守恒量 U、原始变量 Q） |
+| `probes.csv` / `probes.json` | 瞬态给了 `--probe` 时 | 每个物理步的探针 p、u、v、w；探针坐标与所在单元 |
 
-仿真完成后，输出目录（默认 `./results` 或 `./quick_test_output`）包含：
+求解不写 VTK、CSV 或报告，这些由下面的后处理命令从 checkpoint 生成。
 
-```
-results/
-├── checkpoints/              # 检查点文件（支持断点续算）
-│   ├── checkpoint_iter_000100.h5
-│   ├── checkpoint_iter_000200.h5
-│   └── latest_checkpoint.h5  # 最新检查点符号链接
-├── fields/                   # 流场数据（VTK 格式）
-│   ├── field_iter_000100.vtu
-│   └── field_iter_000200.vtu
-├── convergence.csv           # 收敛历史（残差、Cd、Cl）
-├── coefficients.csv          # 气动系数历史
-├── config_copy.yaml          # 配置文件副本
-└── summary.json              # 输出摘要（JSON 格式）
-```
+---
 
-### 🎨 使用 ParaView 可视化
-
-1. **安装 ParaView**：[下载地址](https://www.paraview.org/download/)
-
-2. **打开 VTK 文件**：
-   ```bash
-   paraview results/fields/field_iter_001000.vtu
-   ```
-
-3. **可视化建议**：
-   - **压力云图**：显示 `pressure` 字段，调整颜色映射
-   - **速度矢量**：显示 `velocity` 矢量箭头
-   - **Q-Criterion 等值面**：显示 `q_criterion` 识别涡系结构
-   - **流线追踪**：从车头上游释放流线，观察流动分离
-
-### 📈 收敛曲线分析
-
-查看收敛历史：
+## 结果可视化与后处理
 
 ```bash
-# CLI 方式
-poetry run autoflowcfd post convergence --case results
+# 流场 VTK（ParaView 打开）；--variables 可重复给出：velocity / pressure / turbulence / q_criterion / k / omega ...
+poetry run autoflowcfd post export-vtk --case cube/steady -o cube/steady/flow.vtu
+poetry run autoflowcfd post export-vtk --case cube/steady --high-order -o cube/steady/flow_ho.vtu   # FR 多项式高阶单元
+poetry run autoflowcfd post export-vtk --case cube/steady --boundaries-only -o cube/steady/walls.vtu
 
-# 或直接查看 CSV 文件
-cat results/convergence.csv
+# 气动系数（按组积分壁面压力与粘性力；力矩需给参考长度与力矩中心）
+poetry run autoflowcfd post coefficients --case cube/steady --reference-area 1.0 \
+    --reference-length 1.0 --moment-center 0 0 0
+
+# 收敛曲线（PNG）与报告（JSON）
+poetry run autoflowcfd post convergence --case cube/steady --variables residual --variables cfl -o conv.png
+poetry run autoflowcfd post report --case cube/steady -o report.json
+
+# 瞬态：时均 / 脉动均方根（VTK）、探针压力谱（CSV）
+poetry run autoflowcfd post transient-mean --case cube/transient --warmup-time 0.01
+poetry run autoflowcfd post transient-rms --case cube/transient --warmup-time 0.01
+poetry run autoflowcfd post transient-psd --case cube/transient --warmup-time 0.01
 ```
 
-使用 Python 绘制收敛曲线：
-
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# 读取收敛数据
-df = pd.read_csv("results/convergence.csv")
-
-# 绘制残差曲线
-plt.figure(figsize=(10, 6))
-plt.semilogy(df['iteration'], df['residual'], label='Residual')
-plt.xlabel('Iteration')
-plt.ylabel('Residual')
-plt.title('Convergence History')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.savefig("convergence.png", dpi=150)
-plt.show()
-
-# 绘制气动系数曲线
-plt.figure(figsize=(10, 6))
-plt.plot(df['iteration'], df['Cd'], label='Cd (Drag)')
-plt.plot(df['iteration'], df['Cl'], label='Cl (Lift)')
-plt.xlabel('Iteration')
-plt.ylabel('Coefficient')
-plt.title('Aerodynamic Coefficients')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.savefig("coefficients.png", dpi=150)
-plt.show()
-```
+详见 [后处理指南](docs/POSTPROCESSING_GUIDE.md) 与 [VTK 导出指南](docs/VTK_EXPORT_GUIDE.md)。
 
 ---
 
 ## 常见问题
 
-### ❓ Q1: 安装时遇到依赖冲突怎么办？
+**依赖装不上 / 版本冲突** —— `poetry run autoflowcfd utils doctor` 逐项列出缺失或版本不符的依赖；必需依赖缺失为问题，
+可选组（gpu / mpi / perf）缺失为警告。
 
-**A**: 尝试以下步骤：
+**`--backend gpu` 报 CuPy 不可用** —— `poetry install -E gpu`，再用 `python -c "import cupy; print(cupy.cuda.runtime.getDeviceCount())"`
+确认能看到设备。
 
-```bash
-# 1. 更新 Poetry 到最新版本
-pip install --upgrade poetry
+**分布式报"需要 MPI"** —— `poetry install -E mpi`，并以 `mpirun -np <N> autoflowcfd solve ... --n-ranks <N>` 启动
+（两个数必须一致）。
 
-# 2. 清理缓存并重新安装
-poetry cache clear --all .
-rm -rf .venv  # 删除现有虚拟环境
-poetry install
-```
+**网格读不进来 / 单位不对** —— `grid info` 打印包围盒（米），据此确认 `--units`；`grid validate` 检查网格质量。
+`.nas` 缺省按毫米读入。
 
-### ❓ Q2: 导入错误 "cannot import name 'AutoFlowCFDAPI'"
+**求解前被质量门拦下** —— 质量报告指出畸变单元的位置；用 `grid generate-volume` 重新生成或 `grid import-volume`
+修复后再算。`--skip-quality-check` 只用于临时诊断。
 
-**A**: 确保已正确安装模块：
+**不收敛** —— 先看每步日志里的逐方程缩放残差与最大残差位置；显式格式可调低 `--cfl-start`，复杂网格改用
+`--time-scheme newton-krylov`；从低阶收敛解 `--init-from` 起步再升阶。
 
-```bash
-# 重新安装
-poetry install
-
-# 验证安装
-poetry run python -c "from autoflowcfd import AutoFlowCFDAPI; print('OK')"
-```
-
-### ❓ Q3: GPU 后端无法使用？
-
-**A**: 按以下步骤排查：
-
-```bash
-# 1. 确认已安装 GPU 支持
-poetry install -E gpu
-
-# 2. 检查 CUDA 可用性
-poetry run python -c "import cupy as cp; print(cp.cuda.runtime.getDeviceCount())"
-# 应输出 > 0
-
-# 3. 检查 AutoFlowCFD 后端检测
-poetry run python -c "from autoflowcfd.core.backend import get_available_backends; print(get_available_backends())"
-# 应输出 {'cpu': True, 'gpu': True}
-
-# 4. 确认 NVIDIA 驱动和 CUDA 版本兼容
-nvidia-smi  # 查看驱动版本
-nvcc --version  # 查看 CUDA 版本
-```
-
-### ❓ Q4: 网格文件找不到或解析失败？
-
-**A**: 检查以下几点：
-
-```bash
-# 1. 确认文件路径正确（使用绝对路径更可靠）
-poetry run autoflowcfd grid parse /absolute/path/to/model.nas
-
-# 2. 验证网格文件格式
-poetry run autoflowcfd grid validate model.nas
-
-# 3. 查看网格详细信息
-poetry run autoflowcfd grid info model.nas
-```
-
-### ❓ Q5: 如何查看详细的日志输出？
-
-**A**: 使用 `-v` 或 `--verbose` 标志：
-
-```bash
-poetry run autoflowcfd solve steady volume_mesh.pkl -v
-```
-
-### ❓ Q6: 计算结果保存在哪里？
-
-**A**: 
-- 默认保存在 `./results` 目录
-- 可通过 `--output` 参数指定：
-  ```bash
-  poetry run autoflowcfd solve steady volume_mesh.pkl --output ./my_results
-  ```
-
-### ❓ Q7: 内存不足怎么办？
-
-**A**: 针对大网格（>1000 万单元）：
-
-```bash
-# 方式一：限制 CPU 线程数
-poetry run autoflowcfd solve steady large_grid.pkl --threads 4
-
-# 方式二：使用 GPU（显存通常更大）
-poetry run autoflowcfd solve steady large_grid.pkl --backend gpu
-
-# 方式三：降低 FR 阶数（减少内存占用）
-poetry run autoflowcfd solve steady large_grid.pkl --order 1
-```
-
-### ❓ Q8: 仿真不收敛怎么办？
-
-**A**: 尝试以下调整：
-
-```bash
-# 1. 降低初始 CFL 数（通过配置文件设置 cfl_init）
-# 在 config.yaml 中设置:
-# solver:
-#   cfl_init: 0.05
-
-# 2. 增加最大迭代次数
-poetry run autoflowcfd solve steady volume_mesh.pkl --max-iter 10000
-
-# 3. 检查网格质量
-poetry run autoflowcfd grid validate volume_mesh.pkl
-```
+**内存不够** —— 内存随阶数快速增长（P2 约为 P1 的数倍）；先在 P1 收敛，或用 `--n-ranks` 分布式分摊到多台机器。
 
 ---
 
-## 性能参考
+## 下一步
 
-基于不同硬件配置的预期性能（Ahmed Body 100 万单元网格）：
-
-| 硬件配置 | FR 阶数 | 每步耗时 | 1000 步耗时 | 推荐场景 |
-|---------|:-------:|:--------:|:-----------:|:--------:|
-| CPU (4 线程) | 2nd | ~2.5s | ~42 分钟 | 小型笔记本 |
-| CPU (16 线程) | 2nd | ~0.8s | ~13 分钟 | 工作站 |
-| GPU (RTX 3090) | 2nd | ~0.4s | ~7 分钟 | 高性能桌面 |
-| GPU (A100 40GB) | 2nd | ~0.3s | ~5 分钟 | 服务器/HPC |
-| GPU (A100 40GB) | 3rd | ~0.5s | ~8 分钟 | 高精度需求 |
-
-> **注**：实际性能受网格质量、边界层分辨率、湍流模型复杂度影响。GPU 加速在大规模网格（>500 万单元）下优势更显著。
-
----
-
-## 下一步学习
-
-### 📖 深入学习资源
-
-- **[完整文档](docs/)** - 详细的技术文档与教程
-- **[架构设计](ARCHITECTURE.md)** - 系统架构与模块划分详解
-- **[API 参考](docs/API.md)** - Python API 完整说明
-- **[配置示例](examples/config_example.yaml)** - YAML 配置模板库
-- **[算例教程](examples/)** - Ahmed Body、立方体绕流等完整案例
-
-### 🎯 进阶主题
-
-1. **自定义边界条件**：扩展 BoundaryManager 实现特殊边界（如旋转车轮）
-2. **湍流模型选择**：根据仿真需求选择合适的模型（RANS vs DES vs LES）
-3. **网格质量优化**：使用网格校验器提升仿真精度与稳定性
-4. **并行计算调优**：配置多核 CPU 或多 GPU 加速策略
-5. **AI 集成开发**：与 AI Agent 结合实现自动化参数优化
-
-### 🤝 参与社区
-
-- **问题报告**：[GitHub Issues](https://github.com/AutoFlowCFD/AutoFlowCFD/issues)
-- **讨论交流**：[GitHub Discussions](https://github.com/AutoFlowCFD/AutoFlowCFD/discussions)
-- **贡献代码**：阅读 [CONTRIBUTING.md](CONTRIBUTING.md)
-- **邮件联系**：contact@autoflowcfd.org
-
-### 💡 实践建议
-
-1. **从简单算例开始**：先运行 Ahmed Body 标准算例，熟悉工作流程
-2. **逐步增加复杂度**：稳态 → 瞬态，低阶 → 高阶，CPU → GPU
-3. **验证与对比**：与实验数据或商业软件结果对比，验证仿真精度
-4. **加入社区**：分享您的算例与经验，帮助他人快速上手
-
----
-
-<div align="center">
-
-**祝你使用愉快！** 🚀
-
-遇到问题不要犹豫，随时通过 GitHub Issues 或社区讨论寻求帮助。
-
-*AutoFlowCFD 团队期待与您共同打造更好的开源 CFD 工具*
-
-</div>
-
----
-
-## 📬 联系方式
-
-- **问题反馈**：[GitHub Issues](https://github.com/AutoFlowCFD/AutoFlowCFD/issues)
-- **讨论交流**：[GitHub Discussions](https://github.com/AutoFlowCFD/AutoFlowCFD/discussions)
-- **项目联系人**：Mr Lu
-- **邮箱联系**：luxw_chd@126.com
-
----
-
-**最后更新**: 2026-07-25  
-**版本**: AutoFlowCFD v0.1.0
+- [文档索引](docs/INDEX.md)
+- [教程](docs/TUTORIALS.md)
+- [配置指南](docs/CONFIGURATION_GUIDE.md)
+- [API 文档](docs/API.md)
+- [架构说明](ARCHITECTURE.md)
+- 问题反馈：[GitHub Issues](https://github.com/AutoFlowCFD/AutoFlowCFD/issues)；联系人 Mr Lu（luxw_chd@126.com）

@@ -1,220 +1,134 @@
-# AutoFlowCFD 后处理模块使用指南
+# AutoFlowCFD 后处理指南
 
-## 概述
+后处理全部从算例目录（`solve` 的 `-o` 目录）读取：`checkpoints/*.h5`（解点状态、湍流场、收敛历史、物理参数）、
+`volume_mesh.pkl`（体网格），瞬态给了探针时另有 `probes.csv` / `probes.json`。命令行入口是 `autoflowcfd post`，
+Python 入口是 `AutoFlowCFDAPI` 的后处理方法与 `autoflowcfd.postprocess` 模块。
 
-AutoFlowCFD后处理模块提供完整的CFD仿真结果分析工具，包括气动系数计算、可视化数据导出、收敛分析和瞬态统计等功能。
+---
 
-## 快速开始
+## 目录
 
-### 1. 气动系数计算
+- [命令一览](#命令一览)
+- [气动系数](#气动系数)
+- [VTK 导出](#vtk-导出)
+- [收敛曲线与报告](#收敛曲线与报告)
+- [瞬态统计与压力谱](#瞬态统计与压力谱)
+- [Python 接口](#python-接口)
 
-```python
-from autoflowcfd.postprocess import CoefficientCalculator
+---
 
-# 创建计算器
-calc = CoefficientCalculator(
-    grid_data,
-    solution,
-    reference_area=2.2,      # 参考面积 (m²)
-    reference_length=4.5,    # 参考长度 (m)
-    density=1.225,           # 空气密度 (kg/m³)
-    velocity=30.0            # 来流速度 (m/s)
-)
+## 命令一览
 
-# 计算气动系数
-coeffs = calc.calculate()
-print(f"Cd = {coeffs.Cd:.4f}")
-print(f"Cl = {coeffs.Cl:.4f}")
-print(f"Cm = {coeffs.Cm:.4f}")
+| 命令 | 输出 | 数据来源 |
+|------|------|---------|
+| `post coefficients` | 终端 + JSON（`-o`，缺省 coefficients.json） | 指定或最新的 checkpoint，在 CPU 上重建求解器 |
+| `post export-vtk` | `.vtk` / `.vtu` | checkpoint（低阶取单元积分平均；`--high-order` 重建求解器取解点多项式） |
+| `post convergence` | PNG | checkpoint 的收敛历史 |
+| `post report` | JSON | checkpoint 的收敛历史与求解参数 |
+| `post transient-mean` / `transient-rms` | `.vtk`（节点场） | 算例目录的全部 checkpoint（按物理时间取样） |
+| `post transient-psd` | CSV | `probes.csv`（每个物理步一个样本） |
 
-# 计算绝对力值
-forces = calc.calculate_forces()
-print(f"Drag force: {forces.drag_force:.1f} N")
-```
+`--checkpoint` 指定 checkpoint，缺省取 `checkpoints/` 下迭代数最大的一个；`--grid` 指定体网格，缺省取算例目录的
+`volume_mesh.pkl`，没有时取 checkpoint 记录的求解输入。原求解靠 `--skip-quality-check` 才跑得起来的网格，需要重建求解器的
+命令同样要给 `--skip-quality-check`。
 
-### 2. VTK场数据导出
+---
 
-```python
-from autoflowcfd.postprocess import VTKExporter
-
-# 创建导出器
-exporter = VTKExporter(grid_data, solution)
-
-# 导出VTK文件（ParaView可视化）
-vtk_path = exporter.export(
-    "result.vtk",
-    fields=['velocity', 'pressure', 'k', 'omega']
-)
-```
-
-### 3. 收敛分析
-
-```python
-from autoflowcfd.postprocess import ConvergenceAnalyzer, SimulationReport
-
-# 创建分析器
-analyzer = ConvergenceAnalyzer()
-
-# 在迭代循环中添加数据
-for i in range(max_iterations):
-    # ... solver step ...
-    analyzer.add_iteration(
-        iteration=i+1,
-        residuals={'continuity': res_cont, 'momentum': res_mom},
-        cfl=cfl_value
-    )
-
-# 导出CSV收敛曲线
-analyzer.export_csv("convergence.csv")
-
-# 生成JSON报告
-report = SimulationReport(config, analyzer)
-report.generate("report.json", computation_time=3600.0)
-```
-
-### 4. 瞬态统计后处理
-
-```python
-from autoflowcfd.postprocess import TransientStatistics, PressurePSD
-
-# 创建统计计算器
-stats = TransientStatistics(grid_data, window_size=100)
-
-# 在时间推进循环中累积样本
-for step in range(num_steps):
-    current_time = step * dt
-    # ... solver step ...
-    
-    # 跳过初始过渡期后开始采样
-    if current_time > 0.1:
-        stats.accumulate(solution, time=current_time)
-
-# 计算时均和RMS
-result = stats.compute_statistics()
-print(f"Mean fields: {list(result.mean_fields.keys())}")
-print(f"RMS fields: {list(result.rms_fields.keys())}")
-
-# PSD频谱分析
-monitor_points = [(0.5, 0.0, 0.1)]
-psd = PressurePSD(monitor_points)   # 采样间隔由样本时刻给出，必须等间隔
-
-for step in range(num_steps):
-    pressure = get_pressure_at_point(...)
-    psd.add_sample(time=step*dt, pressures=[pressure])
-
-freqs, psd_vals = psd.compute_psd(0)
-dom_freq, peak_psd = psd.find_dominant_frequency(0, min_freq=50, max_freq=150)
-print(f"Dominant frequency: {dom_freq:.2f} Hz")
-```
-
-## Demo算例运行
-
-### Ahmed Body稳态RANS
+## 气动系数
 
 ```bash
-cd examples/ahmed_body/steady
-python run_steady.py
+autoflowcfd post coefficients --case results --reference-area 2.2 \
+    --reference-length 2.7 --moment-center 1.4 0 0 --groups body --groups wheels
 ```
 
-输出：
-- `output/result.vtk` - VTK场数据
-- `output/convergence.csv` - 收敛曲线
-- `output/report.json` - 仿真报告
+- 在 FR 面通量点上积分壁面压力与粘性力（WMLES 的壁面应力取壁面模型）；压力取相对来流静压的表压。
+- 缺省积分全部物理无滑移固壁组；`--groups` 指定组（可重复），例如要排除地面时只给车身各组。
+- `Cd / Cl / Cs` 按来流方向（`--aoa / --aos`）分解到风轴系；`Cm / Cy / Cr`（俯仰 / 偏航 / 滚转力矩）报在体轴系，
+  对 `--moment-center` 取矩、用 `--reference-length` 无量纲化。
+- `--reference-area` 必须给出（不同车辆的参考面积约定不同，不猜）；求解过程中的每步系数则用求解时的参考面积
+  （求解命令不给时按物体面的迎风投影估算）。
+- 求解结束时另打印壁面 y+ 统计（贴壁单元形心高度），超出所选近壁处理的适用范围时警告。
 
-### Ahmed Body瞬态DES
+---
+
+## VTK 导出
 
 ```bash
-cd examples/ahmed_body/transient
-python run_transient.py
+autoflowcfd post export-vtk --case results -o flow.vtu                                   # 速度、压力（缺省）
+autoflowcfd post export-vtk --case results -o flow.vtu --variables velocity --variables pressure \
+    --variables turbulence --variables q_criterion
+autoflowcfd post export-vtk --case results -o walls.vtu --boundaries-only               # 命名边界面片
+autoflowcfd post export-vtk --case results -o flow_ho.vtu --high-order                  # 高阶 Lagrange 单元
 ```
 
-输出：
-- `output/result.vtk` - VTK场数据
-- `output/convergence.csv` - 收敛曲线
-- `output/report.json` - 仿真报告
-- 瞬态统计数据（时均、RMS、PSD）
+- 变量：`velocity`、`pressure`、`turbulence`（展开为模型的全部湍流量）、`k`、`omega`、`nu_tilde`、`nut`、`q_criterion`；
+  `--high-order` 另可选 `density`。`--variables` 可重复给出。
+- 格式按扩展名：`.vtk` 为 legacy（缺省 ASCII），`.vtu` 为 XML（缺省二进制 + 压缩）；`--binary/--ascii` 覆盖。
+- 低阶导出是单元积分平均（每个单元一个值）；`--high-order` 按 FR 分段多项式在 VTK 高阶单元节点上取值（四面体与三棱柱
+  到 P3），ParaView 里调高 `Nonlinear Subdivision Level` 可看到单元内部分布。
+- `--boundaries-only` 只写边界面片，带 `BoundaryID` / `BoundaryTypeID` 与组名图例，可在 ParaView 里按组筛选着色。
+- 瞬态某一时刻：`--checkpoint` 指定那一时刻的 checkpoint。
 
-## 性能基准测试
+更多细节见 [VTK 导出指南](VTK_EXPORT_GUIDE.md)。
 
-### CPU基准测试
+---
+
+## 收敛曲线与报告
 
 ```bash
-python benchmarks/benchmark_cpu.py
+autoflowcfd post convergence --case results --variables residual --variables cfl --variables coefficients -o conv.png
+autoflowcfd post report --case results -o report.json
 ```
 
-目标性能（8核i7，百万级网格）：
-- 稳态RANS: ≥50 iterations/minute
-- 瞬态DES: ≥10 iterations/minute
+- `--variables` 取 `residual`（监控残差与各方程残差）、`cfl`、`coefficients`（逐步压力积分力系数，只在求解时设置了参考
+  面积才有记录；没有记录时报错）。
+- 报告含求解参数、逐步残差 / CFL / 系数的统计与最终值，以及求解器自己的结论 `solve_status`（running / converged /
+  not_converged / finished）。
 
-### GPU基准测试
+---
+
+## 瞬态统计与压力谱
 
 ```bash
-python benchmarks/benchmark_gpu.py
+autoflowcfd post transient-mean --case transient_results --warmup-time 0.05 -o mean.vtk
+autoflowcfd post transient-rms  --case transient_results --warmup-time 0.05 -o rms.vtk
+autoflowcfd post transient-psd  --case transient_results --warmup-time 0.05 -o psd.csv
 ```
 
-目标性能（RTX 3090，百万级网格）：
-- 稳态RANS: ≥200 iterations/minute
-- 瞬态DES: ≥50 iterations/minute
-- 瞬态LES: ≥20 iterations/minute
+- 时间轴是 checkpoint 记录的物理时间（时间精确推进时累计）；`--warmup-time` 之前的样本不计入。
+- `transient-mean`：节点分辨率的 `MeanVelocity` / `MeanPressure`；`--coefficients`（缺省开）同时统计 Cd / Cl / Cs 的时均与
+  标准差——用第一个计入统计的 checkpoint 重建一次求解器，之后每个 checkpoint 只替换状态，任何一个样本失败即报错；
+  没有物体的算例用 `--no-coefficients`。
+- `transient-rms`：`VelocityRMS` / `PressureRMS`。
+- 两者的样本是各个 checkpoint（间隔 = `--checkpoint-interval` 个物理步），需要足够多的 checkpoint 才有统计意义。
+- `transient-psd`：探针压力的单边功率谱密度（Pa²/Hz，Welch 法：Hann 窗、50% 重叠；`--nperseg` 指定段长），样本是求解器
+  每个物理步在探针处求的 FR 解多项式值（`solve transient --probe X Y Z`）；输出各探针的主导频率。样本必须等间隔
+  （固定物理时间步长）。
 
-## API参考
+---
 
-### CoefficientCalculator
+## Python 接口
 
-**主要方法**:
-- `calculate()` → AerodynamicCoefficients: 计算无量纲系数
-- `calculate_forces()` → AerodynamicForces: 计算绝对力和力矩
-- `calculate_by_boundary(boundary_name)` → AerodynamicCoefficients: 分边界计算
+已有求解器（`api.run_steady` / `run_transient` / `resume_simulation` 之后的 `api.solver`）时：
 
-### VTKExporter
+```python
+coeffs = api.calculate_coefficients(reference_area=2.2, reference_length=2.7, moment_center=[1.4, 0, 0],
+                                    groups=["body"])
+api.export_vtk("flow.vtu", fields=["velocity", "pressure", "q_criterion"])
+api.export_vtk("flow_ho.vtu", high_order=True)
+history = api.get_convergence_history()
+```
 
-**主要方法**:
-- `export(output_path, fields, format)` → Path: 导出VTK文件
+模块级（任意求解器对象）：
 
-**支持字段**: velocity, pressure, k, omega, nut
-
-**支持格式**: legacy (ASCII), xml (VTU, 待完善)
-
-### ConvergenceAnalyzer
-
-**主要方法**:
-- `add_iteration(iteration, residuals, cfl, coefficients)`: 添加迭代数据
-- `export_csv(output_path)` → Path: 导出CSV
-- `get_summary(computation_time)` → SimulationSummary: 获取摘要
-
-### TransientStatistics
-
-**主要方法**:
-- `accumulate(solution, time)`: 累积样本
-- `compute_statistics()` → TransientResult: 计算统计量
-- `get_sampling_info()` → Dict: 获取采样信息
-
-### PressurePSD
-
-**主要方法**:
-- `add_sample(time, pressures)`: 添加压力样本
-- `compute_psd(point_index, nperseg=None, overlap=0.5, window="hann")` → Tuple[freqs, psd]: Welch 法单边 PSD（Pa²/Hz）；
-  nperseg 缺省时样本少于 64 个用单段，否则约 8 段（50% 重叠）
-- `sampling_interval()` → float: 由样本时刻给出的采样间隔（不等间隔报错）
-- `find_dominant_frequency(point_index, min_freq, max_freq)` → Tuple[freq, psd]: 找主导频率
-
-## 已知限制
-
-1. **压力积分方法**: 当前为占位实现，返回固定值。需实现真正的表面积分逻辑。
-2. **VTK场数据提取**: 速度和压力为均匀场占位值。需从SolutionVector提取真实数据。
-3. **XML VTK格式**: `_export_xml()`方法未完全实现，目前回退到Legacy格式。
-4. **分边界计算**: `calculate_by_boundary()`返回零值，需实现边界单元过滤。
-
-## 下一步计划
-
-- [ ] 实现真正的压力积分方法
-- [ ] 完善VTK场数据提取逻辑
-- [ ] 完成XML VTU格式支持
-- [ ] 优化大规模数据导出性能
-- [ ] 添加更多可视化后处理功能（流线、等值面、Q准则）
-
-## 相关文档
-
-- [接口文档-Part2](ProjectFiles/2-4_接口文档-Part2.md): 后处理API详细规范
-- [数据结构设计文档-Part2](ProjectFiles/2-3_数据结构设计文档-Part2.md): SolutionVector结构
-- [迭代5开发报告](ProjectFiles/5-1_迭代5开发报告.md): 完整开发总结
+| 接口 | 说明 |
+|------|------|
+| `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr(solver, reference_area, reference_length=1.0, moment_center=None, include_viscous=True, groups=None)` | 返回 `AerodynamicCoefficients`（`Cd Cl Cs Cm Cy Cr`，`.to_dict()`） |
+| `postprocess.vtk_export_highorder.export_solver_highorder_vtk(solver, path, fields=None, binary=True)` | 求解器当前状态的高阶导出 |
+| `postprocess.VTKExporter(grid_data, solution, turbulence=None, q_criterion=None)` | 单元平均场导出：`.export(path, fields, format='legacy'|'xml', binary=None)`、`.export_boundaries(...)` |
+| `postprocess.ConvergenceAnalyzer` | `add_iteration(iteration, residuals, cfl, coefficients)`、`export_csv(path)` |
+| `postprocess.SimulationReport(config_summary, analyzer, solve_status)` | `.generate(path, metadata=None)` 写 JSON |
+| `postprocess.TransientStatistics(grid_data)` | `accumulate(solution, time)`、`accumulate_coefficients(Cd, Cl, Cs)`、`compute_statistics()` |
+| `postprocess.PressurePSD(monitor_points)` | `add_sample(time, pressures)`、`compute_psd(i, nperseg=None, overlap=0.5, window="hann")`、`find_dominant_frequency(i, min_freq, max_freq)` |
+| `core.probes.read_probe_series(case_dir)` | `(探针坐标 (k,3), 时刻 (n,), {"p","u","v","w": (n,k)})` |
+| `postprocess.wall_yplus.wall_y_plus(solver)` | 贴壁单元形心 y+ 统计 |

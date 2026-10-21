@@ -67,7 +67,7 @@ vel_inf: 40.0
 | `order` | `2` | `--order` | FR 目标阶数 0~3；>=1 时从 P0 逐阶爬坡（Order Continuation） |
 | `turbulence` | `sst_kw`（瞬态 `ddes`） | `--turbulence-model` | `none` / `sst`（同 `sst_kw`）/ `sa` / `ddes` / `iddes` / `wmles` / `les` |
 | `gpu_device` | `null` | `--gpu-device` | GPU 设备号；`null` = 单 GPU 用 0、多 GPU 按 rank % GPU 数分配 |
-| `n_threads` | `-1` | `--threads` | CPU 线程数，`-1` = 运行时取本机核数 |
+| `n_threads` | `-1` | `--threads` | numba 计算核线程数；`-1` = 8（实测扩展性最优点，不是本机核数；超过 numba 线程池上限时按上限钳制） |
 | `output_dir` | `./results`（瞬态 `./transient_results`） | `--output` | 结果目录 |
 | `checkpoint_interval` | `100` | `--checkpoint-interval` | 中间 checkpoint 间隔（步） |
 | `turbulence_intensity` | `0.01` | `--turbulence-intensity` | 来流湍流强度 Tu，(0, 1] |
@@ -111,11 +111,14 @@ vel_inf: 40.0
 
 | 设置 | 给法 |
 |---|---|
-| 边界条件类型 | 生成/导入体网格时按边界组名识别，识别不了或有歧义的组用 `grid generate-volume/import-volume --bc-type 组名=类型` 指定（`WALL`/`SLIP_WALL`/`VELOCITY_INLET`/`PRESSURE_OUTLET`/`SYMMETRY`/`FARFIELD`），写进体网格文件 |
+| 边界条件类型 | 生成/导入体网格时按边界组名识别，识别不了或有歧义的组用 `grid generate-volume/import-volume --bc-type 组名=类型` 指定（`WALL`/`SLIP_WALL`/`VELOCITY_INLET`/`PRESSURE_OUTLET`/`SYMMETRY`/`FARFIELD`），保存在 `.pkl` 体网格里（`.nas` 不记录类型，重新读入时按组名识别） |
 | 来流方向 | `solve steady/transient --aoa/--aos`（度） |
 | 参考面积 | `--reference-area`，不给时按迎风投影自动估算 |
 | 并行方式 | `--n-ranks`、`--multi-gpu`、`--fully-distributed` |
-| 面网格（.nas 体网格反推边界分组用） | `--surface-mesh` |
+| 面网格（.nas 体网格反推边界分组用）与坐标单位 | `--surface-mesh`、`--units` |
+| 瞬态探针 | `solve transient --probe X Y Z`（可重复） |
+| dual-time 内迭代上限 | `solve transient --dual-time-inner-iter` |
+| 合成湍流入口涡核数 | `--sem-num-eddies`（不给时按密度判据取） |
 | 跳过网格质量门 | `--skip-quality-check` |
 
 运行环境变量只有两个，都不影响计算结果：`AFCFD_NUMBA_CACHE_ROOT`（numba 编译缓存目录）、
@@ -214,4 +217,4 @@ autoflowcfd config validate steady.yaml                        # 只校验，不
 
 ---
 
-**最后更新**: 2026-10-19
+**最后更新**: 2026-10-21
