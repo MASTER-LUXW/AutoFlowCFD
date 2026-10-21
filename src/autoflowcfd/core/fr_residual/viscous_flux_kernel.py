@@ -1,27 +1,16 @@
-"""粘性残差界面项 —— numba 逐点标量 kernel (性能优化，替代
-fr_viscous_flux.py 里原来的纯 Python `for f in range(fc.n_faces)` 循环)。
+"""粘性残差界面项 —— numba 逐点标量 kernel（`core/fr_residual/viscous_flux/residual.py` 调用）。
 
-与 fr_residual_inviscid_kernel.py 是同一套性能优化、同一套展平几何
-缓存（core/fr_face_kernels_flat.py），逐字复刻原循环体的控制流（BR1
-两侧原始变量+梯度取算术平均、owner_is_primary/neighbor_is_primary
-分组去重、边界面梯度镜像内部值/状态反映真实边界条件），只是把执行
-方式从"Python 解释器 + 逐次小 numpy 调用"换成 numba 编译的逐点标量
-代码。数学公式与 fr_viscous_flux.py 的向量化版本必须保持完全一致，
-改动一处必须同步检查另一处。
+与无粘界面核（`inviscid_kernel.py`）共用展平几何缓存（`core/fr_operators/face_kernels.py`）。控制流：BR1 两侧
+原始变量 + 梯度取算术平均、owner_is_primary/neighbor_is_primary 分组去重、边界面按粘性边界种类构造另一侧。
 
-**符号约定（不能弄反）**：粘性残差是 `+div(G)`，界面校正项
-`contrib = _distribute_from_face(jump, ...)`（不带负号）——与无粘残差
-的 `-div(F)`/`contrib = -_distribute_from_face(jump, ...)` 符号相反，
-见 fr_viscous_flux.py 模块文档"注意：粘性项是 +div(G)"。
+**符号约定（不能弄反）**：粘性残差是 `+div(G)`，界面提升贡献不带负号——与无粘残差的 `-div(F)` 相反。
 
-**边界面的公共粘性通量按粘性边界种类分派（2026-09-30）**：状态 Q_n 取
+**边界面的公共粘性通量按粘性边界种类分派**：状态 Q_n 取
 幽灵态，"另一侧"梯度由本侧按种类构造（`flux_kernels/viscous_bc.py::
 boundary_other_gradients`），种类数组 `vbc_kind` 由
 `boundary/fr_ghost_state.py::build_viscous_boundary_kind` 按边界组 BC 类型给出。
-此前除绝热类法向镜像 ∇T 外一律取本侧梯度、不加温度罚项，于是出口/远场/入口
-的温度、出口与对称面切向的速度在扩散算子里没有任何边界条件，离散扩散算子
-失去强制性（Blasius P2 隐式发散的根因），完整论证与实测见 `viscous_bc.py`
-模块文档。三份 kernel（本文件、着色版、P0 版）与解析 Jacobian 都走
+出口/远场/入口的温度、出口与对称面切向的速度都要在扩散算子里有边界条件，否则离散扩散算子失去强制性，完整
+论证与实测见 `viscous_bc.py` 模块文档。三份 kernel（本文件、着色版、P0 版）与解析 Jacobian 都走
 `face_point_jumps.viscous_common_flux_point` 这一份逐点函数。
 
 **多核并行**：与无粘核同一套按面着色（`inviscid_kernel.py` 模块文档"多核并行"）。**符号约定不能弄反**——
@@ -60,10 +49,7 @@ def compute_viscous_interface_correction_kernel(
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
     # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
     # 厚度，两侧单值取较薄一侧，湍流扩散读同一个）。见 `flux_kernels.viscous_ip_penalty_tilde`
-    # 的"长度尺度"一节：此前用 `mean(det_jacs)**(1/3)`，两处都错 ——
-    # `mean(det_jacs)` 不是体积而是体积/参考体积（参考体积基相关：
-    # 坍缩 8 / 原生棱柱 4 / 原生四面体 4/3），且几何平均在各向异性
-    # 贴壁单元上比壁法向厚度大 2.48 倍（实测平板算例）。
+    # 的"长度尺度"一节。
     ip_length: np.ndarray,
     # IP 罚项常数，按阶数解析（见 `flux_kernels.resolve_viscous_ip_constant`）。
     # 做成形参而不是模块全局：njit 把全局当编译期常量、且
@@ -96,10 +82,6 @@ def compute_viscous_interface_correction_kernel(
     `lift_native[op] @ (ref_area_weight⊙jump)`，理由同
     inviscid_kernel.py / native_tet/basis.py::build_native_tet_lift 文档。
 
-    **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
-    axis,side]` 外插 + 1D Radau/VCJH `_distribute_point` 分布）已整体
-    删除——生产不可达，完整论证见 `inviscid_kernel.py::
-    compute_inviscid_interface_correction_kernel` 文档。
     """
     n_sps = Q.shape[1]
     n_fp = Q_ghost.shape[1]

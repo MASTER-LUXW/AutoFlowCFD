@@ -1,30 +1,16 @@
 """
-AutoFlowCFD - 曲边映射与参考单元几何 (V2.0 修复版)
+AutoFlowCFD - 参考单元几何与等参映射。
 
-本模块从 high_order_mesh.py 中拆分出来，专门负责：
-1. 参考单元（立方体计算域）到物理四面体/棱柱单元的等参映射
-2. Jacobian 矩阵与 GCL（几何守恒律）验证
-3. 单元朝向修正（保证正体积/正 Jacobian）
+1. 立方体坐标 `(a,b,c)∈[-1,1]^3` 到参考单纯形 / 参考棱柱坐标的 Duffy 变换（`cube_to_tet_rst`、
+   `cube_to_tri_rs`）：三角形面通量点的采样、单纯形上张量 Gauss 求积与原生棱柱面点的 Newton 定位用它；
+   解点本身在原生参考坐标 `(r,s,t)` 上（`fr/native_tet/`、`fr/native_prism/`）。
+2. 参考坐标到物理四面体 / 棱柱的映射（重心坐标形函数，单位分解在机器精度上成立）。
+3. 批量 3x3 行列式 / 伴随（`batched_det_inv_3x3`）与几何守恒律度量恒等式检验（`CurvedMapping`）。
 
-数学基础：坍缩坐标 (Collapsed Coordinates / Duffy Transform)
-----------------------------------------------------------------
-FR 求解器的 Solution Points (SPs) 统一存储为计算立方体 [-1,1]^3 上的
-张量积 Gauss-Legendre 点阵（与单元类型无关）。四面体/棱柱是单纯形/半单纯形，
-不能直接用张量积形函数插值，必须先通过 Duffy 坍缩坐标变换把立方体坐标
-(a,b,c) 映射到参考单纯形坐标 (r,s,t)，再用参考单纯形的重心坐标形函数
-（保证 sum=1 恒成立）插值到物理坐标。
+单元朝向修正在 `curved_mapping_orientation.py`，解析精确雅可比在 `curved_mapping_exact_jacobian.py`。
 
-本文件替换了 V2.0 初版中数学错误的实现（原 "重心坐标" 公式不满足单位分解，
-四面体权重和在非零位置处 ≠ 1；棱柱形函数和恒为 0.5 而非 1，是重复除以2的
-bug）。新实现的正确性已经过数值验证：
-- 单位分解：sum(L_i) = 1，机器精度成立（<1e-15）
-- 顶点映射：立方体角点精确映射到物理单元的对应顶点
-- Jacobian 正性：在 Gauss-Legendre（严格内部）点处恒正（对非退化单元）
-- 立方体六个面与物理单元面的对应关系：已用平面度残差数值核对
-
-参考文献：Hesthaven & Warburton, "Nodal Discontinuous Galerkin Methods"
-(2008), Chapter 6（四面体坍缩坐标）；Karniadakis & Sherwin,
-"Spectral/hp 元素 Methods for CFD"（棱柱/三棱柱坍缩坐标）。
+参考文献：Hesthaven & Warburton, "Nodal Discontinuous Galerkin Methods" (2008), Chapter 6；Karniadakis & Sherwin,
+"Spectral/hp Element Methods for CFD"（单纯形 / 棱柱的坍缩坐标）。
 """
 
 import numpy as np
@@ -55,7 +41,7 @@ def _batched_det_adj_3x3(J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     数值等价性已验证：随机良态矩阵（条件数 1~3，代表真实网格 Jacobian
     的典型量级）逐位一致（最大误差 6.7e-16，纯浮点舍入噪声）；本项目
     文档记录过的真实退化单元场景（一个方向 det 低至 ~2e-14、其余方向
-    正常，例如坍缩坐标退化边附近的单元）精确一致（相对误差 0.0）。
+    正常）精确一致（相对误差 0.0）。
     只有在人为构造的病态随机矩阵（条件数 ~2e5，物理网格不会出现这种
     无结构的病态）上才会看到 ~1e-8 级别的差异——真实网格 Jacobian 来自
     光滑坐标变换，不会产生这类病态，退化单元的病态是"某一方向趋于零"
@@ -264,11 +250,7 @@ PRISM_CUBE_FACES: Dict[str, Tuple[int, ...]] = {
 
 
 class CurvedMapping:
-    """高阶单元的几何守恒律（GCL）度量恒等式检验（原生四面体/棱柱，与残差组装同一套体积微分算子）。
-
-    2026-10-19 以前另有 `compute_jacobian`（对坍缩坐标 (a,b,c) 求解析雅可比，坍缩基时代的几何构造路径，删除坍缩
-    棱柱基后只剩死代码在调用）、六面体分支（朴素张量积 `D_3d`，本项目没有六面体单元）与 `verify_gcl_strict`。
-    """
+    """高阶单元的几何守恒律（GCL）度量恒等式检验（原生四面体/棱柱，与残差组装同一套体积微分算子）。"""
 
     def __init__(self, order: int):
         self.order = order
@@ -280,30 +262,15 @@ class CurvedMapping:
         真正的 GCL 要求伴随矩阵（adjugate/cofactor）的离散散度恒为零：
             sum_m d/dxi_m ( adj(J)_{m,i} ) = 0    对每个物理方向 i=1,2,3
         其中 adj(J) = det(J) * J^{-1}。这等价于「均匀流场必须给出零残差」
-        的物理要求，是 GCL 在曲边/坍缩坐标高阶格式中的标准定义
-        （Kopriva 2006, "Metric Identities 并且  DSEM 在...上 Curvilinear
-        Meshes"），而不是旧版本使用的「det(J) 在单元内近似常数」——
-        对四面体/棱柱的坍缩坐标映射而言，det(J) 本身就应该是非均匀的
-        （坍缩变换本身引入的度量非均匀性，即使物理单元是完美直边直面），
-        用它的均匀性做 GCL 判据在数学上是错误的判据，已废弃。
+        的物理要求（Kopriva 2006, "Metric Identities and the Discontinuous Spectral Element Method on
+        Curvilinear Meshes"）。
 
-        度量项 adj(J) 本身现在由 tet_exact_jacobian/prism_exact_jacobian
-        解析求出（见该函数文档），不再有谱微分矩阵的截断/插值误差；棱柱
-        这里散度检验用的 D_3d_prism 仍是流场残差组装实际使用的同一套
-        算子，真实网格验证（含 det(J)~2e-14 的极端偏斜过渡区四面体）残差
-        降到 ~1e-19，与单元偏斜程度、det(J) 大小无关。
-
-        四面体（2026-09-03 更正，坍缩坐标四面体基已删除，见
-        fr/operators.py 模块文档）：不再走 `tet_exact_jacobian`（对 (a,b,c)
-        坍缩坐标求导，与现在的 native 单纯形基参考坐标 (r,s,t) 不是
-        同一个参考系，`_select_d3d("tet")` 现在返回的 `D_native_tet_
-        padded` 是对 (r,s,t) 求导，混用会导致链式法则本身就是错的，不只是
-        节点布局不匹配）。改用与生产残差组装同一套 native machinery：
-        `compute_native_tet_jacobian` 给出的常数 adj(J)（native 直边
-        单元，不依赖参考坐标位置，见该函数文档），广播到全部 `n_sps`
-        槽位后用 `D_native_tet_padded` 微分——常数场的离散散度检验退化
-        为"D 是否正确零化常数场"这一更基本但同样有效的正确性判据（真实
-        直边四面体的度量场在 native 参考系下就是严格常数，这不是近似）。
+        度量与残差组装同一套原生机制、同一个参考系 `(r,s,t)`：
+        * 四面体：`compute_native_tet_jacobian` 给出的常数 adj(J)（直边单元不依赖参考坐标位置），广播到全部
+          解点后用 `D_native_tet_padded` 微分——直边四面体的度量场在原生参考系下严格为常数，检验退化为
+          "微分矩阵是否零化常数场"；
+        * 棱柱：`native_prism_exact_jacobian` 在原生解点上给出解析精确 Jacobian，用 `D_native_prism_padded`
+          微分；零填充槽位的 adj 置零（填充行本身是零行，残差恒为零，不影响 `max|residual|` 判据）。
 
         Args:
             cell_type: "tet"/"prism" 用解析精确雅可比 + 专用散度算子；
@@ -325,15 +292,6 @@ class CurvedMapping:
                 )
             adj = np.broadcast_to(adj_const, (n_sps, 3, 3))
         elif cell_type == "prism":
-            # 原生棱柱基（2026-09-20）：与四面体那条同一个理由 ——
-            # `D_3d_prism` 在原生档下已被别名成对 `(r,s,t)` 求导的
-            # `D_native_prism_padded`，而 `prism_exact_jacobian` 求的是对
-            # 坍缩坐标 `(a,b,c)` 的导数，两者不是同一个参考系，混用会让
-            # 链式法则本身就错。改用同一套 native machinery：
-            # `native_prism_exact_jacobian` 在原生解点上给出解析精确
-            # Jacobian。零填充槽位的 adj 置零（`D_native_prism_padded`
-            # 的填充行本身是零行，所以那些槽位的残差恒为零，不影响
-            # `max|residual|` 判据）。
             from ...fr.native_prism.basis import (
                 build_native_prism_nodes,
                 native_prism_exact_jacobian,

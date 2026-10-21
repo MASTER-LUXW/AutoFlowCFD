@@ -1,14 +1,14 @@
 """求解命令的结果/checkpoint 持久化（写出、续算重建、恢复到已有求解器）。
 
 
-## 文件分工(2026-09-24 拆包, 原 614 行)
+## 文件分工
 
     write.py             落盘：checkpoint 与最终结果
     rebuild.py           从 checkpoint 重建一个全新 solver（含网格/算子重建）
     restore.py           把 checkpoint 里的场恢复到一个已存在的 solver 上
     initial_field.py     `--init-from`：恢复场并从它起步（稳态 / 瞬态、四个后端共用）
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .resume_run import continue_single_node  # noqa: F401

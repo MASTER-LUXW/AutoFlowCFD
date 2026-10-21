@@ -38,7 +38,7 @@ def _repair_mixed_mesh_post_stage_c(
         (merged_nodes, prism_cells, merged_cells, nodes_obj, mesh_changed_by_repair) - 与传入参数一一
         对应，反映本阶段可能施加的任意次原地重建。
     """
-    # 延迟导入，避免循环导入（约定见本项目 core/fr_solver_cfl.py 等）。
+    # 延迟导入，避免循环导入。
     from ...schema.grid_nodes import NodeArray
     from ...schema.grid_cells import TetrahedralCells
     from ..extraction.face_extractor import repair_nonmanifold_mixed

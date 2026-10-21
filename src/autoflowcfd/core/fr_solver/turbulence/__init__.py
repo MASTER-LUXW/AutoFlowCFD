@@ -6,7 +6,7 @@ AutoFlowCFD V2.0 - FRSolver 湍流模型管理 (从 fr_solver.py 拆分)
 函数签名都以 `solver: FRSolver` 为第一参数，FRSolver 里保留同名的薄
 委托方法，调用方式不变——与 order_continuation.py 已经在用的委托模式一致。
 
-## 文件分工（2026-09-24 拆包，原 795 行）
+## 文件分工
 
     init.py           湍流模型构造、自由来流/边界值、生产项 ramp
     wall_distance.py  壁面距离场计算与跨阶数重算（纯几何量，见该文件文档）

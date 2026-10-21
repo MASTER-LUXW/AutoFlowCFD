@@ -26,8 +26,7 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     """`GPUFRSolver` 的阶数切换（升阶精确 Lagrange 延拓 / 降阶到 P0
     时重置为均匀自由流场，两种情形与 CPU/GPU 分布式版本同一处理，见
-    `core/mpi/distributed_order_continuation.py::cpu_traditional_
-    interpolate_to_new_order` 同名文档）。
+    `core/mpi/distributed_order_continuation/rebuild.py::cpu_traditional_interpolate_to_new_order` 同名文档）。
     """
     from autoflowcfd.core.gpu import get_cupy
     from autoflowcfd.fr.operators import generate_fr_operators
@@ -46,10 +45,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 写 CuPy 版本）---
     new_fields_np = new_nu_t_np = None
     if target_p > old_order:
-        # 延拓算子**按基分派**（2026-09-20 修复）：一维 Gauss 张量积
-        # Lagrange 只对坍缩棱柱基的解点成立，native 四面体/棱柱都不在
-        # 那个网格上（线性场 P1->P2 实测相对误差 7.0e-01 / 1.4e-01）。
-        # 完整依据见 `fr/order_interp.py`。
+        # 延拓算子按单元类型取各自原生基的精确延拓（`fr/order_interp.py`）。
         from autoflowcfd.fr.order_interp import apply_order_interp
 
         n_prism_local = int(solver.mesh.n_prism_cells)

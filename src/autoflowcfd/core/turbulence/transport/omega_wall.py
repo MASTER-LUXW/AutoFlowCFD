@@ -130,7 +130,7 @@ def _compute_omega_wall_target(
         omega_wall = 60*nu / (beta1 * d1^2)
 
     （Wilcox《Turbulence Modeling for CFD》标准公式，beta1=0.075 是
-    SST 内层 beta 系数，omega/sst.py::SSTModelFR.beta1）。
+    SST 内层 beta 系数，core/turbulence/sst/model.py::SSTModelFR.beta1）。
 
     `d1` 的取法（与直接对 `solver.wall_distance` 做面外插的方案不同，
     是本次实现有意的选择，不是疏漏）：不能用
@@ -182,7 +182,7 @@ def _compute_omega_wall_target(
     这个 1e-8 下限（真实反推：观测到的 omega_wall 异常值 1.176e14 精确
     对应 d1=1e-8 代入公式的结果），算出 `omega_wall=60*nu/(beta1*d1^2)
     ~1e14`——比"远超任何工程壁面 omega 值"的安全上限 `omega_max`
-    (=1e6，sst.py::SSTModelFR.k_max/omega_max 文档) 还要大 8 个数量级。
+    (=1e6，sst/model.py::SSTModelFR.k_max/omega_max 文档) 还要大 8 个数量级。
     此前唯一的消费者（`compute_scalar_convection_residual` 的上风
     ghost）碰巧没有暴露这个问题——无滑移壁面上对流通量本身趋于零，
     ghost 值再大也乘的是接近零的质量通量，天然被掩盖；2026-09-04/05

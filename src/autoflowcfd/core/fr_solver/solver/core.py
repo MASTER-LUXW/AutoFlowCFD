@@ -15,7 +15,7 @@
 
 物理输入（阶数、湍流模型、时间格式、来流 rho/vel/p、分子粘度）是必需的关键字参数（2026-10-19，I-78）：此前给了
 默认值（P2、湍流模型各后端还不一样——CPU 为 SST、单 GPU 与多 GPU 为层流、显式 SSP-RK3、标准空气 33 m/s），漏传
-即静默按另一个算例计算。生产构造入口 `core/solver_factory.py` 从配置（`config/solver_config.py`，用户可见的默认值
+即静默按另一个算例计算。生产构造入口 `cli/solve/solver_factory.py` 从配置（`config/solver_config.py`，用户可见的默认值
 在那一层）传入。
 """
 
@@ -88,12 +88,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
             order: 多项式阶数
             turb_model_name: 湍流模型名称 ("SA"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"/"NONE")
             mu_molecular: 分子动力粘度（Pa*s）。
-                此前粘性残差（fr_residual_viscous.py 默认参数）与粘性 CFL
-                步长（_compute_local_time_step）各自独立硬编码这个值，没有
-                任何受支持的方式一致地设置自定义粘度——两处必须同步改，
-                否则 CFL 步长会与真正参与残差组装的粘度脱节（同类问题见
-                记忆条目 hardcoded_molecular_viscosity_mismatch）。现在两处
-                都从这个构造参数读取。
+                粘性残差与粘性 CFL 步长都从这个构造参数读取（唯一来源）。
             time_scheme: 时间推进方案
             time_accurate: 时间精确的显式推进（瞬态的显式格式；每个物理步切成全场同步长的子步，固定 CFL、
                 关低马赫预处理，见 `core/time_integration/time_accurate.py`）
@@ -113,8 +108,8 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
             dual_time_inner_iter: DUAL_TIME 方案每个物理步的内迭代（带 BDF 物理时间项的 Newton 步）
                 次数上限，按收敛判据提前结束（`time_integration/implicit/newton/physical_time.py`）。
             n_threads: numba 并行 kernel（无粘/粘性残差界面项，见
-                core/fr_residual_inviscid_kernel.py、
-                core/fr_viscous_flux_kernel.py 模块文档"多核并行"一节）
+                core/fr_residual/inviscid_kernel.py、
+                core/fr_residual/viscous_flux_kernel.py 模块文档"多核并行"一节）
                 使用的 CPU 线程数。默认 -1 **不是** `os.cpu_count()`，
                 而是解析成 **8**——见下方 `_DEFAULT_N_THREADS` 处的完整
                 实测记录（2026-09-13 重新测量：体积项/梯度链路改成 numba

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 从 checkpoint 重建一个全新 solver（含网格/算子重建）
-
-从 `src/autoflowcfd/cli/solve/checkpoint_io.py`(原 614 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 从 checkpoint 重建一个全新 solver（含网格/算子重建）"""
 
 
 
@@ -187,14 +184,8 @@ def rebuild_from_checkpoint(
             才跑得起来时，resume/后处理重建也必须同样跳过；默认 False 仍强制
         reference_area: 气动系数参考面积 (m^2) 覆盖。None 时尝试从
             volume_data.surface_mesh 自动估算（X 方向正投影面积，见
-            solve_aero_coefficients._compute_reference_area_auto），
-            与 `solve steady` 的同名逻辑一致——真实 bug（2026-08-22）：
-            此前只有 solve_steady_command.py 会设置 solver._reference_area
-            （run_order_continuation 的每步日志靠这个属性判断要不要打印
-            Cd/Cl/Cs），resume 出来的求解器上这个属性完全没设置过，哪怕
-            --reference-area 传了，resume 期间的每步日志也永远不会带
-            气动力系数，直到 solve() 整个跑完才会通过 resume() 自己那次
-            额外的 _report_aerodynamic_coefficients 调用打印一次
+            cli/solve/aero_coefficients.py::_compute_reference_area_auto），
+            与 `solve steady` 的同名逻辑一致（每步日志的气动力系数依赖它）。
 
         cfl_start/cfl_max/cfl_min: `None` 时取所用时间格式 CFL 律的签名默认值
             （`adaptive_cfl/policy.py` 唯一来源；显式与隐式差两个数量级）。

@@ -1,6 +1,5 @@
 """AutoFlowCFD V2.0 - 按阶数计算 Jacobian 的函数族。
 
-从 `high_order_mesh_order.py`（原 561 行）拆出（2026-09-19，项目"单
 文件不超 500 行"规范）：那边留的是参考点集生成、`build_order_geometry`
 总装与 Order Continuation 的按阶数几何缓存；这里是"在给定参考点集上
 算全部单元 Jacobian"这一族（原生四面体/棱柱、两段拼接与细点度量的恒定性校验）。

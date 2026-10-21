@@ -68,7 +68,7 @@ CUBE_FACE_AXIS_SIDE = {
     # 法向 3.3e-16、物理面积权重 2.4e-15。
     #
     # 与 `NATIVE_PRISM_FACE_TO_CUBE_FACE` 的一致性由
-    # `tests/unit/test_native_prism/face.py` 断言（那张表是对应关系的唯一
+    # `tests/unit/test_native_prism_face.py` 断言（那张表是对应关系的唯一
     # 事实来源、有形状无关的几何验证；这里不 import 它是为了避免模块级
     # 循环导入，改由测试钉住两者不会漂移）。
     "prism_native_f0": (2, -1.0),
@@ -175,7 +175,7 @@ def build_cross_interp(
 
     Args:
         translation: (3,) 或 None。周期边界配对面专用（见
-            grid/face_connectivity.py::FRFaceConnectivity.face_translation
+            grid/connectivity/face_connectivity.py::FRFaceConnectivity.face_translation
             文档）——source_phys 是"来源"侧面上的真实物理坐标，但周期面
             物理上不重合，不能直接拿去在 target_cell（"目标"侧、位于
             周期像位置）里定位，必须先减去平移量，把目标点从"来源"侧

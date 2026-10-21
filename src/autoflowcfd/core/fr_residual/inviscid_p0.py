@@ -1,12 +1,8 @@
 """
 AutoFlowCFD V2.0 - P0 阶专用有限体积无粘残差 (S-02)
 
-从 fr_residual_inviscid.py 拆出来（控制单文件行数，>400 行需拆分的
-项目规范）。`compute_inviscid_residual_fr` 在 `mesh.n_points_1d==1`
-时委托到这里，见该函数文档。
-
-性能优化：将原纯 Python 逐面循环替换为 numba 并行 kernel
-(inviscid_p0_kernel.py)，791K 单元 / 188 万面网格上从 ~25s 降至 ~1-2s。
+`compute_inviscid_residual_fr` 在 `mesh.n_points_1d==1` 时委托到这里；逐面 AUSM+up 在 numba 并行 kernel
+（`inviscid_p0_kernel.py`）里按面着色累加。
 """
 
 from typing import Callable
@@ -23,31 +19,15 @@ def compute_inviscid_residual_fv_p0(
 ) -> np.ndarray:
     """P0（1 SP/cell，Order Continuation 最低阶）专用有限体积残差。
 
-    算法与原 Python 版本完全一致（逐位等价，仅浮点重排顺序不同）：
     1. 提取 flat 面几何数组（单位法向、面积权重、面连接关系）
-    2. 预计算边界幽灵态（Python 端，仅 ~40K 边界面）
+    2. 预计算边界幽灵态（Python 端）
     3. numba 并行 kernel 执行 AUSM+up 黎曼求解，按面着色逐颜色组累加（颜色分组取自 `flat`，与 P>=1 界面核
        同一份）
 
-    关于棱柱四边形侧面拆分的处理（2026-08-23 修复，见下方
-    `p0_face_geometry` 文档）：此前这里的说法——"按
-    face_connectivity 的原始每条记录处理（不过滤 owner_is_primary），
-    保证闭合单元面积/法向积分 Σ(n̂·A)=0"——只在旧的 true_normal/
-    true_area_weight 实现（每条三角化子面记录各自是真实的局部半面
-    几何）下成立。当天引入的"逐 Flux Point 精确法向"修复
-    （face_flux_points/exact_normal.py）把 true_normal/true_area_weight
-    改成了 (owner_cell,owner_axis,owner_side) 的纯函数，棱柱四边形
-    侧面的 2 条拆分记录因此变成完全相同的"整张四边形面"的值——不再
-    过滤 owner_is_primary 就会让几乎所有棱柱四边形侧面的通量被
-    scatter-add 两次（真实复现：cube_demo 791k 网格 P0 阶 resume，
-    单元 17790 处 Σ(n̂·A) 相对误差达 6.76%，几乎全部动量残差来自
-    这个未闭合的法向量残差乘以绝对压力，与马赫数/CFL 无关）。现在
-    `p0_face_geometry` 负责按 owner_is_primary/
-    neighbor_is_primary 去重（重复记录只保留一条），对真正 multi-source
-    的拆分面（~5%，两条记录指向 2 个不同真实相邻四面体）改用旧的
-    三角化真实半面 face_conn.normal/area（P0 每面只有 1 个 Flux
-    Point，无法像 P1+ kernel 那样在 FP 级别按对角线混合两个真实
-    邻居，只能退回真实几何半面）。
+    棱柱四边形侧面的两条拆分记录：精确法向下两条记录给出的是同一张整四边形面的法向 / 面积，必须按
+    owner_is_primary / neighbor_is_primary 去重，否则通量被累加两次、闭合单元的 Σ(n̂·A) 不为零；真正
+    multi-source 的拆分面（两条记录指向两个不同的相邻四面体）用三角化真实半面的 `face_conn.normal/area`
+    （P0 每面只有 1 个通量点，不能像 P>=1 那样在通量点级别按对角线混合两个邻居）。见 `p0_face_geometry`。
 
     Args:
         U: 守恒变量，形状 (n_cells, 1, n_vars)

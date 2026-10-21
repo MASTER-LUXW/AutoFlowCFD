@@ -16,7 +16,7 @@ class _CompactMeshDataView:
     `mesh.n_cells`/`n_prism_cells`/`n_sps_per_cell`/`n_points_1d`/
     `jacobians`/`jacobians_fine`/`cell_volumes` 这几个属性，不关心传入的
     是不是真正的 HighOrderMesh——分布式多 GPU 路径下这些逐单元几何数据
-    必须按 `distributed_flat_face.py::DistributedFlatFaceGeometry.
+    必须按 `distributed_flat_face/types.py::DistributedFlatFaceGeometry.
     compact_global_ids` 给出的"棱柱在前、四面体在后"local+halo 压缩
     索引空间重新排列（与 `flat_face_gpu.owner_cell`/`neighbor_cell` 用
     的同一套索引空间一致），否则用压缩索引去查全局尺寸的 jacobians/

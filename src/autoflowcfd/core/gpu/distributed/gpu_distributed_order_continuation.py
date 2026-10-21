@@ -7,10 +7,9 @@ AutoFlowCFD V2.0 - 多 GPU 分布式 Order Continuation（2026-09-02）
 `np.einsum`，且插值矩阵构造本身是一次性的小矩阵运算，没有必要为它
 单独写一个 CuPy 版本）。
 
-"完全分布式加载"（`MultiGPUDistributedSolver.from_fully_distributed_
-package` 构造，`solver._is_fully_distributed is True`，#1，2026-09-02
-补齐）：委托给 `gpu_distributed_fully_distributed.py::redistribute_
-multi_gpu_fully_distributed_for_new_order`（root 用持续持有的
+"完全分布式加载"（`MultiGPUDistributedSolver.from_fully_distributed_package` 构造，
+`solver._is_fully_distributed is True`）：委托给 `gpu_distributed_fully_distributed/redistribute.py::
+redistribute_multi_gpu_fully_distributed_for_new_order`（root 用持续持有的
 `solver._root_context` 重新计算 + 重新分发新阶数紧凑包，见该函数
 文档），不复用下面"传统模式"的逻辑（那需要每个 rank 持有的完整全局
 `mesh`，这条路径下不存在）。
@@ -24,8 +23,8 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     """`MultiGPUDistributedSolver` 的阶数切换（升阶精确 Lagrange 延拓 /
     降阶到 P0 时重置为均匀自由流场，两种情形见 CPU 版
-    `distributed_order_continuation.py::cpu_traditional_interpolate_to_
-    new_order` 同名文档，此处只重复 GPU 特有的部分）。
+    `core/mpi/distributed_order_continuation/rebuild.py::cpu_traditional_interpolate_to_new_order` 同名文档，
+    此处只重复 GPU 特有的部分）。
     """
     from autoflowcfd.core.gpu import get_cupy
     from autoflowcfd.fr.operators import generate_fr_operators
@@ -53,11 +52,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # --- 1. local U / 湍流场：CPU 上插值或重置（不依赖几何重建）---
     new_fields_np = new_nu_t_np = None
     if target_p > old_order:
-        # 延拓算子**按基分派**（2026-09-20 修复的真实缺陷）：一维 Gauss
-        # 张量积 Lagrange 只对坍缩棱柱基的解点成立；native 四面体
-        # （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20
-        # 起是默认）都不在那个网格上，线性场 P1->P2 实测相对误差
-        # 7.0e-01 / 1.4e-01。compact/local 索引空间同样是"棱柱在前"
+        # 延拓算子按单元类型取各自原生基的精确延拓（`fr/order_interp.py`）。compact/local 索引空间同样是"棱柱在前"
         # （见 `base_flat.n_prism` 文档），所以直接用局部棱柱数。
         # 完整依据见 `fr/order_interp.py`。
         from autoflowcfd.fr.order_interp import apply_order_interp

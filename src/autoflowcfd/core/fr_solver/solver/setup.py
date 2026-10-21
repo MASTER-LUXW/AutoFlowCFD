@@ -57,11 +57,7 @@ class _SolverSetupMixin:
 
     def _setup_operators(self, order):
         """FR 算子（只依赖阶数）。"""
-        # 2. 预计算算子 (G-04)——四面体坍缩坐标基已删除（2026-09-03，
-        # 见 fr/operators.py 模块文档），`generate_fr_operators` 不再
-        # 接受 `tet_basis_mode` 参数，恒生成 native 四面体算子，与
-        # `mesh`（同样恒为 native，见 HighOrderMesh 文档）天然一致，
-        # 不再需要从 mesh 读取这个属性来保持两者同步。
+        # 2. 预计算算子 (G-04)：原生棱柱 / 四面体算子，只依赖阶数（与 mesh 的原生解点一致）。
         self.ops = generate_fr_operators(order)
 
         # BLAS 线程数压到 1（性能优化 2026-09-13，见 `blas_threads_limited`
@@ -207,7 +203,7 @@ class _SolverSetupMixin:
         self.order_continuation_enabled = True
 
         # 9. 收敛历史（真实 bug 修复，V2.0 专家组盲审发现，2026-08-27）：
-        # 此前 CPU FRSolver 从不记录逐迭代残差，api.py::get_convergence_history
+        # 此前 CPU FRSolver 从不记录逐迭代残差，api/post.py::get_convergence_history
         # 恒返回硬编码占位符 {"iterations": [], "residuals": []}——GPUFRSolver
         # 一直有这个属性且真正被 solve 循环填充，CPU 版本此前遗漏。solve()/
         # run_order_continuation() 每步迭代后 append，与 GPU 版同一约定。

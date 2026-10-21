@@ -3,11 +3,8 @@
 实现沿法向的表面挤出以创建层状网格，适用于 CFD 仿真中的边界层
 分辨率。单层几何步骤（法向平均、尖角补偿）在 mesh_layer_step.extrude_single_layer
 中实现；将层状棱柱堆栈转换为四面体在 mesh_prism_to_tet 中实现；
-真 3D 顶点节点的静态挤出厚度上限在 mesh_extrusion_vertex_limit.py
-中实现（V2.0 专项攻关记录 cube_demo BL 质量campaign 第十六轮：替换
-了之前住在 mesh_extrusion_attenuation.py 里的两个连续衰减启发式，
-见 extrude_layers 自身改动处的注释了解为什么）——均从本文件拆分以
-满足项目 450 行/文件的规范。
+真 3D 顶点节点的静态挤出厚度上限在 mesh_extrusion_vertex_limit.py 中实现（为什么是静态上限而不是连续衰减，
+见 extrude_layers 里的注释）。
 """
 
 import numpy as np
@@ -169,8 +166,8 @@ def extrude_layers(
 
     # 分配剩余预算用于厚度限制——外部传入的 thickness_limit（地面间隙等）
     # 与本函数自己算出的 vertex_corner_limit（真顶点组合半径）用
-    # np.minimum 组合，两者中更保守的获胜，与 mesh_background_merge_
-    # with_bl.py 组合 compute_local_thickness_limit 结果时的既有模式一致。
+    # np.minimum 组合，两者中更保守的获胜，与 mesh_background_merge_with_bl.py 组合
+    # compute_local_thickness_limit 结果时的既有模式一致。
     remaining_budget = (
         thickness_limit.copy() if thickness_limit is not None
         else np.full(len(surface_nodes), np.inf, dtype=np.float64)

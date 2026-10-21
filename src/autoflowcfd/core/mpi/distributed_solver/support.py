@@ -81,9 +81,8 @@ class _DistributedSupportMixin:
         self.state.Q[:n_local] = conserved_to_primitive(U[..., :5])
 
     def _interpolate_to_new_order(self, target_p: int) -> None:
-        """将解从当前阶数插值到新的阶数（分布式 Order Continuation
-        核心逻辑，2026-09-02，见 core/mpi/distributed_order_
-        continuation.py 模块文档）——按本实例的构造方式分派到对应的
+        """将解从当前阶数插值到新的阶数（分布式 Order Continuation 核心逻辑，见
+        core/mpi/distributed_order_continuation/ 包文档）——按本实例的构造方式分派到对应的
         重建函数：'传统模式'（`self._is_fully_distributed is False`，
         每个 rank 持有完整全局网格）复用同一进程内的 `cell_partition`
         重建 partition/dist_flat_face；'完全分布式加载'

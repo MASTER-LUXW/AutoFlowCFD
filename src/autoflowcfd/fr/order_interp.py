@@ -2,7 +2,7 @@
 
 ## 修的是什么（2026-09-20 发现的真实生产缺陷）
 
-`core/utils/order_continuation.py::interpolate_to_new_order` 一直用
+`core/utils/order_continuation/interp.py::interpolate_to_new_order` 一直用
 **一维 Gauss 点的张量积 Lagrange 插值**（`_build_linear_interp_matrix_3d`）
 把解从 P_old 延拓到 P_new。那个矩阵的前提是"解点是 `[-1,1]^3` 上的张量积
 Gauss 点"——只有**坍缩棱柱基**满足。

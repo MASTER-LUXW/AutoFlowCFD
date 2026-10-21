@@ -10,13 +10,13 @@ AutoFlowCFD V2.0 - DDES/IDDES 混合湍流模型 (T-04)
 3. 与 SST k-omega 模型的集成：长度尺度在 SST 源项求值里按当前状态算出（`DESLengthScale`）
 
 
-## 文件分工(2026-09-24 拆包, 原 657 行)
+## 文件分工
 
     grid_scale.py        DES 网格尺度(h_max / h_wn)
     ddes.py              DDES 模型
     iddes.py             IDDES 模型(Shur et al. 2008)
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .grid_scale import (  # noqa: F401

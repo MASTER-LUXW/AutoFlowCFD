@@ -1,19 +1,9 @@
 """
-AutoFlowCFD V2.0 - FR 边界幽灵态构造 (Tier-0 重建版, 对应 BD-01)
+AutoFlowCFD V2.0 - FR 边界幽灵态构造（BD-01）
 
-规范文档（3_系统实现方式-算法流程.md §2.2）明确要求边界处理"构造幽灵状态
-(Ghost State) 参与黎曼求解"，而不是简单罚项。本模块给出与
-core/fr_residual_inviscid.py 的 Riemann 求解流程直接对接的幽灵态构造
-函数——所有函数统一在**原始变量** Q=(rho,u,v,w,p) 上工作（不是守恒变量），
-输出的幽灵态直接喂给 AUSM+up 黎曼求解器，取代旧版本 fr_solver.py 里从未
-被调用的 penalty-only FRWeakBC 路径（BD-01 此前完全没有接入求解主循环，
-是本次评审报告里最高优先级的问题之一）。
-
-修复记录：boundary/fr_weak_bc.py 的 compute_wall_bc_flux 在同一个函数内
-对 u_int 的含义前后不一致——无滑移分支把 u_int[:,1:4] 当速度直接置零，
-但紧接着的滑移分支却用 u_int[:,1:4]/u_int[:,0:1] 当动量除密度处理——
-两个分支对"u_int 是原始变量还是守恒变量"的假设自相矛盾。本模块统一在
-原始变量上实现，不存在这个问题。
+边界处理按规范（3_系统实现方式-算法流程.md §2.2）"构造幽灵状态 (Ghost State) 参与黎曼求解"，而不是罚项。
+本模块的幽灵态构造函数与 `core/fr_residual/inviscid.py` 的界面 Riemann 求解直接对接：所有函数统一在
+**原始变量** Q=(rho,u,v,w,p) 上工作（不是守恒变量），输出的幽灵态直接喂给 AUSM+up 黎曼求解器。
 """
 
 from typing import Optional
@@ -42,7 +32,7 @@ def wall_ghost_state(
 
     Note（#9 修复，2026-08-28）：is_no_slip=False 这条分支被两种不同物理
     场景复用——真正的无粘/对称 SLIP_WALL 边界，以及 WMLES 激活时的粘性
-    WALL 边界（见 fr_solver/boundary.py::build_boundary_ghost_provider）。
+    WALL 边界（见 fr_solver/boundary/ghost.py::build_boundary_ghost_provider）。
     后一种场景下，"切向速度保持不变"不是在建模真实滑移，而是刻意让这个
     面对 BR1/LDG 粘性通量的切向梯度贡献退化为零（ghost 切向速度与内部值
     无跳跃），使壁面模型另外算出的 tau_w

@@ -325,7 +325,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           cross_offset, cross_data, cross_col):
     """一个颜色组内全部面的块贡献：对角部分累加到 `K_prism` / `K_tet`（float32）；
     `cross_offset` 非空（形状 `(n_faces, 2, 3)`）时耦合块写入 `cross_data`
-    （扁平 float32，槽位偏移见 `assemble.py::_cross_layout`），列单元写入 `cross_col`。
+    （扁平 float32，槽位偏移见 `coupling.py::cross_layout`），列单元写入 `cross_col`。
     """
     want_cross = cross_offset.shape[0] > 0
     for fi in prange(face_indices.shape[0]):

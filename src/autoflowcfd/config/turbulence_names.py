@@ -1,8 +1,5 @@
-"""AutoFlowCFD V2.0 - 湍流模型的配置层枚举与求解器 / CLI 模型名之间的唯一映射。
-
-此前 CLI（`cli/solve/physical_constants.py`）、`api/helpers.py`、`api_config.py`（稳态与瞬态各一份）
-各写一份映射，稳态那份还把未知名字静默换成 SST。
-"""
+"""AutoFlowCFD V2.0 - 湍流模型的配置层枚举与求解器 / CLI 模型名之间的唯一映射（CLI、API、YAML 加载共用；
+未知名字报错）。"""
 
 from .solver_config import TurbulenceModel
 

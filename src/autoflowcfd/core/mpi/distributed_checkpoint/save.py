@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 分布式落盘：checkpoint 与最终结果
-
-从 `src/autoflowcfd/core/mpi/distributed_checkpoint.py`(原 515 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 分布式落盘：checkpoint 与最终结果"""
 
 import os
 
@@ -48,12 +45,9 @@ def distributed_save_checkpoint(
         iteration: 当前迭代数
         input_file: 原始网格文件路径
         order: checkpoint 保存那一刻 `U_sps` 字段实际对应的阶数——
-            Order Continuation 接入分布式路径后（2026-09-02），调用方
-            必须传 `solver.current_order`（不是固定的目标阶数），否则
-            爬坡阶段中途存的 checkpoint 会出现"metadata 记的阶数与
-            `U_sps` 实际形状不符"的错配，见单机 `solve_checkpoint_io.py::
-            write_checkpoint` 同名参数文档、`rebuild_distributed_solver_
-            from_checkpoint` 对应的恢复逻辑。
+            调用方必须传 `solver.current_order`（不是固定的目标阶数），否则 Order Continuation 爬坡阶段中途
+            存的 checkpoint 会出现"metadata 记的阶数与 `U_sps` 实际形状不符"的错配，见单机
+            `cli/solve/checkpoint_io/write.py::write_checkpoint` 同名参数文档。
         turbulence_model: 湍流模型名
         backend: 后端名
         target_order: Order Continuation 的最终目标阶数

@@ -1,23 +1,18 @@
 """AutoFlowCFD V2.0 - 棱柱原生基（三角形 PKD/Dubiner ⊗ 直线 Legendre）。
 
-## 这个子包在解决什么
+## 为什么棱柱用原生基而不是坍缩坐标（Duffy）基
 
-棱柱长期使用**坍缩坐标基**（`fr/collapsed_basis.py::prism_modal_basis_and_grad`，
-在 (a,b) 截面上做 Duffy 三角形坍缩）。实测三条后果：
+坍缩坐标基在 (a,b) 截面上做 Duffy 三角形坍缩、节点取张量积 Gauss-Legendre 方格，实测三条后果：
 
-1. 微分矩阵元素量级随阶数爆炸（`max|D_3d_prism|` P1 2.05 -> P3 560.1）；
-2. 自由流保持性只有 ~1e-9，且严格等于 `eps * max|D| / det(J)` —— 舍入被
-   算子量级放大，**不降低 `max|D|` 就改不掉**；
-3. **P2/P3 离散不稳定**：Couette 的精确解是 `y` 的线性函数、在各阶空间里
-   都精确可表示，从精确解出发跑 1600 步后 P1 保持到 6.62e-9、P2 偏离
-   1.78e-2、P3 第 5 步发散。不是分辨率问题，是离散本身。
+1. 微分矩阵元素量级随阶数爆炸（`max|D|` P1 2.049 -> P2 22.51 -> P3 560.1，每阶约 x25；原生四面体对照
+   0.500 -> 2.000 -> 4.045）——坍缩把节点挤向退化边；
+2. 自由流保持性只有 ~1e-9，且严格等于 `eps * max|D| / det(J)`（P1/P2/P3 比值 2.9e-15 / 3.7e-16 / 1.9e-16，
+   即机器 epsilon）——舍入被算子量级放大，不降低 `max|D|` 就改不掉；
+3. **伪横流与 P2/P3 离散不稳定**：只有被三角化的两个参考轴方向会长出非物理横流速度（把展向换成挤出轴后
+   保持机器零，差 11 个数量级），P1 上饱和、P2 上无界增长；Couette 精确解出发 1600 步后 P1 保持到
+   6.62e-9、P2 偏离 1.78e-2、P3 第 5 步发散。
 
-四面体当年有完全同类的病理，解法是整套换成 native PKD 基。本子包是棱柱侧
-的同一条路。
-
-## 为什么只剩原生基（坍缩棱柱基 2026-09-20 退出默认、2026-09-23 删除）
-
-删除前的负控制实测（代码删了，证据仍然有效）：
+两条基的负控制对照（坍缩基已删除，证据仍然有效）：
 
     判据                              坍缩        原生
     真实网格 179,237 单元 P1+LES      第148步 nan  246步单调降2.5x
@@ -31,10 +26,12 @@
                                       33928.8      7.7
     粘性算子动量块 max Re             +5.80e+00   +0.00e+00
 
-坍缩档还与内部面 IP 罚项数学上不兼容：罚项须经 DG 提升 `M^-1 ∮`，原生路径用 `lift_native` 满足，坍缩路径的界面项
-走 1D Radau/VCJH 修正函数，同一个罚项把动量块从严格耗散变成 10 个增长模态。2026-10-18 起迁移期开关
-`AFCFD_PRISM_BASIS`（`mode.py`）一并删除；checkpoint 仍记录棱柱基并拒绝非原生基写的文件
-（`core/utils/checkpoint_load.py::_check_prism_basis`）。
+坍缩基还与内部面 IP 罚项数学上不兼容：罚项须经 DG 提升 `M^-1 ∮`（原生路径的 `lift_native`），坍缩路径的界面
+项走 1D Radau/VCJH 修正函数，同一个罚项把动量块从严格耗散变成 10 个增长模态。checkpoint 记录棱柱基并拒绝
+非原生基写的文件（`core/utils/checkpoint_load.py::_check_prism_basis`）。
+
+棱柱 = 三角形 ⊗ 直线：三角形用原生 PKD 基 + Warp & Blend 节点（`triangle_basis.py`），挤出方向保持
+Legendre + Gauss-Legendre（那个方向本来就是张量积，直壁挤出下物理 `y` 是 `t` 的精确线性函数）。
 
 ## 文件划分（按功能逻辑）
 
@@ -45,13 +42,12 @@
                        立方体面对应表
     interp_numba.py    numba 侧的"目标点 -> 插值矩阵"（残差 kernel 消费）
 
-## 与坍缩基的两条可复用的支点事实（实测）
+## 面点定位复用立方体坐标映射（实测支点）
 
-1. **两条基的几何映射逐位恒等**：`map_prism_to_physical(a,b,c)` 与
-   `map_native_prism_to_physical(cube_to_tri_rs(a,b), c)` 在 2000 个随机点上
-   `max|diff|` **恰好 0.0**。所以面点定位层（含 numba Newton 预计算）不必
-   重写，只需要把定位结果换算过去、再换成原生 Vandermonde。
-2. `det_collapsed = det_native * (1-b)/2`（吻合 2.7e-15）。
+`map_prism_to_physical(a,b,c)`（立方体坐标）与 `map_native_prism_to_physical(cube_to_tri_rs(a,b), c)` 在 2000 个
+随机点上 `max|diff|` **恰好 0.0**：面点定位层（含 numba Newton 预计算）在立方体坐标里做，定位结果直接换算成
+原生坐标、再用原生 Vandermonde（`interp_numba.py`）。两者的行列式满足 `det_cube = det_native * (1-b)/2`
+（吻合 2.7e-15）。
 """
 
 from .basis import (

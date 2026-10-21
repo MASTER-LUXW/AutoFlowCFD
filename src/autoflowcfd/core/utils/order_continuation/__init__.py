@@ -4,7 +4,7 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
 本模块包含 Order Continuation 方法所需的插值工具。
 
 
-## 文件分工(2026-09-24 拆包, 原 926 行)
+## 文件分工
 
     interp.py            阶数切换时解场/湍流场的插值（延拓）算子
     turbulence_reset.py  续算的湍流场被上界大面积截断时拒绝续算（或按 --reset-turbulence 重置），全部后端共用
@@ -13,7 +13,7 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
     checkpoint_state.py  随 checkpoint 持久化的阶段状态（单机/分布式写入与恢复共用）
     initial_field.py     从 checkpoint 场起步（--init-from）：低阶 checkpoint 精确延拓到目标阶数、不做阶数爬坡
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .interp import (  # noqa: F401

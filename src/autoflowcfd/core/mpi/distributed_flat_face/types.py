@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 分布式扁平面几何的数据类与紧凑 src1 展开
-
-从 `src/autoflowcfd/core/mpi/distributed_flat_face.py`(原 552 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 分布式扁平面几何的数据类与紧凑 src1 展开"""
 
 import numpy as np
 
@@ -62,13 +59,13 @@ class DistributedFlatFaceGeometry:
             halo 交换直接产出的 U_extended）还是原生排列，必须先用
             `perm` 重排，残差算完后再用 `inv_perm` 换回原生排列，才能
             正确对齐 owner_cell_local 等索引，见
-            core/gpu/gpu_distributed.py 的消费方式。
+            core/gpu/distributed/gpu_distributed/ 的消费方式。
         inv_perm: (n_local+n_halo,) int64，perm 的逆置换：
             `array_native = array_permuted[inv_perm]`。
         compact_global_ids: (n_local+n_halo,) int64，"棱柱在前"扩展索引
             空间每个位置对应的全局单元编号——供调用方从全局网格几何
             （jacobians/cell_volumes 等）里按同一顺序抽取出 local+halo
-            子集，见 core/gpu/gpu_distributed.py 里 mesh_data 的构造。
+            子集，见 core/gpu/distributed/gpu_distributed/ 里 mesh_data 的构造。
     """
     base_flat: FlatFaceGeometry
     partition: DistributedPartition

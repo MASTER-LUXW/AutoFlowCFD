@@ -5,9 +5,8 @@
 挤出 + tetgen/gmsh 核心填充），而是直接提供别的工具已经生成好的体网格，
 外加它对应的原始面 .nas 文件（之所以需要面网格，是因为体网格本身通常
 不带任何边界条件信息——见 nas_parser_volume 自己的文档字符串）。
-import_external_volume_mesh 完成这三步：质量检测、尽力修复、以及（通过
-其返回值，每个 solve_commands.py 入口都已经知道如何把它当作
-VolumeMeshData 消费）提交给求解器。
+import_external_volume_mesh 完成这三步：质量检测、尽力修复、以及返回求解命令（`cli/solve/mesh_loader.py`）
+直接消费的 VolumeMeshData。
 
 这里的修复范围比本项目自己生成流程的完整 阶段 A/B' 窄得多：只应用
 阶段 A（质量门控的拉普拉斯平滑，mesh_repair.smooth_bad_cells），而且
@@ -119,10 +118,8 @@ def import_external_volume_mesh(
 
     Returns:
         (volume_mesh, quality_report)——最终网格（若修复运行且
-        有改动则已修复）及其最终质量报告。volume_mesh 是普通
-        VolumeMeshData，与每个 solve_commands.py 入口点已接受的
-        类型相同（例如通过 pickled 缓存文件——见
-        cli/solve/commands.py 自身的 .pkl 处理）。
+        有改动则已修复）及其最终质量报告。volume_mesh 是普通 VolumeMeshData，与求解命令读 .pkl 得到的类型相同
+        （`cli/solve/mesh_loader.py`）。
     """
     from ...nas_io.nas_parser_volume import parse_volume_mesh_nas
     from ...nas_io.parser_core import NASParser

@@ -1,26 +1,11 @@
 """
-AutoFlowCFD - 高阶 FR 网格处理器 (V2.0 Foundation, 修复版)
+AutoFlowCFD - 高阶 FR 网格（HighOrderMesh）。
 
-本模块定义 HighOrderMesh 类，管理 Solution Points (SPs)、单元-面连接关系
-以及相关的几何算子（Jacobian、GCL 验证等）。
-
-核心功能：
-1. 从 VolumeMeshData（棱柱+四面体混合体网格）构建高阶 SPs 场
-2. 曲边映射（委托给 curved_mapping.py 中已数值验证的 Duffy 坍缩坐标实现）
-3. 真实单元-面连接关系（委托给 face_connectivity.py，供 FR 残差组装的
-   界面通量/校正项使用，取代旧版本中「全场平均态+硬编码法向量」的伪耦合）
-4. 几何守恒律 (GCL) 验证（Kopriva 度量恒等式，而非旧版本错误的
-   det(J) 均匀性判据——对坍缩坐标单元而言 det(J) 本就应当非均匀）
-
-V2.0 修复记录（专家评审 Tier-0 #1,#2）：
-- 原 _map_tet_to_physical / _map_prism_to_physical 的"重心坐标"形函数
-  不满足单位分解（数值验证：四面体权重和在非零参数点处等于0.70而非1；
-  棱柱形函数和恒为0.5），已移除，改用 curved_mapping.py 中基于 Duffy
-  坍缩坐标、解析保证单位分解的正确实现。
-- 原 compute_jacobian 抛出 ValueError（检测到负/零 Jacobian，即真正的
-  网格畸变）后被 load_from_volume_mesh 静默捕获并替换为硬编码占位值
-  （prism: 1e-6, tet: abs(线性体积)），掩盖网格畸变而非阻止其传播。
-  已移除该 fallback：畸变单元现在会中止加载并报告具体单元 ID。
+管理解点（SPs）、单元-面连接关系以及相关的几何量：
+1. 从 VolumeMeshData（棱柱 + 四面体混合体网格）构建原生基解点与解析精确的度量（四面体常数 Jacobian、
+   棱柱 `fr/native_prism/basis.py::native_prism_exact_jacobian`）；负 / 零 Jacobian 中止加载并报告单元 ID
+2. 单元-面连接关系（`grid/connectivity/face_connectivity.py`，供 FR 残差组装的界面通量使用）
+3. 几何守恒律（GCL）验证（Kopriva 度量恒等式，`gcl_check.py`）
 """
 
 from typing import Dict, Optional
@@ -43,20 +28,10 @@ _NATIVE_REF_TET_VOLUME = 4.0 / 3.0
 def _prism_sp_volume_weights(order: int, n_sps_per_cell: int) -> np.ndarray:
     """棱柱逐解点的参考体积求积权重，形状 `(n_sps_per_cell,)`。
 
-    两条棱柱基的解点布局与参考体积都不同，这里是唯一的分派点
-    （`get_cell_volume` 与 `get_all_cell_volumes` 共用它，不各写一份）：
-
-    * 坍缩档：解点就是 `[-1,1]^3` 上的张量积 Gauss 点，权重是一维权重的
-      张量积，和为 8；
-    * 原生档：解点是三角形 Warp&Blend ⊗ 挤出方向 Gauss 的
-      `(p+1)^2(p+2)/2` 个点，权重由
-      `fr/native_prism/quadrature.build_native_prism_sp_weights` 给出
-      （和为参考棱柱体积 4），**零填充槽位权重为 0**。
+    解点是三角形 Warp&Blend ⊗ 挤出方向 Gauss 的 `(p+1)^2(p+2)/2` 个点，权重由
+    `fr/native_prism/quadrature.build_native_prism_sp_weights` 给出（和为参考棱柱体积 4），**零填充槽位
+    权重为 0**。`get_cell_volume` 与 `get_all_cell_volumes` 共用这一份。
     """
-    # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。**曾经的真实缺陷**：
-    # 这里一度无条件用张量积 Gauss 权重（和为立方体体积 8），而原生参考
-    # 棱柱体积是 4 —— 单元体积因此算成 2 倍，而它被 CFL 网格尺度与 LES
-    # 滤波宽度消费，不是诊断层面的小事（2026-09-20 修复）。
     from autoflowcfd.fr.native_prism.quadrature import (
         build_native_prism_sp_weights,
     )
@@ -97,9 +72,8 @@ class HighOrderMesh:
         self.sps_coords: Optional[np.ndarray] = None
         self.jacobians: Optional[Dict[str, np.ndarray]] = None
         # 体积项去混叠（超过-积分，V2.0 二次评审 Tier 0 #2）用的
-        # 细网格几何：过积分阶数固定为 2*order（二次非线性去混叠的标准
-        # 经验法则，见 fr/collapsed_basis.py::build_overintegration_operators
-        # 文档），"det_jacs"/"inv_jacs" 形状与 self.jacobians 同构但按
+        # 细网格几何：过积分阶数见 `fr/overintegration_order.py`，"det_jacs"/"inv_jacs" 形状与
+        # self.jacobians 同构但按
         # n_sps_per_cell_fine 展开；order==0 时为 None（P0 走独立的有限
         # 体积残差路径，不需要）。
         self.jacobians_fine: Optional[Dict[str, np.ndarray]] = None
@@ -109,7 +83,7 @@ class HighOrderMesh:
         self.face_connectivity: Optional[FRFaceConnectivity] = None
         self.face_flux_points: Optional[list] = None
         # 每个单元自身连接的面中，与相邻单元自己方向的最大失配量
-        # 1-cos(夹角)，见 core/fr_troubled_cell.py::precompute_cell_face_misalignment；
+        # 1-cos(夹角)，见 core/fr_operators/troubled_cell.py::precompute_cell_face_misalignment；
         # 只在 load_from_volume_mesh(build_faces=True) 后才会被填充。
         self.cell_face_misalignment: Optional[np.ndarray] = None
         self.boundary_groups: Optional[Dict[str, np.ndarray]] = None
@@ -124,10 +98,9 @@ class HighOrderMesh:
 
         # 真实几何单元体积，网格加载时用可信的目标阶数几何算一次并固定
         # 下来（与当前活动阶数无关）——P0（顺序 Continuation 最低阶）的
-        # 有限体积残差路径（core/fr_residual_inviscid.py 的 n1d==1 分支）
-        # 需要它：坍缩坐标下单点 Jacobian 做 1 点求积不能准确给出单元
-        # 体积（同一奇异性问题，见 set_order 文档），必须用不依赖当前
-        # 阶数、已在目标阶数下验证准确的这份体积。
+        # 有限体积残差路径（core/fr_residual/inviscid_p0.py）
+        # 需要它：P0 只有 1 个解点，单点求积不能准确给出棱柱（双线性侧面时 det(J) 非常数）的体积，
+        # 必须用不依赖当前阶数的这份精确体积。
         self.cell_volumes: Optional[np.ndarray] = None
 
         # 顺序 Continuation（CL-02，P0->目标阶数平滑过渡）支持：SPs 坐标、
@@ -192,9 +165,7 @@ class HighOrderMesh:
         self.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
 
         # 用当前（目标）阶数的高阶 Gauss-Legendre 求积算一次真实体积并固定
-        # 下来——见 __init__ 里 cell_volumes 属性的文档：P0 阶段 1 点求积
-        # 不能准确积分坍缩坐标下变化剧烈的 det(J)，必须复用这份已在目标
-        # 阶数下验证过的体积，不能依赖当前活动阶数重新计算。
+        # 下来——见 __init__ 里 cell_volumes 属性的文档。
         self.cell_volumes = self.get_all_cell_volumes()
 
         logger.info(f"HighOrderMesh initialized: {self.n_cells} cells (all Jacobians verified positive)")
@@ -221,7 +192,7 @@ class HighOrderMesh:
             # build_face_flux_points 的 owner/neighbor 分组判据（按
             # face_connectivity.is_boundary 分流）生效之前就已经翻转好，
             # 否则周期面会被当成普通边界面处理（不会有跨单元插值），
-            # 见 grid/face_connectivity.py::apply_periodic_pairing_from_boundary_map
+            # 见 grid/connectivity/ 的 apply_periodic_pairing_from_boundary_map
             # 文档。
             boundary_map = getattr(volume_mesh_data, "boundaries", None)
             if boundary_map is not None and "PERIODIC" in getattr(boundary_map, "bc_types", {}).values():
@@ -296,14 +267,8 @@ class HighOrderMesh:
     def get_cell_volume(self, cell_id: int) -> float:
         """计算指定单元的体积（Jacobian 行列式在参考单元上的加权积分）。
 
-        使用 Gauss-Legendre 张量积求积权重做精确积分（∫∫∫ det(J) da db dc），
-        而不是旧版本"假设行列式在单元内近似常数"的简化平均——对坍缩坐标
-        映射而言 det(J) 本身就强烈非均匀，简单平均会引入明显误差。
-
-        四面体（native 单纯形基）不走这套张量积求积权重——理由见
-        `get_all_cell_volumes` 文档，这里用同一个常数 Jacobian*参考体积
-        的精确公式。棱柱的权重按当前棱柱基分派，见
-        `_prism_sp_volume_weights`。
+        四面体：常数 Jacobian × 参考四面体体积 4/3（精确）；棱柱：解点上 det(J) 乘原生求积权重
+        （`_prism_sp_volume_weights`，对 det(J) 的多项式次数精确）。
         """
         if self.jacobians is None or cell_id >= self.n_cells:
             return 0.0
@@ -318,27 +283,12 @@ class HighOrderMesh:
         return float(np.sum(det_jacs * weights_3d))
 
     def get_all_cell_volumes(self) -> np.ndarray:
-        """向量化版本的 get_cell_volume，一次性算出所有单元的精确体积
-        （Gauss-Legendre 张量积求积，而不是"det(J)均值*8"的简化近似——
-        后者被 core/fr_solver.py 的 CFL/网格尺度估计沿用了很久，已在此
-        统一替换为正确的加权积分）。
+        """向量化版本的 get_cell_volume，一次性算出所有单元的精确体积。
 
-        四面体（native 单纯形基）部分**不能**沿用这套张量积求积权重
-        （Part8 文档"三、本次会话实现范围"新发现的一个真实坑）：
-        `weights_3d` 的和是 8（[-1,1]^3 立方体体积），坍缩坐标下
-        `det_jacs` 逐点变化、乘积分本来就是把"立方体计算域"积分变换到
-        "物理四面体"，这个 8 已经隐含在坍缩映射的度量变化里；但 native
-        直边四面体的 `det_jacs` 是**常数**（不依赖计算域参数化），直接
-        乘 `weights_3d` 会把体积算大 8/(4/3)=6 倍（4/3 是标准参考四面体
-        `(-1,-1,-1),(1,-1,-1),(-1,1,-1),(-1,-1,1)` 的体积，见
-        `native_tet/basis.py::compute_native_tet_jacobian` 文档）。
-        native 四面体单元直接用 `det_j*4/3`，不需要任何求积（常数
-        Jacobian 乘参考体积就是精确物理体积，见该函数文档）。
-
-        **棱柱的权重按棱柱基分派（2026-09-20）**：原生棱柱基的解点不是
-        张量积 Gauss 点、参考棱柱体积是 4 而不是 8，沿用张量积权重会把
-        棱柱体积算成 2 倍（实测 1.0 vs 真值 0.5）。见
-        `_prism_sp_volume_weights` 与 `fr/native_prism/quadrature.py`。
+        四面体直接用 `det_j*4/3`（直边四面体的 det(J) 是常数，4/3 是标准参考四面体
+        `(-1,-1,-1),(1,-1,-1),(-1,1,-1),(-1,-1,1)` 的体积，见 `native_tet/basis.py::compute_native_tet_jacobian`）；
+        棱柱用原生求积权重（和为参考棱柱体积 4，见 `_prism_sp_volume_weights` 与 `fr/native_prism/quadrature.py`）。
+        CFL / 网格尺度、IP 罚项长度与 LES 滤波宽度都消费这份体积（不能用 `mean(det_jacs)` 代替）。
 
         Returns:
             volumes: 形状 (n_cells,)

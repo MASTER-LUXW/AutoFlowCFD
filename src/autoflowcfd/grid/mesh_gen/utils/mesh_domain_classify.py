@@ -33,12 +33,10 @@ if TYPE_CHECKING:
 # 这些边界类型永远是开放流动边界或无摩擦（滑移）壁面，因此无论几何形状
 # 如何，它们的面都不会被挤出边界层：自由滑移/对称面上不存在需要解析的
 # 近壁速度梯度，真正的开放边界上更是完全没有壁面。SLIP_WALL 覆盖例如
-# "tunnel"/"farfield" 命名的边界（见 nas_parser_boundary.py 的关键词表和
-# bc_handler.py 的 _classify）——此前这里遗漏了它，导致隧道壁（在关键词表
-# 修复之前会落到默认的 'WALL' bc_type）仍可能被挤出边界层，而对于横跨
-# 整个计算域的壁面，这几乎立刻就会坍缩（1-2 层内就撞到对面的壁面/车身）。
+# "tunnel" 命名的边界（关键词表见 grid/nas_io/boundary_types.py）——横跨整个计算域的洞壁若被挤出边界层，
+# 1-2 层内就会撞到对面的壁面 / 车身。
 # PERIODIC 同理——周期面是一个数学配对构造（见
-# grid/face_connectivity.py::pair_periodic_boundary_faces），不是物理壁面，
+# grid/connectivity/ 的 pair_periodic_boundary_faces），不是物理壁面，
 # 那里没有边界层可挤出。
 NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL', 'PERIODIC'}
 

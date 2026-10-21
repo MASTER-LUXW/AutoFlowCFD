@@ -353,7 +353,7 @@ def normals_and_weights_from_adj_rows(adj_row, weights_1d, owner_side, owner_cod
     # native 四面体（owner_code>=6）：_native_tet_adj_row_batched 已经是
     # 按 outward 定向好的行，这里的 side 因子必须视同 +1，不能用调用方
     # 传入的 owner_side 占位值（对 excluded_vertex 复用的 axis 槽位没有
-    # +1/-1 语义，见 face_flux_points.py::CUBE_FACE_AXIS_SIDE 文档）。
+    # +1/-1 语义，见 face_flux_points/geometry.py::CUBE_FACE_AXIS_SIDE 文档）。
     if owner_code is not None:
         side_factor = np.where(owner_code >= 6, 1.0, owner_side)
     else:

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 从完全分布式包构造多 GPU solver
-
-从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_fully_distributed.py`(原 557 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 从完全分布式包构造多 GPU solver"""
 
 import types
 

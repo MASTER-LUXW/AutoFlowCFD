@@ -25,13 +25,13 @@ AutoFlowCFD V2.0 - 网格分区（METIS 接口）
     不需要 halo 交换）。
 
 
-## 文件分工(2026-09-24 拆包, 原 612 行)
+## 文件分工
 
     types.py             分区结果的数据结构
     build.py             邻接图构造与分区
     halo.py              面通量点跨引用所需的 halo 扩展
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .types import (  # noqa: F401

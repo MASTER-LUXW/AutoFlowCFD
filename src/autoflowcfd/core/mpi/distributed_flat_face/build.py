@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 从局部网格 + 分区构造分布式扁平面几何
-
-从 `src/autoflowcfd/core/mpi/distributed_flat_face.py`(原 552 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 从局部网格 + 分区构造分布式扁平面几何"""
 
 import numpy as np
 
@@ -31,7 +28,7 @@ def build_distributed_flat_face(
             提供时会在提取本 rank 面之前，先检测 FR Flux Point 多源
             交叉插值（src0/src1）依赖的单元是否已被基础 1-ring halo
             覆盖，缺失的自动扩展进 halo（见
-            partition.py::extend_halo_for_flux_point_cross_references
+            partition/halo.py::extend_halo_for_flux_point_cross_references
             的完整文档）。不提供时（例如调用方没有 cell_partition 可用）
             仍会在缺失时于下方重映射阶段报错，而不是静默产生 P>=1
             阶数下读错邻居数据这类比崩溃更隐蔽的错误——第四次评审
@@ -85,13 +82,12 @@ def build_distributed_flat_face(
     # halo棱柱、halo四面体），任何单一阈值切片都无法正确复原。
     #
     # 修复：扩展索引空间改按"棱柱在前、四面体在后"重新排列（与全局编号
-    # 约定一致），而不是"local在前、halo在后"。halo 交换（gpu_halo_
-    # exchange.py/halo.py）自身的 send/recv 协议仍然使用 partition 对象
+    # 约定一致），而不是"local在前、halo在后"。halo 交换（`core/gpu/distributed/gpu_halo_exchange.py`、
+    # `core/mpi/halo.py`）自身的 send/recv 协议仍然使用 partition 对象
     # 自己的 local_cells/halo_cells 原生顺序（那是更基础、被多处依赖的
     # 协议，本次不改动）——两个排列不一致是有意为之：本文件构造的
     # local+halo 扩展索引只在"调用残差计算函数之前/之后各做一次显式
-    # 重排"这个局部范围内使用（见 gpu_distributed.py::compute_
-    # inviscid_residual_gpu 对 perm/inv_perm 的消费），不影响 halo
+    # 重排"这个局部范围内使用（见 `core/gpu/distributed/gpu_distributed/` 对 perm/inv_perm 的消费），不影响 halo
     # 交换协议本身。
     halo_cells = partition.halo_cells
     n_halo = len(halo_cells)
@@ -293,9 +289,8 @@ def build_distributed_flat_face(
         # 常量算子（与其余面算子同一个"可预计算一次、全网格
         # 同阶数单元共享"的性质，见 native_tet.basis.py 模块文档），
         # 不是逐面数据，原样透传（不切片）本来就是唯一正确的做法。CPU
-        # 端残差 kernel（`inviscid_kernel.py`/`viscous_flux_kernel.py`）
-        # 本身的 native/collapsed 分派逻辑与调用方是否处于 MPI 分区
-        # 场景无关，两者天然独立。
+        # 端残差 kernel（`inviscid_kernel.py`/`viscous_flux_kernel.py`）按面算子索引取表，与调用方是否处于
+        # MPI 分区场景无关。
         owner_cube_face=global_flat.owner_cube_face[local_face_indices],
         neighbor_cube_face=global_flat.neighbor_cube_face[local_face_indices],
         owner_face_op=global_flat.owner_face_op[local_face_indices],

@@ -1,29 +1,19 @@
 """
-AutoFlowCFD V2.0 - 分布式 Order Continuation（2026-09-02）
+AutoFlowCFD V2.0 - 分布式 Order Continuation。
 
-补齐用户明确要求（"除 cube_demo 网格质量门、VTK 高阶导出外其余都优化"、
-"此前就是明确的范围边界"这种表述绝对不允许出现）后排查确认的最后一项
-真实缺口：单机 `FRSolver.solve()` 在目标阶数 >= 2 时**自动**执行 Order
-Continuation（P0 -> P1 -> ... -> 目标阶数逐步升阶，见
-`core/utils/order_continuation.py::run_order_continuation`），但三条
-分布式路径（CPU MPI"传统模式"、CPU"完全分布式加载"、多 GPU 分布式）
-此前完全没有这个机制——`solve_steady_command.py` 甚至显式 fail-fast
-拒绝 `--phase-max-iter`/`--residual-drop-threshold` 搭配这些后端
-（"求解器没有 Order Continuation 机制"），意味着 `solve steady --order 2
---n-ranks 4`（或 `--multi-gpu`）此前直接从均匀自由流场在目标阶数
-（P2/P3）上开始求解——这正是 Order Continuation 本来要规避的高风险
-数值起步方式（见 order_continuation.py 模块文档"resume/P0 重置"一节
-的历史教训）。
+三条分布式路径（CPU MPI"传统模式"、CPU"完全分布式加载"、多 GPU 分布式）与单机一样在目标阶数 >= 2 时自动
+执行 Order Continuation（P0 -> P1 -> ... -> 目标阶数逐步升阶，迭代循环是同一份
+`core/utils/order_continuation/run.py::run_order_continuation`）。
 
-架构核心难点（此前如实汇报未完成的原因，本次真正解决）：
+架构难点：架构核心难点（此前如实汇报未完成的原因，本次真正解决）：
 `DistributedFRSolver.partition`/`.dist_flat_face`（`DistributedFlatFace
 Geometry`）都是**按阶数固化**的对象——阶数一变，`n_sps`/FR Flux Point
 多源交叉插值依赖关系都变了，必须整体重建，不能像单机 `HighOrderMesh.
 set_order` 那样只换个缓存条目。三条后端的重建成本各不相同：
 
 - **CPU MPI"传统模式"**（每个 rank 独立持有完整全局网格）：`mesh.
-  face_connectivity`（拓扑）与阶数无关（见 `high_order_mesh_order.py::
-  set_order` 文档——只有 `face_flux_points` 随阶数重建），`cell_
+  face_connectivity`（拓扑）与阶数无关（见 `grid/high_order/high_order_mesh_order.py` 的
+  set_order 文档——只有 `face_flux_points` 随阶数重建），`cell_
   partition`（每个 cell 属于哪个 rank）同样是纯拓扑量、阶数无关——
   只需要用同一个 `cell_partition` 重新调用 `build_distributed_
   partition`/`build_distributed_flat_face`（**全新对象**，不是原地
@@ -32,8 +22,8 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
   复用"一节），不需要任何新的 MPI 通信。
 
 - **多 GPU 分布式**：`MultiGPUDistributedSolver` 同样在"传统模式"下
-  持有完整全局 `mesh` + `cell_partition`（见 `gpu_distributed.py::
-  __init__`），重建逻辑与 CPU 完全对称，唯一区别是重建后的紧凑几何量
+  持有完整全局 `mesh` + `cell_partition`（见 `core/gpu/distributed/gpu_distributed/`），重建逻辑与 CPU
+  完全对称，唯一区别是重建后的紧凑几何量
   需要重新上传到 GPU（对应模块的 `_upload_geometry_to_gpu`/等价逻辑）。
 
 - **CPU"完全分布式加载"**：本 rank 从未持有完整全局网格（内存优化的
@@ -41,7 +31,7 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
   运行时协议（`redistribute_fully_distributed_for_new_order`），root
   端需要在初次分发之后继续持有 `mesh`/`ops`/`cell_partition`/
   `face_connectivity`/`boundary_ghost_provider_global` 等（见
-  `distributed_mesh_loader.py::distributed_mesh_load_v2` 的
+  `core/mpi/distributed_mesh_loader/fully_distributed.py::distributed_mesh_load_v2` 的
   `root_context` 返回值），非 root rank 参与对应的 Recv 一侧。
 
 迭代循环与单机后端是同一份（`core/utils/order_continuation/run.py::run_order_continuation`），只是阶数切换时调用各自的
@@ -51,17 +41,14 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 分派到本模块对应的重建函数）。
 
 
-## 文件分工(2026-09-24 拆包, 原 640 行)
+## 文件分工
 
     rebuild.py           阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
 from .rebuild import cpu_traditional_interpolate_to_new_order  # noqa: F401
-# resume 钳制检测是全部后端共用的**唯一实现**，住在后端中立的
-# `core/utils/order_continuation`（2026-09-24 合并：此前单机内联一份、
-# 这里再写一份）。re-export 让既有导入一字不改。
+# resume 钳制检测是全部后端共用的唯一实现（`core/utils/order_continuation`）。
 from autoflowcfd.core.utils.order_continuation import (  # noqa: F401
     check_resumed_turbulence,
 )

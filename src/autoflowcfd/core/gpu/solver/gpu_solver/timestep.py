@@ -109,7 +109,7 @@ class _GPUSolverTimeStepMixin:
         # 影响；这里做了 `min(axis=1)` 把它归约成逐单元一个标量，冻结
         # 槽位就真的参与了竞争。
         # 具体污染路径：det_jacs/adj_j 对直边 native 四面体是**每单元一个
-        # 常数**（见 high_order_mesh_order.py::compute_native_tet_jacobians，
+        # 常数**（见 grid/high_order/order_jacobians.py::compute_native_tet_jacobians，
         # 真实行与填充行同值），所以 dt_geometric 不受影响；受影响的是
         # 逐 SP 的波速 (|u|+a) 与 rho/mu_eff——填充槽位给的是初始条件的值。
         # min 取的是"最大波速/最大 mu_eff"那一侧，因此典型来流初始化下

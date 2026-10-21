@@ -1,22 +1,6 @@
 """AutoFlowCFD V2.0 - 棱柱原生基：三角形 PKD/Dubiner ⊗ 直线 Legendre。
 
-## 为什么需要它
-
-棱柱至今用**坍缩坐标基**（`collapsed_basis.py::prism_modal_basis_and_grad`：
-在 (a,b) 截面上做 Duffy 三角形坍缩、节点取张量积 Gauss-Legendre 方格）。
-实测三条后果，完整数据见 `native_triangle_basis.py` 模块文档：
-
-  1. 微分矩阵元素量级随阶数爆炸（`max|D_3d_prism|` P1 2.05 -> P3 560.1，
-     每阶约 x25；native 四面体对照 0.50 -> 4.05）；
-  2. 自由流保持性只有 ~1e-9，且实测严格等于 `eps * max|D| / det(J)`
-     —— 是舍入被算子量级放大，**不降低 max|D| 就改不掉**；
-  3. **伪横流**：只有被三角化的两个参考轴方向会长出非物理横流速度
-     （把展向换成挤出轴后保持机器零，差 11 个数量级），它在 P1 上饱和、
-     在 P2 上无界增长 —— 1152 单元干净结构化棱柱网格上 P2 第 75 步发散，
-     这与真实网格 plate_demo 363k 的 P2 第 68 步发散是同一特征。
-
-四面体当年有完全同类的病理，解法就是整套换成 native PKD 基。本模块是
-棱柱侧的同一条路。
+选型依据（与坍缩坐标基的对照实测）见包文档 `fr/native_prism/__init__.py`。
 
 ## 构造
 
@@ -26,14 +10,10 @@
     模态：三角形受限 PKD 模态 {i+j<=order} ⊗ Legendre {k<=order}
     基：  phi_{ijk}(r,s,t) = psi_{ij}(r,s) * P_k^{0,0}(t)
 
-自由度数 `(order+1)^2(order+2)/2`，比坍缩基的 `(order+1)^3` 少
-`(order+1)/((order+2)/2*...)`，例如 P2 是 18 而不是 27、P3 是 40 而不是 64。
+自由度数 `(order+1)^2(order+2)/2`（P0..P3：1 / 6 / 18 / 40）。
 
-**挤出方向 `t` 保持 Legendre + Gauss-Legendre 不变**：那个方向本来就
-不坍缩、是真正的张量积方向，现有实现在它上面是精确的（直壁挤出下物理
-`y` 是 `t` 的精确线性函数，近壁剪切解复合后是精确多项式、插值截断误差
-为零 —— 见 `tests/validation/_channel_mesh.py` 与项目记忆
-`tet_collapsed_coord_anisotropy`）。只换被坍缩的那两个轴。
+**挤出方向 `t` 用 Legendre + Gauss-Legendre**：那个方向是真正的张量积方向（直壁挤出下物理 `y` 是 `t` 的精确
+线性函数，近壁剪切解复合后是精确多项式、插值截断误差为零 —— 见 `tests/validation/_channel_mesh.py`）。
 
 ## 节点排列约定
 

@@ -1,16 +1,10 @@
-"""AutoFlowCFD V2.0 - 原生棱柱基体积项
-去混叠（过积分）算子。
+"""AutoFlowCFD V2.0 - 原生棱柱基体积项去混叠（过积分）算子。
 
-去混叠的物理动机与基无关，完整记录在
-`fr/collapsed_basis.py::build_overintegration_operators`（欧拉通量 x
-度量项的真实多项式次数远高于求解阶数，直接在 coarse SPs 上微分等价于
-先混叠再求导，真实数值实验测得 P2 残差可以是真值的 43~62 倍）。原生
-棱柱基同样需要它 —— 而且**必须有**：`volume_contract.
-get_overintegration_context` 要求六个 `overint_*` 算子全部非 None，缺
-任何一个会让整条过积分链（**含四面体段**）静默退回 coarse 路径。
+去混叠的动机与基无关：欧拉通量 x 度量项的真实多项式次数远高于求解阶数，直接在 coarse SPs 上微分等价于先混叠
+再求导（实测 P2 残差可以是真值的 43~62 倍）。原生棱柱基**必须有**这套算子：
+`volume_contract.get_overintegration_context` 要求六个 `overint_*` 算子全部非 None。
 
-三件套与坍缩版本逐项对应，只是换成原生基（`basis.py` 的受限 PKD 三角形
-模态 x 挤出方向 Legendre + Warp&Blend 三角形节点 x Gauss 挤出节点）：
+三件套（`basis.py` 的受限 PKD 三角形模态 x 挤出方向 Legendre + Warp&Blend 三角形节点 x Gauss 挤出节点）：
 
 1. `interp_c2f`：**COARSE 阶数**模态基在 FINE 点上取值 —— Q 本身次数
    <=order，这一步是精确插值，不引入混叠。
@@ -22,35 +16,25 @@ get_overintegration_context` 要求六个 `overint_*` 算子全部非 None，缺
    投影 `build_native_prism_l2_projection`，两者的分工见
    `native_tet/overintegration.py` 模块文档"限制：平均流投影、湍流插值"一节）。
 
-## 与坍缩棱柱的两个关键差异
+## 阶数与细点
 
-**（一）不继承 `OVERINTEGRATION_MAX_ORDER = 3`。** 那个上限是坍缩坐标
-模态 Vandermonde 的**数值条件数**极限，不是去混叠本身的要求。直接实测
-（`tests/unit/test_native_prism_overintegration.py`）：
+**（一）不设条件数上限。** 原生棱柱的模态 Vandermonde 条件良好（`tests/unit/test_native_prism_basis.py`）：
 
     基          oo   cond(V)     max|D|
-    坍缩棱柱     3   6.19e+03     560.1
-    坍缩棱柱     4   4.72e+05   33928.8   <- 条件数崩掉的地方
     原生棱柱     4   6.33e+01       7.7
-    原生棱柱     8   1.86e+03      24.7   <- 比坍缩 oo=4 还好 250 倍
+    原生棱柱     8   1.86e+03      24.7
 
-而去混叠精度在 `oo = 2*order` 处断崖式下降，所以原生棱柱与原生四面体
-取同一个做法：**不额外设限**，实际阶数由 `rule*order` 决定（默认
-rule=2，P1/P2/P3 = 2/4/6）。上限常量存在只为留一个可调旋钮。
+（坍缩坐标张量积基在 oo=4 时 cond(V)=4.72e5、`max|D|`=33928.8，那是它需要上限的原因。）去混叠精度在
+`oo = 2*order` 处断崖式下降，所以原生棱柱与原生四面体取同一个做法：实际阶数由 `rule*order` 决定（默认
+rule=2，P1/P2/P3 = 2/4/6，`fr/overintegration_order.py`）。
 
-**（二）细点度量必须逐点求值，不能广播。** 直边**四面体**的 Jacobian
-是逐单元常数，所以 `get_overintegration_context` 的四面体段直接取第 0
-列广播；棱柱即便直边也一般随点变化（只有顶面是底面纯平移的右棱柱才
-恒定），所以 `high_order_mesh_order.build_order_geometry` 在原生档下
-必须在**本模块给出的原生细点**上逐点求 Jacobian（见那里的
-`compute_native_prism_jacobians(..., ref_pts=...)` 调用）。
+**（二）细点度量必须逐点求值，不能广播。** 直边**四面体**的 Jacobian 是逐单元常数，所以
+`get_overintegration_context` 的四面体段直接取第 0 列广播；棱柱即便直边也一般随点变化（只有顶面是底面纯平移
+的右棱柱才恒定），所以 `grid/high_order/high_order_mesh_order.py` 的 `build_order_geometry` 必须在**本模块给出
+的原生细点**上逐点求 Jacobian（`compute_native_prism_jacobians(..., ref_pts=...)`）。
 
-**（三）细网格轴不填充、`n_sps_per_cell_fine` 直接取原生细点数。**
-原生棱柱在 `over_order` 下只有 `(oo+1)^2 (oo+2)/2` 个真实细点（oo=2:
-18 vs 坍缩 27；oo=4: 75 vs 125），填充槽位恒为零、零贡献，却让整条
-过积分链在空点上白算，其中 `D_fine` 的收缩是 O(n_fine^2)。粗网格轴
-仍然必须填充到 `(order+1)^3`，因为 `Q` 数组是那个宽度的填充布局（同
-`native_tet/overintegration.py` 的说明）。
+**（三）细网格轴不填充**：`n_sps_per_cell_fine` 直接取原生细点数 `(oo+1)^2 (oo+2)/2`（填充槽位恒为零、零贡献，
+却会让整条过积分链在空点上白算，`D_fine` 的收缩是 O(n_fine^2)）。粗网格轴的存储宽度见 `fr/native_padding.py`。
 """
 
 from typing import Tuple
@@ -84,8 +68,8 @@ def build_native_prism_overintegration_operators(
         `(ref_rst_fine, interp_c2f, D_fine, restrict_f2c)`：
         `ref_rst_fine` 形状 `(n_fine,3)`；`interp_c2f` 形状
         `(n_fine,n_coarse)`；`D_fine` 形状 `(n_fine,n_fine,3)`；
-        `restrict_f2c` 形状 `(n_coarse,n_fine)` —— 与坍缩版本完全对应的
-        形状约定，`fr_residual/inviscid.py` 的过积分分支按同一套
+        `restrict_f2c` 形状 `(n_coarse,n_fine)` —— 与原生四面体同一形状
+        约定，`fr_residual/inviscid.py` 的过积分分支按同一套
         `contract_shared_operator_1axis/2axis` 消费，不需要改那段通用
         代码。这里的 `n_coarse`/`n_fine` 是**原生真实**节点数，粗轴填充
         到全局张量积宽度在 `fr/operators.py` 里用

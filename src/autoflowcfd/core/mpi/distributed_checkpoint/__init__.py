@@ -12,13 +12,13 @@ AutoFlowCFD V2.0 - 分布式 Checkpoint 保存/加载 + 结果保存
 - 支持变 rank 数恢复（4 ranks 保存 → 8 ranks 恢复）
 
 
-## 文件分工(2026-09-24 拆包, 原 515 行)
+## 文件分工
 
     state.py             局部与全局逐单元数组之间的收集与分发
     save.py              分布式落盘：checkpoint 与最终结果
     load.py              分布式读取与状态恢复
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .state import (  # noqa: F401

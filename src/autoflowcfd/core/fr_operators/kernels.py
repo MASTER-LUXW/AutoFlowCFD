@@ -1,15 +1,5 @@
 """
-AutoFlowCFD - FR 求解器 AUSM+up 黎曼求解器内核 (Numba 加速版)。
-
-本模块曾经还包含 compute_fr_residual_kernel（把计算空间微分算子 D_3d
-直接当物理空间导数用，没有度量项变换，对本代码库任何非笛卡尔映射单元
-都是错误导数）、compute_viscous_ldg_term/apply_correction_term/
-compute_interface_flux_jump/compute_ldg_penalty_flux/
-apply_correction_term_full 五个函数——V2.0 二次评审确认这五个全仓库
-零调用点（真正参与残差组装的实现在 core/fr_residual_inviscid.py 与
-core/fr_viscous_flux.py），已删除而不是继续留作"看起来完整、实则孤立"
-的死代码。真正参与求解主循环的只有 compute_ausm_up_flux（无粘界面
-黎曼求解器），保留在本文件。
+AutoFlowCFD - AUSM+up 无粘界面黎曼求解器（Numba 版，`compute_ausm_up_flux`）。
 """
 
 import numpy as np
@@ -120,7 +110,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     # 缺少整体负号（写成 +0.25*(M-1)^2 而不是 -0.25*(M-1)^2），导致
     # M_plus(M)+M_minus(M) = 0.5*(M^2+1) 而不是 M —— 通量在 qL=qR
     # 时不等于精确物理通量，已用数值一致性测试验证发现并在此修复
-    # （见 tests/unit/test_fr_residual_inviscid.py::test_ausm_up_consistency）。
+    # （见 tests/unit/test_ausm_up_flux.py::TestAusmUpFluxIdentities::test_consistency）。
     def M_plus(M):
         """M+ 函数"""
         if abs(M) >= 1:
@@ -156,7 +146,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     #   `pLP = 0.25*(mL+1)^2*(2-mL) + alpha*mL*(mL^2-1)^2` 同）。
     #
     # **2026-09-25 修正的真实缺陷**：此前四份实现（本函数、GPU CuPy 版、GPU
-    # CUDA P0 源串、backend/fr_gpu_p0.py）都写成 `0.25*((M+1)²(2−M) + α·M·(M²−1)²)`，
+    # CUDA P0 源串、GPU P0 无粘残差）都写成 `0.25*((M+1)²(2−M) + α·M·(M²−1)²)`，
     # α 项被多乘了 1/4。P5 分裂在 M=0 处的斜率本应是 0.75+α，低马赫下
     # α → −3/4 使斜率 = O(fa²)、压力扰动 O(M²)；缩小 4 倍后斜率 ≈ 0.57，压力
     # 分裂退化成声阻抗响应 p*−p ≈ ρ·a·u_n（O(M)，Guillard–Viozat 型低马赫失效）。

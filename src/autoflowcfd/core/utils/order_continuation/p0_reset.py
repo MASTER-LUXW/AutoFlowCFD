@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 全新求解器在 Order Continuation 起步时重建到 P0
-
-从 `src/autoflowcfd/core/utils/order_continuation.py`(原 926 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 全新求解器在 Order Continuation 起步时重建到 P0"""
 
 
 import numpy as np

@@ -1,14 +1,8 @@
 """_build_merged_mesh 的"含 BL"主分支：挤出边界层棱柱，再用 tetgen
 从 BL 的真实外表面直接填充剩余体积。
 
-从 mesh_background_merge.py 拆分出来（原文件超过 400 行上限），纯粹是
-代码搬运——逻辑与 _build_merged_mesh 里原来的 `else:` 分支（对应
-`if len(extrude_faces) == 0:` 的否定分支）完全一致，只是把它变成一个独
-立的模块级函数，由 mesh_background_merge._build_merged_mesh 在该分支下
-直接调用并原样返回其结果。`--bl-only` 调试导出那一小段进一步拆到了
-mesh_background_merge_bl_export.py（自包含的"构造导出对象 -> 写文件 ->
-退出进程（成功 exit(0)，失败 exit(1)）"流程，与本文件其余逻辑没有共享
-状态）。
+由 `mesh_background_merge._build_merged_mesh` 在有挤出面时调用并原样返回其结果；`export_bl_only` 时在边界层
+阶段结束并经 `PartialMeshReady` 带回局部网格。
 """
 
 import numpy as np

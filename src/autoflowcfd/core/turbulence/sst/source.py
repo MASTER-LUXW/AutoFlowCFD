@@ -36,10 +36,8 @@ class _SSTSourceMixin:
             d_wall: 壁面距离场，形状 (n_cells, n_sps)
             mu: 动力粘度
             grad_k: k 的梯度，形状 (n_cells, n_sps, 3)——F1 的第三项与
-                CD_omega 交叉扩散项都需要，工业级计算要求真实梯度，不再
-                提供"简化估计"回退（此前的回退用 `|k|*10`/`|omega|*10`
-                冒充梯度量级，物理上没有意义，已删除——调用方
-                core/fr_solver_turbulence.py 现在总是提供真实梯度）。
+                CD_omega 交叉扩散项都需要，必须是真实梯度（调用方 `core/fr_solver/turbulence/source.py`
+                由 `compute_scalar_gradient` 给出）。
             grad_omega: omega 的梯度，形状 (n_cells, n_sps, 3)
             des: DES 长度尺度求值器（`des.ddes.DESLengthScale`，网格尺度与本模型同一索引空间），
                 None 时为纯 RANS 破坏项

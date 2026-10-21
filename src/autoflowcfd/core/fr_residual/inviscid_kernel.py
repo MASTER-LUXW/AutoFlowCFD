@@ -1,18 +1,13 @@
-"""无粘残差界面项 —— numba 逐点标量 kernel (性能优化，替代
-fr_residual_inviscid.py 里原来的纯 Python `for f in range(fc.n_faces)` 循环)。
+"""无粘残差界面项 —— numba 逐点标量 kernel（`core/fr_residual/inviscid.py` 调用）。
 
-逐字复刻原循环体的控制流（owner_is_primary / 本侧精确度量法向
-法向 / is_boundary 走幽灵态或 sources 求和 / neighbor_is_primary），
-只是把执行方式从"Python 解释器 + 逐次小 numpy 调用"换成 numba 编译的
-逐点标量代码。数学公式与 fr_residual_inviscid.py 的向量化版本必须
-保持完全一致，改动一处必须同步检查另一处。
+控制流：owner_is_primary / 本侧精确度量法向 / is_boundary 走幽灵态或 sources 求和 / neighbor_is_primary。
+逐点公共通量与解析 Jacobian、GPU 版共用 `face_point_jumps.inviscid_common_flux_point`。
 
 **关键正确性约束（不能"优化掉"）**：owner 侧和 neighbor 侧对同一个
 内部面各自独立调用一次 AUSM+up（各自用自己的度量法向、自己原生 FP
 位置上插值出的状态），不能因为看起来像同一个黎曼问题就合并成一次
-公共通量复用给两侧——这个"优化"已经在本项目里被真实网格验证证伪过
-（自由流场残差从 9e-5 恶化到 3.1e7，见 fr_residual_inviscid.py 里
-`F_common_n_owner` 附近的注释），必须保留两次独立调用。
+公共通量复用给两侧——这个"优化"已在真实网格上证伪（自由流场残差从 9e-5 恶化到 3.1e7），
+必须保留两次独立调用。
 
 **多核并行**：按面着色（同色面的 owner/neighbor 单元互不重复），调用方逐颜色调用
 `compute_inviscid_interface_correction_kernel`，组内 `prange` 直接累加进共享 buffer——不加保护地对全部面
@@ -65,55 +60,29 @@ def compute_inviscid_interface_correction_kernel(
     不需要每线程缓冲与归约（内存 O(n_cells*n_sps*5)，与线程数无关）。2026-10-18 以前另有一份每线程缓冲版
     （环境变量切换），两份逐字同步维护，随开关删除。
 
-    native 四面体（路径C）支持（Part8 文档"三、本次会话实现范围"）：
     `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面的
     坍缩顶点槽位，`fr/operators/face_ops.py`），统一索引
     `boundary_extrap_native`/`lift_native` 两张整表。`owner_axis`/`owner_side` 对
     原生面存的是复用槽位，**不是** axis/side 语义，本函数不读它们。
 
-    三条原生基专属做法：(a) 自身面外插矩阵用
-    `boundary_extrap_native[op]`；(b) 方向定向系数固定为 +1
-    （`fr/face_flux_points/exact_normal.py` 已经给出正确 outward 定向的
-    adj 行，不需要像坍缩坐标那样再乘 side 翻转——Part7 文档记录过的坑，
-    2026-09-18 无滑移壁 IP 罚项又在同一处踩了一次）；(c) 面修正项用
+    (a) 自身面外插矩阵用 `boundary_extrap_native[op]`；(b) 方向定向系数固定为 +1
+    （`fr/face_flux_points/exact_normal.py` 已经给出外向定向的 adj 行，再乘一次 side 会让 `side = -1` 的面
+    反号）；(c) 面修正项用
     DG 提升算子 `lift_native[op] @ (ref_area_weight ⊙ |a| F_common)`（本侧通量迹已并进体积算子，见 `fr/face_flux_trace.py`）
     （`native_tet/basis.py::build_native_tet_lift` "弱形式提升定义"）。
 
-    **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
-    axis,side]` 外插 + 1D Radau/VCJH 修正函数 `_distribute_point` 分布）
-    已整体删除。坍缩四面体基 2026-09-03 删除、坍缩棱柱基 2026-09-23 删除
-    之后，`build_face_connectivity` 给每一个真实面
-    都直接给出原生编码，实测混合网格（P1/P2）的面编码集合是
-    `{6,7,8,9,10,11,12,13,14}`、`code < 6` 的非边界面**为 0 个**，所以那
-    条分支在生产上不可达。不可达的第二套离散方案留在最热的 kernel 里，
-    正是本项目明确要删的冗余。构造期护栏见
-    `core/fr_operators/face_kernels.py::build_flat_face_geometry`。
+    构造期护栏（`core/fr_operators/face_kernels.py::build_flat_face_geometry`）保证全部面编码都是原生编码
+    （四面体 6~9、棱柱 10~14）。
 
-    **法向一律取自本侧精确度量行**（2026-09-24）：此前两侧各有一个
-    `alignment = dir(adj_row).true_normal < 0.5` 时改用 `true_normal` 的
-    兜底。它是原生基之前的遗留（那时法向由 Lagrange 外插的度量得到，坍缩
-    顶点附近可能是垃圾方向）；原生基下 adj 行是逐 FP 的解析精确值，夹角
-    >60° 说明几何本身就是那样（严重扭曲的棱柱四边形面对两个平面三角形），
-    兜底不再保护任何合法情形，只剩一个效果 —— 破坏自由流保持：换了方向
-    之后拥有侧投影仍用 adj_row，对均匀流
+    **法向一律取自本侧精确度量行**：adj 行是逐 FP 的解析精确值，夹角 >60° 说明几何本身就是那样（严重扭曲的
+    棱柱四边形面对两个平面三角形）。不能在夹角大时改用 `true_normal`：拥有侧投影仍用 adj_row，对均匀流
         jump = |adj| F(Q).(n_ref - dir(adj)) != 0。
     plate_demo_volume_les（179,237 单元）上它在 11 个面、42 个 FP 触发
     （全部在板锐边的扭曲棱柱上），在"全边界取远场"的均匀流里产生
-    4~5e6 /s 的残差（其余单元为 1e-7 量级），正是 P1 长程运行在第 4134 步
-    单步爆炸那个单元的源头：它的一个解点密度在恒定源项下按恒定斜率下降，
-    过零后被逐点硬钳，一步放大到 1e53。粘性核本来就没有这个兜底，所以
-    粘性残差在同一测试里处处精确。
+    4~5e6 /s 的残差（其余单元为 1e-7 量级），是 P1 长程运行单步爆炸到 1e53 的源头。
 
-    真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
-    模块文档完整原理）：`owner_adj_row_exact`/`neighbor_adj_row_exact`
-    取代了此前这里对 `adj_j`（SP 网格上的度量）用 `E_o`/`E_n` 做
-    Lagrange 外插到 FP 得到"自洽方向"的做法——外插对坍缩坐标下本质是
-    有理函数的 adj(J) 有不可忽略的截断误差（P1 尤其明显）。改为在
-    mesh 加载阶段一次性预计算好的、每个 FP 自己精确参考坐标处的解析
-    Jacobian 值，直接查表读取，消除这部分截断误差——原来的 `adj_j`
-    参数（SP 网格度量）因此不再被本函数需要，已从签名中移除（同文件
-    的 `compute_boundary_ghost_states` 是另一个独立函数，自己的
-    `adj_j` 参数不受影响）。
+    两侧的 adj 行（`owner_adj_row_exact`/`neighbor_adj_row_exact`）是 mesh 加载阶段在每个 FP 自己的精确参考
+    坐标处预计算的解析 Jacobian 值（`fr/face_flux_points/exact_normal.py`），不经过解点度量的外插。
     """
     n_sps = Q.shape[1]
     n_fp = owner_adj_row_exact.shape[1]

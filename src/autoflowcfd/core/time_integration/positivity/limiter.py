@@ -94,7 +94,7 @@ class PositivityLimiter:
         """隐式 Newton 步的物理性限幅，在**与本限制器同一个点集**上求值（解点 +
         面通量点 + 过积分细点），返回逐行 `alpha`（同一单元的行取单元内最小值）。
 
-        规则本身是 `implicit/newton/jfnk.py::density_pressure_row_limits`（rho 与 p 单步
+        规则本身是 `implicit/newton/physicality.py::density_pressure_row_limits`（rho 与 p 单步
         相对变化对数对称不超过 50%），这里只把求值点从解点扩到全部通量求值点：
         Newton 步从可容许态出发、每个点都限相对变化，就不会走进任何求值点上
         rho、p 非正的状态。此前只看解点，plate_demo 锐边贴壁单元解点都正常而一个

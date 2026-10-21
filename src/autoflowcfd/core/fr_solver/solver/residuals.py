@@ -102,7 +102,7 @@ class _SolverResidualMixin:
                 max 不进入 Newton 线性化。
             primitives: 与无粘项共用的原始变量与边界幽灵态（`compute_mean_flow_residual`）；None 时现算。
 
-        真实的 BR1 面耦合粘性离散（core/fr_viscous_flux.py），并把湍流模型
+        真实的 BR1 面耦合粘性离散（core/fr_residual/viscous_flux/），并把湍流模型
         算出的涡粘系数真正耦合进应力张量/热传导（T-01/T-04/T-06 修复：
         此前调用处从不传湍流粘度，粘性通量永远只用分子粘度 1.8e-5，
         SST/DDES/WALE 算出的 nu_t 场只在自身模型内部自用，从未进入

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 对流/扩散残差与顶层编排(GPU)
-
-从 `src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py`(原 743 行)拆出(2026-09-24)；界面项 2026-09-26 改为两侧各自坐标系、扩散改为 IIPG 内罚（与 CPU 版同一结构）。
-"""
+"""AutoFlowCFD V2.0 - 对流/扩散残差与顶层编排(GPU)"""
 
 from typing import Tuple
 

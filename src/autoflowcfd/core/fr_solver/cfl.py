@@ -42,23 +42,10 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
        严格得多，此前完全没有被施加过，真实复现：Couette 层流验证
        算例里这正是导致发散的根本原因之一（另一个是上面 0 提到的
        低马赫数刚性）。
-    3. 几何/度量 CFL（此前已修复的失稳）：坍缩坐标下同一个
-       四面体/棱柱单元内，不同 SP 的 det(J) 天然可以相差几百倍——
-       已用完美正四面体数值验证，这是 Duffy 坍缩变换在 P=2 时的
-       固有性质，与单元形状/网格质量无关，不是可以"修好"的缺陷。
-       无粘残差公式 residual = -div_comp/det(J) 对*非均匀*流场（自由
-       流场因离散GCL恒等式精确抵消是例外）在 det(J) 很小的 SP 处，
-       把一个本身有界的参考空间通量散度 div_comp（真实网格实测量级
-       ~0.01~0.3，不随 det(J) 一起等比例缩小——这是把 P 阶多项式
-       微分矩阵套在"度量项(有理)×非常数流场"这个不再是低阶多项式的
-       乘积上的固有混叠截断误差）放大到失稳量级——真实网格上单元
-       509974/525292 等（det(J) 低至 ~2e-14）在仅 1% 幅度的温和非
-       均匀扰动下，无粘残差被放大到 1e10~1e11 量级，用原有"单元
-       平均体积"CFL 算出的步长完全无法感知、更谈不上限制这种
-       SP 级别的刚性，几步之内必然发散为 NaN——已数值复现验证。
-       标准有限体积 CFL 公式 dt=CFL*V/Σ(A_f*(|u·n|+a)) 在这里的
-       直接类比：用该 SP 自己的 det(J) 当作局部"体积"，
-       sum_m ||adj(J)[SP,m,:]|| 当作局部"总通量面积"。
+    3. 几何/度量 CFL：逐解点用该 SP 自己的 det(J) 当作局部"体积"、sum_m ||adj(J)[SP,m,:]|| 当作局部"总通量
+       面积"——标准有限体积 CFL `dt=CFL*V/Σ(A_f*(|u·n|+a))` 的逐点类比。按面的对流 CFL 用的是单元平均量，
+       单元内度量逐点变化（棱柱有双线性侧面、曲边几何）时由这一项取单元内最严者；无粘残差
+       `-div_comp/det(J)` 在 det(J) 小的点上被放大，单元平均步长感知不到。
 
     低马赫数伪时间预处理（2026-09-14 新增，见 `core/utils/preconditioning.py`
     模块末尾"伪时间预处理矩阵 Gamma"一节完整推导）：`solver.
@@ -74,7 +61,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     `return_physical_too=True` 取第二个返回值）：湍流输运是被动标量的
     对流+扩散，不含声学模态，本来就不该被声速限制——但它的显式更新里
     `transport_k/transport_omega` 刻意没有做 point-implicit 阻尼（见
-    `turbulence/sst.py::update_fields` 文档），所以这里保持保守、不跟着
+    `turbulence/sst/update.py::update_fields` 文档），所以这里保持保守、不跟着
     放大，把预处理的收益严格限制在平均流上，避免把一个已经验证稳定的
     湍流更新推到未经验证的步长上。
 
@@ -87,7 +74,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     n_cells, n_sps, n_vars = solver.state.U.shape
 
     # 提取速度和声速。solver.state.Q 存的是原始变量 (rho, u, v, w, p)
-    # （见 fr_state.py::_update_primitives），不是守恒变量——此前这里
+    # （见 core/fr_solver/state.py::_update_primitives），不是守恒变量——此前这里
     # 把已经是 u/p 的 Q[1]/Q[4] 当 rho*u/rho*E 又转换了一次，实测使
     # 声速被系统性低估（214.8 应为 340.3，来流 rho=1.225,u=30,p=101325
     # 时），对流/几何 CFL 步长被高估约 1.55 倍。直接读取即可。

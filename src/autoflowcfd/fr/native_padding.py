@@ -5,7 +5,7 @@
 规范）。完整架构设计见
 `ProjectFiles/V2.0/8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part8.md`
 "一、核心不变量：零填充块对角"一节——本文件只提供该不变量要求的、单一
-的填充实现，供 `fr/operators.py::generate_fr_operators` 消费，避免各处
+的填充实现，供 `fr/operators/build.py::generate_fr_operators` 消费，避免各处
 各写一份、未来不一致。
 
 **2026-09-18 起同时服务原生棱柱基**（见
@@ -175,7 +175,7 @@ def _check_order_matches_n_sps(order: int, n_sps: int, who: str) -> int:
     阶数——那种情形下按错的 `n_native` 切片会静默地把真实解点当成填充
     丢掉（或反过来把填充当真实算进去），是一个无声的精度损失。本项目
     在跨阶数缓存上已经复现过同一类真实 bug（见
-    `gpu_solver.py::_compute_local_time_step_gpu` 里 metric_flux_scale
+    `gpu_solver/timestep.py::_compute_local_time_step_gpu` 里 metric_flux_scale
     缓存那段注释），所以这里显式报错而不是静默继续。
     """
     if sps_width(order) != n_sps:

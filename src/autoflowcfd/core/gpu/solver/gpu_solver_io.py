@@ -47,7 +47,7 @@ class _GPUSolverIOMixin:
         算出的 `sgs_model_gpu.nu_t`（一步滞后，与 CPU 版
         `apply_turbulence_corrections` 在 step() 末尾才更新 sgs_model.nu_t、
         供下一步粘性残差使用的操作分裂时序完全一致，见该方法调用点
-        gpu_solver.py::step() 文档）。
+        gpu_solver/step.py::step() 文档）。
 
         Returns:
             mu_t: 动力涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组，湍流模型
@@ -150,7 +150,7 @@ class _GPUSolverIOMixin:
         # 缺失的输运项——此前 GPU 显式更新的 transport_k/
         # transport_omega 参数从未被调用方传入（见 gpu_turbulence_sst.py
         # 模块文档），k/omega 场只靠逐点源项 ODE 弛豫，没有跨单元对流/
-        # 扩散。与 CPU 版 fr_solver_turbulence.py::compute_turbulence_source
+        # 扩散。与 CPU 版 core/fr_solver/turbulence/source.py::compute_turbulence_source
         # 同一个触发条件（SST/DDES/IDDES 都需要）。
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
             compute_turbulence_transport_residual_gpu,
@@ -172,9 +172,9 @@ class _GPUSolverIOMixin:
 
     def _apply_turbulence_corrections_gpu(self):
         """GPU 版 SGS（WALE）涡粘系数更新，与 CPU 版
-        `fr_solver_turbulence.py::apply_turbulence_corrections` 完全同一个
+        `core/fr_solver/turbulence/corrections.py::apply_turbulence_corrections` 完全同一个
         操作分裂时序：必须在 step() 里状态更新（`self.U_gpu = U_new_flat`+
-        `_update_primitives_gpu()`）**之后**调用（见 gpu_solver.py::step()
+        `_update_primitives_gpu()`）**之后**调用（见 gpu_solver/step.py::step()
         调用点），算出的 nu_t 供下一步 `compute_turbulence_source_gpu()`
         读取——不能提前到状态更新之前，那样用的是上上一步的状态，语义上
         更旧一步，且与 CPU 版行为不一致。

@@ -50,8 +50,7 @@ class _GPUDistributedCheckpointMixin:
             iteration: 当前迭代数
             input_file: 原始网格文件路径
             order: checkpoint 保存那一刻 `U_sps` 字段实际对应的阶数——
-                Order Continuation 接入多GPU分布式路径后（2026-09-02
-                续接，见 gpu_distributed.py::solve 文档），调用方必须传
+                调用方必须传
                 `self.current_order`（不是固定的目标阶数），否则爬坡
                 阶段中途存的 checkpoint 会出现"metadata 记的阶数与
                 `U_sps` 实际形状不符"的错配——与 CPU

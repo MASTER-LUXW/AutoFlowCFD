@@ -1,6 +1,5 @@
 """AutoFlowCFD V2.0 - 粘性残差顶层：体积项 + 界面项 + IP 罚项
 
-从 `src/autoflowcfd/core/fr_residual/viscous_flux.py`(原 560 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。
 体积项一律过积分、用与无粘同一个体积算子 K（修正项本侧通量迹已并入，2026-10-01，见
 `fr/face_flux_trace.py`）；界面核只施加公共通量与内罚项。
 """
@@ -38,7 +37,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             的 nu_t 乘以密度后传入，见该模块修复说明。
         Pr_t: 湍流普朗特数
         boundary_ghost_provider: 边界面幽灵态提供者，与无粘残差
-            （fr_residual_inviscid.py）共用同一个实例/同一套 WALL/INLET/
+            （core/fr_residual/inviscid.py）共用同一个实例/同一套 WALL/INLET/
             OUTLET/FARFIELD/SYMMETRY 逻辑（见 boundary/fr_ghost_state.py），
             签名 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp。
             必须显式给出（`require_ghost_provider`；零梯度外插须显式传 DefaultGhostProvider()）。
@@ -124,8 +123,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
     # `for f in range(fc.n_faces)` 逐面循环，理由/验证方式与
-    # fr_residual_inviscid.py 的同类改动完全一致，见
-    # fr_viscous_flux_kernel.py 模块文档、
+    # core/fr_residual/inviscid.py 的同类改动完全一致，见
+    # core/fr_residual/viscous_flux_kernel.py 模块文档、
     # tests/unit/test_fr_viscous_flux_kernel_crosscheck.py 的新旧实现
     # 逐位对比验证）。
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry

@@ -6,17 +6,7 @@ AutoFlowCFD V2.0 - GPU 版时间积分
   无关，CuPy 数组原样走同一份代码）。
 * `compute_local_cfl_step_gpu`：GPU 版局部 CFL 时间步长。
 
-**2026-09-25 删除的 GPU 独立拷贝**（`enforce_positivity_gpu`、
-`_ssp_rk_stage_step_gpu`、`gpu_time_integration_dual.py`、
-`gpu_time_integration_imex.py`；IMEX 本身已于 2026-10-17 删除）：
-
-1. 正性用的是逐点硬钳（密度钳 1e-6、速度钳 1e4 m/s、压力钳 1 Pa），CPU 侧
-   已证实它不守恒、且是 plate_demo 第 4134 步一步爆炸到 1e53 的放大器；
-2. 双时间步里 2026-08-23 在 CPU 侧修掉的四处 CFL 缺陷一处都没修；
-3. 顺序是"先钳制后滤波"，离开 stage 的状态不保证可容许。
-
-现在 GPU 与 CPU 走同一份积分器、同一个守恒限制器
-（`time_integration/positivity/`，GPU 上用它的数组模块无关实现）。
+GPU 与 CPU 走同一份积分器、同一个守恒限制器（`time_integration/positivity/`，GPU 上用它的数组模块无关实现），没有 GPU 独立拷贝。
 """
 
 from autoflowcfd.core.thermo import GAMMA
@@ -64,12 +54,8 @@ def compute_local_cfl_step_gpu(
             order_factor_advective/order_factor_viscous 同一公式。
         det_jacs_sp: 本次调用对应 SP 的 |det(J)|，CuPy 数组 (n_cells,)
             （可选）。与 metric_flux_scale_sp 一起提供时，额外施加第三个
-            几何/度量 CFL 限制——与 CPU 侧 cfl.py::compute_local_time_step
-            的 dt_geometric 同一机制：坍缩坐标下同一单元内不同 SP 的
-            det(J) 天然可以相差几百倍（Duffy 坍缩变换在 P>=2 时的固有
-            性质），此前 GPU 路径完全没有这一限制，可能重新触发 CPU 侧
-            已经修复过的同一类发散（项目记忆 "Tet collapsed-coord
-            anisotropy"）。
+            几何/度量 CFL 限制——与 CPU 侧 cfl.py::compute_local_time_step 的 dt_geometric 同一公式
+            （见那边文档第 3 条）。
         metric_flux_scale_sp: 本次调用对应 SP 的度量"通量面积"标度
             sum_m||adj(J)[:,m,:]||，CuPy 数组 (n_cells,)（可选，与
             det_jacs_sp 一起提供时才生效）。
@@ -95,7 +81,7 @@ def compute_local_cfl_step_gpu(
     # **本函数按约定只处理单个 SP**（2026-09-14 更正）：
     # 此前这里写"使用 SP0 的值计算时间步长（简化：取每个 cell 第一个
     # SP）"——那个标注已不成立。两条生产调用方（单机
-    # `gpu_solver.py::_compute_local_time_step_gpu` 与多 GPU
+    # `gpu_solver/timestep.py::_compute_local_time_step_gpu` 与多 GPU
     # `gpu_distributed.py` 同名方法）都在**逐 SP 循环**里传
     # `U[:, sp:sp+1, :]` 这样的单 SP 切片、并对结果取单元内最小值，
     # 所以 `U[:, 0, ...]` 取到的就是当前那个 SP，不是"只用第一个 SP"
@@ -104,9 +90,7 @@ def compute_local_cfl_step_gpu(
     #
     # 下面这道校验把这条隐式契约变成显式失败：如果有人传完整的
     # (n_cells, n_sps, n_vars) 数组，旧代码会**静默**只用 SP0 算步长——
-    # 逐 SP 的几何/度量 CFL 限制（dt_geometric，专门用来防坍缩坐标下
-    # 同一单元内 det(J) 相差几百倍导致的局部刚性失稳）会因此大部分
-    # 失效，而且不报任何错。宁可直接失败。
+    # 逐 SP 的几何/度量 CFL 限制（dt_geometric）会因此大部分失效，而且不报任何错。宁可直接失败。
     if U.ndim != 3 or U.shape[1] != 1:
         raise ValueError(
             f"compute_local_cfl_step_gpu 期望单 SP 切片 (n_cells, 1, n_vars)，"

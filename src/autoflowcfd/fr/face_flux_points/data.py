@@ -131,7 +131,7 @@ _PRISM_QUAD_CODES = {
 
 
 def _prism_quad_diagonal_local(cell_node_ids: np.ndarray, quad_local_idx: Tuple[int, ...]) -> Tuple[int, int]:
-    """求棱柱某个四边形侧面真正的对角线，与 grid/mesh_gen/face_extraction_kernels.py
+    """求棱柱某个四边形侧面真正的对角线，与 grid/mesh_gen/extraction/face_extraction_kernels.py
     的三角化规则完全一致。
 
     按 GLOBAL 节点编号对底面三角形 3 个顶点重新排序得到 v0'<v1'<v2'

@@ -41,7 +41,7 @@ def uses_algebraic_sgs(name) -> bool:
     return normalized(name) in ALGEBRAIC_MODELS
 
 
-#: 解析湍流脉动、在速度入口注入合成湍流（SEM，`fr_solver/boundary/synthetic_inlet.py`）的模型
+#: 解析湍流脉动、在速度入口注入合成湍流（SEM，`boundary/synthetic_inlet.py`）的模型
 SYNTHETIC_INLET_MODELS = ("LES", "WMLES", "DDES", "IDDES")
 
 

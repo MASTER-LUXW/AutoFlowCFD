@@ -1,7 +1,7 @@
 """
 AutoFlowCFD V2.0 - GPU 版物理通量计算（欧拉 + 粘性）
 
-与 core/fr_flux_kernels_pointwise.py 对应的 CuPy 向量化版本。
+与 core/fr_operators/flux_kernels/ 对应的 CuPy 向量化版本。
 用 CuPy 的逐元素运算替代 numba @njit 的逐点循环，底层自动走 cuBLAS/cuDA。
 
 包含：
@@ -60,7 +60,7 @@ def primitive_to_conserved_gpu(Q):
 def euler_physical_flux_gpu(Q):
     """GPU 版欧拉物理通量张量 F_i(Q)。
 
-    与 core/fr_flux_kernels_pointwise.py::euler_physical_flux_batch 公式一致。
+    与 core/fr_operators/flux_kernels/euler.py::euler_physical_flux_batch 公式一致。
 
     Args:
         Q: CuPy 数组 (N, 5)，(rho, u, v, w, p)
@@ -117,7 +117,7 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRAND
                               mu_t_is_effective: bool = False):
     """GPU 版粘性物理通量张量 G_i(Q, grad_vel, grad_T)。
 
-    与 core/fr_flux_kernels_pointwise.py::viscous_physical_flux_batch 公式一致。
+    与 core/fr_operators/flux_kernels/viscous.py::viscous_physical_flux_batch 公式一致。
     Boussinesq 假设：mu_total = mu + mu_t。
 
     真实 bug 修复（问题清单 #5 排查附带发现，2026-09-02，用真实含多源/

@@ -303,7 +303,7 @@ class SolveLoopMixin:
                 # 例如单独求解 P0/P1）此前打印频率（每10步一次）、字段顺序
                 # （CFL 在 Time 之前）、前缀（"Iteration N"而非"P{order} Iter
                 # N"）、Time 标签（"Time/step"而非"Time"）都与
-                # order_continuation.py::run_order_continuation（目标阶数>=2
+                # order_continuation/run.py::run_order_continuation（目标阶数>=2
                 # 时走的分阶段路径）不一致——两条路径各自独立发展、从未同步
                 # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
                 # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
@@ -420,5 +420,5 @@ class _SolverSolveMixin(SolveLoopMixin):
         self.state._update_primitives()
 
     def step(self, dt: float) -> float:
-        """执行一个时间步长 (S-05)。见 fr_solver_step.py::step 文档。"""
+        """执行一个时间步长 (S-05)。见 core/fr_solver/step.py::step 文档。"""
         return fr_solver_step.step(self, dt)

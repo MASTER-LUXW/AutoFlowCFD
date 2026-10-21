@@ -257,7 +257,7 @@ class MeshQualityValidator:
 
     def _compute_tetrahedron_volumes(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
         """quality_metrics.compute_tetrahedron_volumes 的薄实例方法包装
-        ——保留给外部调用者（例如 mesh_gen/mesh_repair.py 的 Stage A），
+        ——保留给外部调用者（例如 grid/mesh_gen/repair/mesh_repair.py 的 Stage A），
         它们直接访问此 validator 实例而不是自行导入度量函数。"""
         return _qm.compute_tetrahedron_volumes(nodes, cells)
 
@@ -299,7 +299,7 @@ class MeshQualityValidator:
         """公共 per-cell 半径比偏斜度数组, shape=(n_cells,)——
         max_skewness/mean_skewness 背后的原始值，供需要知道
         *哪些*单元有问题（而非仅聚合统计）的调用者使用
-        （例如 mesh_gen/mesh_repair.py 中的网格修复循环）。"""
+        （例如 grid/mesh_gen/repair/mesh_repair.py 中的网格修复循环）。"""
         from .quality_validator_metrics import compute_cell_skewness as _compute_cell_skewness
 
         return _compute_cell_skewness(nodes, cells)

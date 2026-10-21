@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 体积项与残差入口(GPU)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_inviscid.py`(原 710 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 体积项与残差入口(GPU)"""
 
 import numpy as np
 
@@ -39,7 +36,7 @@ def compute_inviscid_residual_fr_gpu(
 ):
     """P>=1 高阶 FR 无粘残差的 GPU 实现。
 
-    与 core/fr_residual_inviscid.py::compute_inviscid_residual_fr 公式完全一致。
+    与 core/fr_residual/inviscid.py::compute_inviscid_residual_fr 公式完全一致。
 
     Args:
         U: CuPy 数组 (n_cells, n_sps, n_vars) 或 numpy 数组（自动上传）

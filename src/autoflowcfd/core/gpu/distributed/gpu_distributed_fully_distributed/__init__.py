@@ -27,13 +27,13 @@ order`（`distributed_mesh_loader.py`）同一套协议——root 用持续持�
 按 `solver._is_fully_distributed` 分派到这里。
 
 
-## 文件分工(2026-09-24 拆包, 原 557 行)
+## 文件分工
 
     upload.py            把紧凑索引空间的壁面几何上传到设备
     build.py             从完全分布式包构造多 GPU solver
     redistribute.py      阶数切换时重新分发（Order Continuation 分布式路径）
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .build import (  # noqa: F401

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 阶数切换时解场/湍流场的插值（延拓）算子
-
-从 `src/autoflowcfd/core/utils/order_continuation.py`(原 926 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 阶数切换时解场/湍流场的插值（延拓）算子"""
 
 
 import numpy as np
@@ -20,8 +17,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
 
     延拓算子是旧阶数的模态多项式在新阶数解点上的求值（`fr/order_interp.py`，原生四面体 / 原生棱柱各一份）：升阶时
     旧多项式精确落在新空间里，延拓是精确的（任意阶矩在舍入误差内守恒）。算子只依赖阶数，一次构造、向量化作用到
-    全部单元与全部场（U、湍流输运量、涡粘）。2026-10-19 删除只对坍缩棱柱基成立的一维 Lagrange 张量积插值
-    （`_build_linear_interp_matrix_3d`，删除坍缩棱柱基后再无调用方）。
+    全部单元与全部场（U、湍流输运量、涡粘）。
 
     Args:
         solver: FRSolver 实例
@@ -41,16 +37,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
         print("    Same order, skipping interpolation")
         return
 
-    # 延拓算子**按基分派**（2026-09-20 修复的真实生产缺陷）：一维 Gauss
-    # 点的张量积 Lagrange 插值只对**坍缩棱柱基**成立；native 四面体
-    # （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20 起
-    # 是默认）的解点都不在那个张量积网格上。用线性场做判据实测 P1->P2
-    # 的相对误差：坍缩棱柱 4.3e-16（对）、native 四面体 7.0e-01、
-    # native 棱柱 1.4e-01。完整推导与零填充槽位的处理见
-    # `fr/order_interp.py` 模块文档。
-    #
-    # P0->P1 不受这条缺陷影响（P0 是常数场，任何插值都给出同一个常数），
-    # 所以走 `P0 -> P1 -> P2` 的生产运行只在最后那一跳被污染。
+    # 延拓算子按单元类型取各自原生基的精确延拓（零填充槽位的处理见 `fr/order_interp.py` 模块文档）。
     from autoflowcfd.fr.order_interp import apply_order_interp
 
     n_prism_cells = int(solver.mesh.n_prism_cells)

@@ -62,7 +62,7 @@ class MeshQualityReport:
         warnings: 质量警告列表
         recommendations: 改进建议列表
         repair_stages_applied: 生成此报告前采取的修复操作
-            的人类可读日志（见 mesh_gen/mesh_repair.py）——
+            的人类可读日志（见 grid/mesh_gen/repair/mesh_repair.py）——
             对不带修复的裸 validate() 调用为空。
         initial_report: 任何修复前的报告，用于 summary() 中的
             前后对比——若此报告本身就是修复前基线或未运行修复

@@ -30,7 +30,7 @@ class DistributedMeshAdapter:
     使得现有的残差计算函数可以直接使用，无需修改。
 
     真实 bug 修复（#2，V2.0 专家组盲审第4轮，2026-08-28，与 GPU 侧 #1
-    同一个根因，见 core/gpu/gpu_distributed.py::_CompactMeshDataView
+    同一个根因，见 core/gpu/distributed/gpu_distributed/compact_view.py::_CompactMeshDataView
     文档）：此前 `self.n_cells = partition.n_local_cells`、
     `self.jacobians = local_mesh.jacobians` 直接原样转发——但
     `dist_fc`（`DistributedFlatFaceGeometry`）的 `owner_cell`/
@@ -243,7 +243,7 @@ def distributed_compute_inviscid_residual(
     # 3. 把 halo 交换协议原生排列的 U_extended 重排到 adapter 实际使用的
     # "棱柱在前"压缩索引空间（与 GPU 侧 gpu_distributed.py::
     # compute_inviscid_residual_gpu 的 perm/inv_perm 重排同一个道理，见
-    # distributed_flat_face.py::DistributedFlatFaceGeometry.perm 文档）。
+    # distributed_flat_face/types.py::DistributedFlatFaceGeometry.perm 文档）。
     U_compact = U_extended[dist_fc.perm]
 
     # 4. 调用现有残差函数（flat_face_override=dist_fc.base_flat，不让

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 阶数切换时重新分发（Order Continuation 分布式路径）
-
-从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_fully_distributed.py`(原 557 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 阶数切换时重新分发（Order Continuation 分布式路径）"""
 
 import types
 
@@ -23,12 +20,12 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int) -> None:
     """"完全分布式加载"模式的多 GPU 阶数切换（Order Continuation）。
 
-    与 CPU 版 `distributed_mesh_loader.py::redistribute_fully_
-    distributed_for_new_order` 同一套协议（该函数文档的"协议"一节
+    与 CPU 版 `core/mpi/distributed_mesh_loader/fully_distributed.py::redistribute_fully_distributed_for_new_order`
+    同一套协议（该函数文档的"协议"一节
     逐字适用，这里只重复 GPU 特有的部分）：
     1. 每个 rank 独立在 CPU（numpy）上插值/重置自己的 local U + 湍流场
-       （从 GPU 下载 → 插值 → 稍后重新上传，理由与 `gpu_distributed_
-       order_continuation.py::gpu_interpolate_to_new_order`"传统模式"
+       （从 GPU 下载 → 插值 → 稍后重新上传，理由与 `gpu_distributed_order_continuation.py::
+       gpu_interpolate_to_new_order`"传统模式"
        版本一致：CuPy 数组不支持 `np.einsum`）。
     2. Root：用 `solver._root_context` 持有的完整全局网格重新计算 +
        重新分发新阶数的紧凑包（`build_fully_distributed_rank_package`，
@@ -72,11 +69,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
 
     new_fields_np = new_nu_t_np = None
     if target_p > old_order:
-        # 延拓算子**按基分派**（2026-09-20 修复的真实缺陷）：一维 Gauss
-        # 张量积 Lagrange 只对坍缩棱柱基的解点成立；native 四面体
-        # （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20
-        # 起是默认）都不在那个网格上，线性场 P1->P2 实测相对误差
-        # 7.0e-01 / 1.4e-01。compact/local 索引空间同样是"棱柱在前"
+        # 延拓算子按单元类型取各自原生基的精确延拓（`fr/order_interp.py`）。compact/local 索引空间同样是"棱柱在前"
         # （见 `base_flat.n_prism` 文档），所以直接用局部棱柱数。
         # 完整依据见 `fr/order_interp.py`。
         from autoflowcfd.fr.order_interp import apply_order_interp

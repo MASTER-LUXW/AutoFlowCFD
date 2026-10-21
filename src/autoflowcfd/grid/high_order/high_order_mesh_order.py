@@ -89,7 +89,7 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # 内存/构建时间。
     #
     # **过积分阶数与细点数一律走 `fr/overintegration_order.py`**
-    # （2026-09-19）：此前这里和 `fr/operators.py::generate_fr_operators`
+    # （2026-09-19）：此前这里和 `fr/operators/build.py::generate_fr_operators`
     # 各写一遍同一个 `min(rule*order, cap)`，两处注释都在提醒"必须逐字
     # 一致，否则三个算子的形状与这里的 jacobians_fine 对不上"。靠注释维持
     # 一致在本项目已经出过真实缺陷（滤波档双解析器、CFL 三处硬编码兜底），

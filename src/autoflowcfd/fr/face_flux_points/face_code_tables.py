@@ -1,7 +1,6 @@
 """AutoFlowCFD V2.0 - cube face 编码的 numba 查找表。
 
-从原 `kernel_helpers.py` 拆出（2026-09-19）。这些表**必须覆盖全部 15 个
-编码**，理由与派生来源见下方各条注释。纯搬家，未改任何逻辑。
+这些表**必须覆盖全部 15 个编码**，理由与派生来源见下方各条注释。
 """
 
 import numpy as np
@@ -34,7 +33,7 @@ from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_CODES
 # 构造直接 `KeyError: (0, 14)`）。派生之后"漂移"在结构上不可能发生。
 #
 # 导入方向安全：`face_flux_points/geometry.py` 与 `face_flux_points/data.py` 都不
-# import 本模块（只有 `face_flux_points/kernel.py`/`_ms_numba.py` 会），
+# import 本模块（只有 `kernel.py`/`kernel_multisource.py`/`ref_geometry_nb.py`/`native_geometry_nb.py` 会），
 # 所以这里反向 import 不构成环。
 _FACE_AXIS = np.zeros(len(CUBE_FACE_CODES), dtype=np.int32)
 _FACE_SIDE = np.zeros(len(CUBE_FACE_CODES), dtype=np.float64)

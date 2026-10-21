@@ -26,7 +26,7 @@ class _DistributedFromPackageMixin:
     def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,
                                         root_context: Optional[dict] = None, n_threads: int = -1):
         """真正的"完全分布式加载"构造入口（2026-09-02，见 core/mpi/
-        distributed_mesh_loader.py::distributed_mesh_load_v2/
+        distributed_mesh_loader/fully_distributed.py::distributed_mesh_load_v2/
         build_fully_distributed_rank_package 模块文档）。
 
         与主构造函数（`__init__`，"传统模式"：每个 rank 独立加载完整
@@ -140,9 +140,8 @@ class _DistributedFromPackageMixin:
                 f"'{turb_model_name}'（应为规范化的大写模型名）。")
         self.turb_model_name = turb_model_name
         self._turb_model_upper = turb_model_name
-        # Order Continuation 支持（2026-09-02，见 core/mpi/distributed_
-        # mesh_loader.py::redistribute_fully_distributed_for_new_order
-        # 文档）：`self.freestream` 只在 SST/DDES/IDDES 分支才会被设置
+        # Order Continuation（见 core/mpi/distributed_mesh_loader/fully_distributed.py::
+        # redistribute_fully_distributed_for_new_order 文档）：`self.freestream` 只在 SST/DDES/IDDES 分支才会被设置
         # （见下方），但阶数切换时需要对**任意** turb_model_name 都能
         # 拿到自由来流条件（重置 P0 均匀流场需要），这里存一份通用的、
         # 不依赖 turb_model_name 分支的副本。
@@ -283,19 +282,9 @@ class _DistributedFromPackageMixin:
     def local_solver(self):
         """延迟初始化本地求解器（避免循环依赖）。
 
-        FRSolver.__init__ 的第二个位置参数是 order: int（内部会自己调用
-        generate_fr_operators(order) 重新构建算子，不接受外部预构建的
-        FROperators 对象作为构造参数）——此前这里错误地把 self.ops
-        （DistributedFRSolver 构造时外部传入的 FROperators 实例）当成
-        order 位置传参，导致 `order + 1` 处 TypeError（真实复现，
-        DistributedFRSolver(..., n_ranks=1, turb_model_name='none') 后
-        调用 step() 必现）；生产 CLI 路径（solve_steady_command.py）还
-        会同时把 order=order 塞进 solver_kwargs，两者相加变成
-        "got multiple values for argument 'order'"，同一个根因。
-        用 mesh.order（构建 local_mesh 时用的同一个阶数）作为默认值，
-        solver_kwargs 里若显式提供了 order（生产路径就是如此，且与
-        mesh.order 恒一致，见 solve_steady_command.py）则优先使用它，
-        避免与下面的显式关键字参数重复传参报错。
+        FRSolver 按 `order` 自己构建算子（不接受外部预构建的 FROperators）。`order` 缺省取 `mesh.order`（构建
+        local_mesh 时用的同一个阶数）；`solver_kwargs` 里显式给出的 order（生产路径如此，与 mesh.order 一致）
+        优先，避免与显式关键字参数重复传参。
         """
         if self._local_solver is None:
             from autoflowcfd.core.fr_solver.solver import FRSolver

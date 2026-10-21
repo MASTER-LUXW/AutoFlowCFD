@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - omega 壁面目标值/Dirichlet 掩码(GPU)
-
-从 `src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py`(原 743 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - omega 壁面目标值/Dirichlet 掩码(GPU)"""
 
 
 def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
@@ -12,7 +9,7 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
     都已经常驻显存，没有必要为这个小计算专门下载/上传）。
 
     真实 bug 修复（2026-09-05，代码复审发现，与 CPU 版
-    `transport.py::_compute_omega_wall_target` 2026-09-05 那次真实网格
+    `transport/omega_wall.py::_compute_omega_wall_target` 2026-09-05 那次真实网格
     验证决定性发现的 bug 同一个根因，此前只修了 CPU 版、GPU 镜像版本
     漏了）：`d1 = cp.maximum(d1, 1e-8)` 只防止除零，不防止结果本身失控
     ——cube_demo 真实网格上确认存在 wall_distance 恰好卡在这个 1e-8

@@ -81,21 +81,8 @@ class TimeIntegrationScheme(Enum):
 
 
 
-#: **用户词汇 -> 枚举的唯一事实来源**（2026-09-18）。
-#:
-#: 此前同一个语义有**三套**词汇表、各自一份映射：
-#:   * CLI `--time-method`：`rk3` / `dual-time`
-#:     （`cli/solve/transient.py` 一份 3 项的表）
-#:   * `api.run_transient`：上面那些 + 枚举自身的取值
-#:     （`api.py` 一份 8 项的表）
-#:   * YAML/配置层：`backward_euler` / `rk2` / `rk3` / `ab3`
-#:     （`config/solver_config.py` 里**另一个同名枚举**，取值范围与核心层
-#:     不兼容，其中 `backward_euler`/`ab3` 在核心层根本没有实现）
-#:
-#: 三份之中 `api_config.py` 那一份是错的：它把 `dual-time` 映到
-#: `BACKWARD_EULER`、把 `imex` 映到 `RK3`（都是静默给错值），未知取值还
-#: 静默退到 RK3。本项目已多次因"同一件事有多份实现、只改了一份"出真实
-#: 缺陷，所以这里合并成一份。
+#: **用户词汇 -> 枚举的唯一事实来源**：CLI `--time-method`、`api.run_transient`、YAML 配置层共用这一份；
+#: 未知取值报错。
 _SCHEME_ALIASES = {
     "rk3": TimeIntegrationScheme.SSP_RK3,
     "ssp_rk3": TimeIntegrationScheme.SSP_RK3,
@@ -132,8 +119,7 @@ def scheme_from_name(name):
 
     Raises:
         ValueError: 取值不合法。**不静默退回默认值**——那会让一次拼写
-            错误静默地把整个算例换成别的时间积分方案（`api_config.py`
-            此前正是 `.get(name, RK3)`）。报错信息里列出全部合法取值。
+            错误静默地把整个算例换成别的时间积分方案。报错信息里列出全部合法取值。
     """
     if isinstance(name, TimeIntegrationScheme):
         return name

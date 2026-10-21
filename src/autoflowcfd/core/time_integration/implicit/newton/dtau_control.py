@@ -27,7 +27,7 @@
 PTC 的 `dtau` 由**两层**给出，各管各的事：
 
 * 外层自适应 CFL 控制器给出**天花板**（按残差历史工作，跨格式共用，
-  一个事实来源，见 `core/utils/cfl.py`）；
+  一个事实来源，见 `core/time_integration/adaptive_cfl/`）；
 * 本模块给出天花板之下的**缩放因子** `scale in (0, 1]`，由 Newton 步
   自身的成败驱动 —— 它看的是 `theta`，也就是控制器看不到的那件事。
 
@@ -98,7 +98,7 @@ class PtcDtauScale:
         """一步被完整接受（残差接受判据没有回溯，`theta >= 1`）时放大一档；
         被回溯说明当前 `dtau` 已经在边界上，保持不动。
 
-        物理性限幅是逐单元的局部松弛（`jfnk.py::PHYSICALITY_MAX_RELATIVE_CHANGE`），
+        物理性限幅是逐单元的局部松弛（`physicality.py::PHYSICALITY_MAX_RELATIVE_CHANGE`），
         不进入这里：个别单元被松弛不代表全局 `dtau` 过大，让它拖住全场的
         `dtau` 正是逐单元松弛要消除的"一个单元冻结全场"。
         """

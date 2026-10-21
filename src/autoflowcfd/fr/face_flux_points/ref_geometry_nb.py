@@ -1,13 +1,8 @@
-"""AutoFlowCFD V2.0 - **坍缩坐标**参考几何的 numba 原语。
+"""AutoFlowCFD V2.0 - 立方体参考坐标 `(a,b,c)` 下的几何原语（numba）。
 
-坐标变换（立方体 -> 单纯形）、物理映射、参考面网格、以及在目标单元参考
-空间里定位面点的 Newton 迭代。被 `kernel.py`（主 kernel）与
-`kernel_multisource.py` 共同依赖。
-
-从原 `kernel_helpers.py`（699 行）按功能拆出（2026-09-19，项目"单文件
-不超 500 行"规范）：这里是坍缩坐标那一半，原生四面体的平行实现在
-`native_geometry_nb.py`，两者共用的面编码查找表在 `face_code_tables.py`。
-纯搬家，未改任何逻辑。
+坐标变换（立方体 -> 单纯形，三角形面通量点采样用）、物理映射、参考面网格、以及原生棱柱面点在目标单元参考
+空间里的 Newton 定位（两条映射逐位恒等，见 `fr/native_prism/interp_numba.py` 模块文档）。被 `kernel.py`
+（主 kernel）、`kernel_multisource.py` 与 `native_geometry_nb.py` 共同依赖；面编码查找表在 `face_code_tables.py`。
 """
 
 import numpy as np

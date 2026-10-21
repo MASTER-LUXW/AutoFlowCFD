@@ -4,40 +4,7 @@
 逐行移植，不是重新发明。原始 MATLAB 文件：`Nodes2D.m`、`xytors.m`、
 `rstoab.m`、`Simplex2DP.m`、`GradSimplex2DP.m`、`Warpfactor.m`。
 
-## 为什么需要它（2026-09-18）
-
-棱柱至今用**坍缩坐标基**（`collapsed_basis.py::prism_modal_basis_and_grad`，
-在 (a,b) 截面上做 Duffy 三角形坍缩）。实测两条后果：
-
-1. **微分矩阵的元素量级随阶数爆炸**：
-
-       max|D_3d_prism|:   P1 2.049 -> P2 22.51 -> P3 560.1   （每阶约 x25）
-       max|D_native_tet|: P1 0.500 -> P2 2.000 -> P3 4.045   （对照，正常）
-
-   坍缩把节点挤向退化边，节点微分算子因此病态。
-
-2. **自由流保持性只有 ~1e-9**（仿射结构化棱柱网格上本应是机器零）。
-   实测三阶数的误差与 `eps * max|D| / det(J)` 严格成比例：
-
-       order  max|D|   det_J min   自由流误差   误差/(max|D|/det_J)
-         P1    2.049   1.99e-6     3.01e-9      2.9e-15
-         P2   22.51    1.06e-6     7.80e-9      3.7e-16
-         P3   560.1    6.54e-7     1.64e-7      1.9e-16
-
-   后两行就是机器 epsilon —— 所以那个误差**是纯舍入被算子量级放大**，
-   不是算法 bug；`enforce_constant_annihilation` 已经在用（行和残余相对
-   `max|D|` 正好是 eps 量级），**不降低 `max|D|` 就无法改善**。
-
-3. 更严重的是**伪横流**：只有被三角化的两个参考轴方向会长出非物理的
-   横流速度（把展向换成挤出轴后保持机器零，相差 11 个数量级），它在
-   P1 上饱和、在 P2 上无界增长导致发散（1152 单元干净网格上第 75 步）。
-
-四面体当年有**完全同类**的病理，解法就是整套换成 native PKD/Dubiner 基
-（见 `native_tet/basis.py` 与项目记忆 `tet-collapsed-coord-anisotropy` /
-`native-tet-basis-production-readiness`）。本模块是棱柱侧的同一条路：
-棱柱 = 三角形 ⊗ 直线，三角形用这里的原生 PKD 基 + Warp & Blend 节点，
-挤出方向保持现有的 Legendre/Gauss-Legendre（那个方向本来就是精确的，
-不需要改）。
+选型依据（与坍缩坐标基的对照实测）见包文档 `fr/native_prism/__init__.py`。
 
 ## 关键点：基的公式用到 (a,b)，但**节点不坍缩**
 
@@ -50,15 +17,14 @@ Dubiner 基的**表达式**里确实出现 `a = 2(1+r)/(1-s) - 1` 这个坍缩�
     整数次幂、不含除法，退化轴上处处有限 —— 与 `simplex3d_grad` 同一条
     技巧，不经过会奇异的 `d(r,s)/d(a,b)` 逆。
 
-这两点正是坍缩方案与原生方案的分水岭。
+这两点正是原生基与坍缩坐标基的分水岭。
 """
 
 from typing import List, Tuple
 
 import numpy as np
 
-# Jacobi 多项式与其导数复用坍缩基模块里那一份（正交多项式本身与"节点
-# 怎么取"无关，是同一个数学对象；再抄一份等于多一个要同步的事实来源）。
+# Jacobi 多项式与其导数与四面体共用 `fr/jacobi.py` 那一份（正交多项式本身与"节点怎么取"无关）。
 from numba import njit
 
 from ..jacobi import grad_jacobi_polynomial, jacobi_polynomial
@@ -77,9 +43,8 @@ def restricted_tri_modes(order: int) -> List[Tuple[int, int]]:
     个数是 `(order+1)(order+2)/2`，与同阶 Warp & Blend 节点数相等 ——
     两者必须相等才能构成一个可逆的 Vandermonde（有断言检查）。
 
-    与坍缩基的 `(order+1)^2` 相比少了将近一半：坍缩基用的是"扩展张量积"
-    `i,j` 各自独立取 0..order，其中 `i+j>order` 的那些模态在三角形上
-    不是独立的自由度。
+    "扩展张量积"（`i,j` 各自独立取 0..order，`(order+1)^2` 个）里 `i+j>order` 的那些模态在三角形上不是
+    独立的自由度。
     """
     return [(i, j) for i in range(order + 1) for j in range(order + 1 - i)]
 

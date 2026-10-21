@@ -3,7 +3,7 @@ AutoFlowCFD V2.0 - 面图着色（消除 scatter-add 写冲突）
 
 界面 kernel 的 `correction[owner_cell[f], s, v] += ...` 是 scatter-add：
 同一个 cell 被多个面共享，不同 f 会写同一个 `correction[cell]`。当前方案
-（fr_residual_inviscid_kernel.py）用 per-thread buffer 避免冲突，内存
+（core/fr_residual/inviscid_kernel.py）用 per-thread buffer 避免冲突，内存
 O(n_threads * n_cells * n_sps * n_vars)，是扩展性的根本瓶颈。
 
 面图着色提供替代方案：将面分成若干颜色组，同色面之间无写冲突单元

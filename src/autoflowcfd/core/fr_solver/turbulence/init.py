@@ -1,9 +1,4 @@
-"""AutoFlowCFD V2.0 - 湍流模型的构造与自由来流/边界值设定。
-
-从 `core/fr_solver/turbulence.py`（原 795 行）拆出（2026-09-24，项目
-"单文件不超 500 行"规范）。**纯搬家，逻辑未改** —— 判据是 SST 黄金轨迹
-逐位相同（见 `ProjectFiles/V2.0/29`）。
-"""
+"""AutoFlowCFD V2.0 - 湍流模型的构造与自由来流/边界值设定。"""
 
 
 import numpy as np

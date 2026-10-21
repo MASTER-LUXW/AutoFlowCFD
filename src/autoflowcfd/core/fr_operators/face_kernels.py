@@ -1,33 +1,20 @@
-"""FR 面几何展平缓存 (性能优化：逐面 Python 循环 -> numba 逐点标量 kernel)。
+"""FR 面几何展平缓存：把面通量点数据展平成 numba kernel 可直接读的定长数组。
 
-背景：`core/fr_residual_inviscid.py`/`core/fr_viscous_flux.py` 里各有一个
-纯 Python 的 `for f in range(fc.n_faces):` 逐面循环，在生产规模网格
-（545,597 单元、1,326,110 面）上实测单次残差求值耗时约 1546 秒——瓶颈是
-Python 解释器 + 每次循环体内十几个小 numpy 调用的调度开销，不是真正的
-浮点运算量。修复思路：不改算法/控制流本身（这两处循环是本项目本轮
-评审反复修复过的最核心正确性代码），只把执行方式换成 numba 编译的原生
-代码。numba 的 nopython 模式不能直接消费 `mesh.face_flux_points`（一个
-由 `FaceFluxPointGeometry` dataclass 组成的 Python list，见
-`fr/face_flux_points/geometry.py`，其中 `owner_sources`/`neighbor_sources` 是
-变长的 `(cell_id, matrix)` 元组列表），本模块负责把它一次性展平成 numba
-可以直接读的定长 numpy 数组，缓存后供无粘/粘性两个 kernel 共用（面几何
-本身在无粘/粘性残差之间是共享的，且在同一批 RK 子迭代内不变）。
+`mesh.face_flux_points`（`fr/face_flux_points/data.py::_KernelFaceData`）里 `owner_sources`/`neighbor_sources` 是
+变长的 `(cell_id, matrix)` 元组列表，numba nopython 模式不能直接消费；本模块把它一次性展平成定长 numpy 数组，
+供无粘 / 粘性界面 kernel（`core/fr_residual/inviscid_kernel.py`、`core/fr_residual/viscous_flux_kernel.py`）共用
+（面几何在无粘 / 粘性残差之间共享，且在同一批 RK 子迭代内不变）。
 
-缓存：展平几何只依赖网格（同一阶数），挂在 `mesh.face_flux_points`（`_KernelFaceData`）自己的 `_flat_geometry` 上，
-与它同生命周期。Order Continuation 换阶时整体替换 `mesh.face_flux_points`（`grid/high_order_mesh_order.py`），
-新对象没有缓存，自然重建。
-
-历史（2026-10-19，I-21）：此前是模块级单槽全局缓存，键为 `mesh.face_flux_points` 的强引用——网格释放后仍被缓存
-强引用住（展平几何连同整个面通量点数据滞留在内存），两张网格交替求值时每次都整体重建。更早用裸 `id()` 当键时
-还真实复现过一次 id 复用撞车（全量测试里另一张已释放网格的 id 被新网格复用，命中错误几何，形状不兼容时崩溃、
-兼容时静默算错）。缓存放在被缓存对象自身上，这两类问题都不再可能。
+缓存：展平几何只依赖网格（同一阶数），挂在 `mesh.face_flux_points` 自己的 `_flat_geometry` 上，与它同生命周期。
+Order Continuation 换阶时整体替换 `mesh.face_flux_points`（`grid/high_order/high_order_mesh_order.py`），新对象
+没有缓存，自然重建。缓存放在被缓存对象自身上：网格释放后不滞留，两张网格交替求值也不会命中对方的几何。
 
 内存设计：`owner_sources`/`neighbor_sources` 长度恒为 1 或 2（网格生成器
 把棱柱四边形侧面恒定拆分成 2 个三角子面，不会更多，见
 `fr/face_flux_points/merge.py` 模块文档），但绝大多数
 面（普通四面体-四面体内部面、未拆分的棱柱面）只有 1 个来源。如果统一按
-2 槽稠密填充，多出来的一半矩阵纯粹是浪费——在 P2、n_fp=9、n_sps=27 下，
-1.3M 面 × 2 角色(owner/neighbor) × 2 槽 × (9×27×8字节) 约 10GB，这在真实
+2 槽稠密填充，多出来的一半矩阵纯粹是浪费——在 P2、n_fp=9、n_sps=18（原生棱柱）下，
+1.3M 面 × 2 角色(owner/neighbor) × 2 槽 × (9×18×8字节) 约 6.7GB，这在真实
 生产网格上不是可以忽略的开销。因此设计成"稠密槽 0 + 稀疏槽 1"：槽 0
 对每个面恒定存在（大小 n_faces），槽 1 只对真正有第 2 个来源的那一小
 部分面额外分配一个更小的紧凑数组，用 -1 表示的下标数组做重定向。
@@ -49,9 +36,7 @@ class FlatFaceGeometry:
 
     严格保持与 `range(fc.n_faces)` 相同的面序（不能为了"cache 友好"按
     axis/side 重新分组排序）——`correction[cell] += ...` 的累加顺序会
-    影响退化 Jacobian 单元处的舍入误差量级（真实复现过 3 步内从 4e-2
-    放大到 1.16e7 的案例，见 fr_viscous_flux.py 模块文档），顺序变了会让
-    "新旧实现逐位对比"这个验证判据失去意义。
+    影响舍入误差，顺序变了会让与逐面参考实现逐位对比的验证判据失去意义。
     """
 
     n_faces: int
@@ -69,30 +54,18 @@ class FlatFaceGeometry:
     owner_is_primary: np.ndarray     # bool (n_faces,)
     neighbor_is_primary: np.ndarray  # bool (n_faces,)
     true_normal: np.ndarray      # float64 (n_faces, n_fp, 3)
-    # 真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
-    # 模块文档）：owner/neighbor 各自的精确 adj(J) 行（未归一化、未按
-    # side 定向），取代此前 inviscid_kernel.py 内部对 SP 网格 adj_j 做
-    # Lagrange 外插得到"自洽方向"的做法——外插对坍缩坐标下本质是有理
-    # 函数的 adj(J) 有截断误差，直接在 FP 精确坐标求值消除这部分误差。
-    # neighbor 侧对边界面为全零占位（无意义，kernel 内 is_boundary 分支
-    # 不会读取）。
+    # owner/neighbor 各自在通量点精确坐标上求值的 adj(J) 行（未归一化、原生面已外向定向，
+    # `fr/face_flux_points/exact_normal.py`）。neighbor 侧对边界面为全零占位（kernel 内 is_boundary
+    # 分支不读取）。
     owner_adj_row_exact: np.ndarray     # float64 (n_faces, n_fp, 3)
     neighbor_adj_row_exact: np.ndarray  # float64 (n_faces, n_fp, 3)
-    # native 四面体（路径C，Part8 文档"三、本次会话实现范围"）支持新增：
-    # 原始 cube face 编码（0~5 坍缩坐标，6~9 native，见
-    # grid/connectivity/face_connectivity.py::CUBE_FACE_CODES），
-    # `owner_axis`/`owner_side`（上面两个字段）对 native 面存的是复用
-    # 的 excluded_vertex/哑值，不能用来判断是否 native、也不能安全地
-    # 当 axis/side 语义使用——必须用这两个原始编码字段消除歧义。
+    # 面编码（四面体面 6~9、原生棱柱面 10~14，`grid/connectivity/face_connectivity.py`）。
+    # `owner_axis`/`owner_side`（上面两个字段）对原生面存的是复用的 excluded_vertex / 哑值，不能当
+    # axis/side 语义使用——面的类别一律按这两个编码字段判断。
     owner_cube_face: np.ndarray     # int64 (n_faces,)
     neighbor_cube_face: np.ndarray  # int64 (n_faces,)
-    # 物理面积权重（`fr/face_flux_points/exact_normal.py::compute_exact_
-    # face_normals_and_weights` 已经算好、验证过的量）——坍缩坐标的
-    # 1D Radau/VCJH 修正函数 + 微分矩阵机制不需要它（那套数学结构本身
-    # 不含物理面积因子），但 native 四面体的 DG 提升算子（`native_
-    # simplex_basis.py::build_native_tet_lift` 文档"弱形式提升定义"）
-    # 需要它按面点物理面积加权跳跃量，因此新增这个字段——对坍缩坐标
-    # 面同样有意义（本来就已经算好），只是此前从未被这个 kernel 消费过。
+    # 物理面积权重（`fr/face_flux_points/exact_normal.py::compute_exact_face_normals_and_weights`），
+    # `|adj_row| * w_ref`，沿 FP 轴求和即物理面积（用于 `ip_length` 等几何量；DG 提升用下面的参考权重）。
     true_area_weight: np.ndarray    # float64 (n_faces, n_fp)
     # 面记录 P0 通量点的物理坐标，float64 (n_faces, 3)：P0 每面一个通量点，解点外插只能得到单元中心，
     # 由网格节点直接算出（`face_points.py::p0_flux_points`；拆分四边形的两条子面记录都取四边形中心）。
@@ -101,31 +74,11 @@ class FlatFaceGeometry:
     # **参考**面求积权重，float64 (n_fp,) —— 逐面相同（所有面都用同一套
     # `[-1,1]^2` 上的张量积 Gauss-Legendre 网格），所以只存一份。
     #
-    # ## 这是 2026-09-18 修掉的一个真实缺陷
-    #
-    # DG 提升算子的正确权重是**参考**求积权重，不是 `true_area_weight`
-    # （物理面积权重 = `|adj_row| * w_ref`，实测 `sum_p taw_p` 恰好等于物理
-    # 面积）。原因：无粘核施加的 `|adj_row| F*`（本侧通量迹已并进体积算子，
-    # `fr/face_flux_trace.py`）已经是**参考空间**的法向通量（Nanson 关系
-    # `n_hat dA_phys = adj_row dA_ref`
-    # 把物理面积因子吃进去了），坍缩分支的 `g'` 分布也正是按这个约定消费
-    # 它的。再乘一次 `true_area_weight` 等于多乘一个 `|adj_row|`。
-    #
-    # **量级后果**：界面项本应 `~1/h`（与体积项同阶，导数的正确量纲），
-    # 多乘 `|adj_row| ~ h^2` 之后变成 `~h` —— 网格越细，界面耦合与上风
-    # 耗散被压得越狠。细长四面体上实测差 5 个数量级。
-    #
-    # **判定方式**（无法混淆）：同一张混合网格、同一个不连续初场，把坐标
-    # 整体缩放减半，量生产残差 ——
-    #     棱柱（坍缩，1D 修正函数）  2.000x   即 ~1/h   正确
-    #     四面体（native DG 提升）   0.500x   即 ~h     错，正好差 h^2
-    # 修复后两者都是 2.000x。
-    #
-    # 守恒律侧的独立验证（当时的界面核还减本侧通量）：人为构造常数跳跃
-    # `F* = F_own + delta*n_hat`，
-    # 界面项对单元总量的贡献必须是 `-delta * 总表面积`。用参考权重得到的
-    # 比值恰好 1.000000（全部面、全部阶数）；用物理面积权重是 0.211
-    # （规整四面体）到 0.000003（细长四面体）。
+    # DG 提升算子的权重是**参考**求积权重，不是 `true_area_weight`：无粘核施加的 `|adj_row| F*` 已经是
+    # **参考空间**的法向通量（Nanson 关系 `n_hat dA_phys = adj_row dA_ref` 把物理面积因子吃进去了），
+    # 再乘物理面积权重等于多乘一个 `|adj_row| ~ h^2`，界面项从 `~1/h` 变成 `~h`。判据：坐标整体缩放
+    # 减半，界面残差应放大 2.000 倍；常数跳跃 `F* = F_own + delta*n_hat` 对单元总量的贡献应恰为
+    # `-delta * 总表面积`。
     ref_area_weight: np.ndarray     # float64 (n_fp,)
 
     # 逐面**内罚项长度尺度** `h_f = min(V_owner, V_neighbor) / A_face`（边界面取
@@ -134,12 +87,11 @@ class FlatFaceGeometry:
     #
     # * `A_face` = `true_area_weight` 沿 FP 轴求和（与解析面积之比在平板算例六个
     #   边界平面上全部 1.000000，含原生棱柱的两个三角形封盖）；
-    # * `V` = `mesh.get_all_cell_volumes()` 的精确体积。**不能**用 `mean(det_jacs)`
-    #   （2026-09-23）：那是"体积 ÷ 参考单元体积"，参考体积基相关（坍缩 8、原生棱柱 4、
-    #   原生四面体 4/3），罚项强度因此差 21%（四面体 45%）；也不能用几何平均
+    # * `V` = `mesh.get_all_cell_volumes()` 的精确体积。**不能**用 `mean(det_jacs)`：那是
+    #   "体积 ÷ 参考单元体积"，随单元类型而变（原生棱柱 4、原生四面体 4/3）；也不能用几何平均
     #   `V**(1/3)`：各向异性贴壁单元上比壁法向厚度大 2.48 倍（实测平板）。
     #   `V/A` 是面法向的单元厚度（直棱柱贴壁单元上恰好等于 dy）；
-    # * **两侧单值**（2026-09-26）：罚项是公共通量的一部分，两侧若各用自己的
+    # * **两侧单值**：罚项是公共通量的一部分，两侧若各用自己的
     #   `V/A`，相邻体积不等时同一个面上两侧收到的罚通量不等，离散扩散不守恒。
     #   取较薄的一侧：对两侧都满足迹不等式的下界（强制性）。
     ip_length: np.ndarray           # float64 (n_faces,)
@@ -181,8 +133,8 @@ class FlatFaceGeometry:
     p0_second_half_frac: np.ndarray  # float64 (n_faces,)
 
     # --- 原生基面算子：按面算子索引 `op = (code - 6) + 9 * slot` 排好的整表
-    #     （`fr/operators/face_ops.py`；四面体面 6~9、棱柱面 10~14，三角形面再按坍缩
-    #     顶点槽位 `fr/triangle_apex.py` 分 3 份）。逐面取 `[owner_face_op[f]]` /
+    #     （`fr/operators/face_ops.py`；四面体面 6~9、棱柱面 10~14，三角形面再按三角形采样的
+    #     坍缩顶点槽位 `fr/triangle_apex.py` 分 3 份）。逐面取 `[owner_face_op[f]]` /
     #     `[neighbor_face_op[f]]`。
     # 体积->自身面外插矩阵，(27, n_fp, n_sps)（列已填充到全局 n_sps 宽度：
     # 消费方式恒为 `E @ Q_volume_nodal`；四边形面不存在的槽位行是 NaN）。

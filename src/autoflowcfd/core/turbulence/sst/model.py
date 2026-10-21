@@ -41,7 +41,7 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
             n_cells: 单元数量
             n_sps: 每单元解点数量
             k_inf: 来流湍动能初值（默认 1e-6，工业标准由 Tu/VR 推导，
-                见 turbulence.py::_set_freestream_turbulence）
+                见 core/fr_solver/turbulence/init.py::_set_freestream_turbulence）
             omega_inf: 来流比耗散率初值（默认 1.0，工业标准由 Tu/VR 推导）
             xp: 场数组所在的数组模块（numpy 或 cupy）
         """
@@ -75,7 +75,7 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法）。
         # 初始为 0（抑制产生项），逐步增加到 1（全量产生）。
         # 防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
-        # 由求解器根据全局迭代步数控制，见 turbulence.py::_update_production_ramp。
+        # 由求解器根据全局迭代步数控制，见 core/fr_solver/turbulence/init.py::_update_production_ramp。
         self.production_factor: float = 1.0
 
         # 非有限值替换的累计解点数（`nonfinite.py::replace_nonfinite`：源项、涡粘、增量、场恢复）

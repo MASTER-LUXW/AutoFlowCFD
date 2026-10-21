@@ -1,17 +1,8 @@
-"""AutoFlowCFD V2.0 - native 四面体（路径C）体积项去混叠（过积分）算子。
+"""AutoFlowCFD V2.0 - native 四面体体积项去混叠（过积分）算子。
 
-背景：`fr/collapsed_basis.py::build_overintegration_operators` 文档
-完整记录了去混叠的物理动机（欧拉通量×度量项的非线性乘积真实多项式
-次数远高于求解阶数，直接在 coarse SPs 上微分等价于先混叠再求导，真实
-数值实验测得 P2 残差可以是真值的 43~62 倍）——这个机制与坍缩坐标/
-native 哪套基函数无关，native 单纯形基同样需要它。
-（历史：本段曾写"`inviscid.py` 目前对 native 网格完全跳过这一步
-（`jacobians_fine=None`）"——那是本文件刚建立时的状态，早已过时：native
-网格在 order>=1 时无条件构造 `jacobians_fine` 与本文件的三件套。）
-
-本文件的三件套与 `build_overintegration_operators` 逐项对应，只是
-换成 native 单纯形基（`native_tet/basis.py` 的受限 PKD 模态 +
-Warp&Blend 节点），数学结构完全一致：
+去混叠的动机与基无关：欧拉通量×度量项的非线性乘积真实多项式次数远高于求解阶数，直接在 coarse SPs 上微分
+等价于先混叠再求导（实测 P2 残差可以是真值的 43~62 倍）。三件套（`native_tet/basis.py` 的受限 PKD 模态 +
+Warp&Blend 节点）：
 1. `interp_c2f`：**COARSE 阶数**模态基在 FINE 点上取值——Q 本身次数
    <=order，这一步是精确插值，不引入混叠。
 2. `D_fine`：**FINE 阶数**原生单纯形微分矩阵（直接复用
@@ -38,33 +29,17 @@ Warp&Blend 节点），数学结构完全一致：
 这个组合会失稳——两端远场的槽道 SST P3（`tests/unit/test_implicit_sst_nk.py`）实测 140 步
 k 最小 -469 k_inf、残差不降；湍流单独换回插值后 106 步收敛（全部插值 91 步）。
 
-与坍缩坐标版本的关键差异：native 单纯形基节点数随阶数增长的方式不同
-（`(order+1)(order+2)(order+3)/6` vs `(order+1)^3`），**过积分阶数也已于
-2026-09-17 与棱柱解耦**；阶数见 `fr/overintegration_order.py::overintegration_order`）。
+## 过积分阶数
 
-**这是两件独立的事，2026-09-16 前本文件把它们混成了一件**：
+阶数见 `fr/overintegration_order.py::overintegration_order`：`rule*order`（默认 2x）是**与基无关**的去混叠
+经验法则（二次非线性的标准做法），实测误差在 `oo = 2*order` 处断崖式下降，低于它基本拿不到收益（P3: oo=5
+3.37e-3 vs oo=6 4.80e-6）。不设条件数上限：native 在 over_order=6 才 cond=3856、`max|D|` 从 3 到 6 只长 3.5 倍
+（`tests/unit/test_native_tet_overintegration_conditioning.py`）。P1/P2/P3 都取到理想的 `2*order`（2/4/6）。
 
-  * `rule*order`（默认 2x）是**与基无关**的去混叠经验法则（二次非线性
-    的标准做法），native 照搬是对的；实测误差在 `oo = 2*order` 处断崖式
-    下降，低于它基本拿不到收益（P3: oo=5 3.37e-3 vs oo=6 4.80e-6）；
-  * 而 `OVERINTEGRATION_MAX_ORDER = 3` 这个**上限**是坍缩坐标模态
-    Vandermonde 的**数值条件数**极限（cond 在 N=4 达约 1e14、`max|D|`
-    暴涨约 6.3 万倍，见 collapsed_basis.py 该常量处的完整记录），
-    native 没有理由继承它——实测 native 在 over_order=6 才 cond=3856、
-    `max|D|` 从 3 到 6 只长 3.5 倍（
-    `tests/unit/test_native_tet_overintegration_conditioning.py`）。
-
-曾经有第三个理由（本段旧文字）：`jacobians_fine` 是棱柱/四面体共用一个
-`n_sps_per_cell_fine` 维度的合并数组，"按较大者分配"会让 plate_demo P2
-的该数组从约 1.86 GB 涨到约 3.63 GB。**那条论证是错的**：四面体段根本不
-需要更宽的数组——直边四面体的细点度量是一个逐单元常数的原样广播，取第 0
-列广播到本段自己的 `n_fine_tet` 即可（见 `core/fr_operators/
-volume_contract.get_overintegration_context`）。
-
-现在 P1/P2/P3 都取到理想的 `2*order`（2/4/6）。放开上限本身会抬高自由流
-保持性的误差底（`D_fine` 对常数的零化残余随阶数增长），已同批用
-`fr/diff_matrix_consistency.enforce_constant_annihilation` 消掉，真实网格
-实测见 `tests/unit/test_tet_overintegration_cap_raised.py`。
+四面体段不需要更宽的细点度量数组：直边四面体的细点度量是逐单元常数的原样广播，取第 0 列广播到本段自己的
+`n_fine_tet` 即可（见 `core/fr_operators/volume_contract.get_overintegration_context`）。高阶 `D_fine` 对常数的
+零化残余随阶数增长，由 `fr/diff_matrix_consistency.enforce_constant_annihilation` 消掉（真实网格实测见
+`tests/unit/test_tet_overintegration_cap_raised.py`）。
 """
 
 from typing import Tuple
@@ -93,22 +68,18 @@ def build_native_tet_overintegration_operators(
     order: int, over_order: int
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """构造 native 四面体体积项去混叠三件套，与
-    `build_overintegration_operators("tet", order, over_order, ...)`
-    同样的用途和消费方式（`fr_residual/inviscid.py` 的过积分分支）。
+    消费方是 `fr_residual/inviscid.py` 的过积分分支。
 
     Args:
         order: 当前求解阶数 P（coarse）
-        over_order: 过积分阶数（`fr/overintegration_order.py::overintegration_order`，
-            与坍缩坐标版本同一个经验法则，见模块文档）
+        over_order: 过积分阶数（`fr/overintegration_order.py::overintegration_order`，见模块文档）
 
     Returns:
         (ref_rst_fine, interp_c2f, D_fine, restrict_f2c)：
         `ref_rst_fine` 形状 (n_fine,3)；`interp_c2f` 形状
         (n_fine,n_coarse)；`D_fine` 形状 (n_fine,n_fine,3)；
-        `restrict_f2c` 形状 (n_coarse,n_fine)——与坍缩坐标版本完全
-        对应的形状约定，`inviscid.py` 的过积分分支可以按同一套
-        `contract_shared_operator_1axis/2axis` 消费，不需要改动那段
-        通用代码本身。
+        `restrict_f2c` 形状 (n_coarse,n_fine)——与原生棱柱同一形状约定，`inviscid.py` 的过积分分支按同一套
+        `contract_shared_operator_1axis/2axis` 消费。
     """
     from scipy.linalg import lu_factor, lu_solve
 

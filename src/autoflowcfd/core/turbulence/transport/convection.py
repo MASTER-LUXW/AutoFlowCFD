@@ -48,9 +48,8 @@ from .faces import (
 
 
 #: k/omega 输运体积项恒走过积分（去混叠）：对流通量 `adj(J) rho u phi` 是非线性乘积，真实多项式次数约
-#: `3*order + 度量次数`，直接在 coarse SPs 上微分就是"先混叠再求导"。2026-09-15 起默认开、2026-10-18 删除开关
-#: `AFCFD_TURB_OVERINT`（off 档在坍缩棱柱 P1 上有 113% 的对流残差误差；原生基上 P1 体积项仍有 33 倍改善、P2 到
-#: 机器零，单步代价约 +10%）。P0 没有过积分几何（`get_overintegration_context` 返回 None），走单点路径。
+#: `3*order + 度量次数`，直接在 coarse SPs 上微分就是"先混叠再求导"（实测 P1 体积项 33 倍改善、P2 到机器零，
+#: 单步代价约 +10%）。P0 没有过积分几何（`get_overintegration_context` 返回 None），走单点路径。
 
 
 @njit(cache=True, parallel=True)

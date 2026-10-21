@@ -106,7 +106,7 @@ def generate_recommendations(report: MeshQualityReport, thresholds: dict) -> Non
             "Fix overlapping cells: usually a BL extrusion front crossing a "
             "facing surface (tight underbody-to-ground gaps) or a core-fill "
             "artifact at a tight BL seam - see the mesh repair loop "
-            "(mesh_gen/mesh_repair.py) for automated local cavity re-tiling"
+            "(grid/mesh_gen/repair/mesh_repair.py) for automated local cavity re-tiling"
         )
 
     if report.adjacent_volume_ratio_max > thresholds['max_adjacent_volume_ratio']:
@@ -114,7 +114,7 @@ def generate_recommendations(report: MeshQualityReport, thresholds: dict) -> Non
             "Reduce adjacent-cell volume ratio: usually caused by degenerate "
             "(sliver) tetrahedra at sharp convex edges/corners of the body, or "
             "abrupt tetgen size-grading transitions in the core fill - see the "
-            "mesh repair loop (mesh_gen/mesh_repair.py) for automated fixes"
+            "mesh repair loop (grid/mesh_gen/repair/mesh_repair.py) for automated fixes"
         )
 
     if report.orthogonality_max > thresholds['max_orthogonality_angle']:

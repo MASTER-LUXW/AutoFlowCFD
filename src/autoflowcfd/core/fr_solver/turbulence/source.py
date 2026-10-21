@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 湍流源项与输运的每步求值。
-
-从 `core/fr_solver/turbulence.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
-"""
+"""AutoFlowCFD V2.0 - 湍流源项与输运的每步求值。"""
 
 from typing import Optional
 
@@ -96,7 +93,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
     realizability 下限（都是当前场的函数，DES 长度尺度也在同一次求值里算出、不跨步保存）。
 
     `conv_geom`：标量对流的共享几何（只依赖平均流），隐式路径在 Newton 步起点
-    算一次传入（`transport/residual.py::prepare_convection_geometry`）。
+    算一次传入（`core/turbulence/transport/` 的 `prepare_convection_geometry`）。
     """
     if is_sa_family(solver.turb_model_name):
         from autoflowcfd.core.turbulence.sa import evaluate_sa_rates
@@ -140,7 +137,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
 
     # 完整输运项（对流+扩散）：对 SST/DDES 模型计算 k/omega 的 FR 空间输运
     # 残差，使 k/omega 不再仅是逐点 ODE 源项弛豫，而是真正随流场对流、
-    # 跨单元扩散。见 core/turbulence_transport.py 模块文档。
+    # 跨单元扩散。见 core/turbulence/transport/ 包文档。
     transport_k = None
     transport_w = None
     if is_sst_family(solver.turb_model_name):

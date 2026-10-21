@@ -190,7 +190,7 @@ class FaceExtractor:
             nodes: 节点坐标数组，具有 x, y, z 属性
             boundary_groups: 未使用；FaceData 不携带每面边界类型字段，
                 调用方必须通过拥有者单元对照 BoundaryMap.groups
-                分类边界（见 bc_handler.py）
+                分类边界
             strict: 如果任何面被超过 2 个单元共享（无效拓扑）则抛出
                 RuntimeError，而不是警告并继续。对生成和修复期间的
                 中间/探索性调用方默认为 False，其中瞬态非流形状态是
@@ -248,7 +248,7 @@ class FaceExtractor:
     ) -> FaceData:
         """从混合棱柱(BL) + 四面体(core) 网格提取面数据。
 
-        全局单元索引约定（匹配 mesh_gen/mesh_repair.py 中全程使用的
+        全局单元索引约定（匹配 grid/mesh_gen/repair/mesh_repair.py 中全程使用的
         现有 n_bl_cells 约定）：棱柱占据 [0, n_prism)，四面体占据
         [n_prism, n_prism + n_tet)。
 

@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 粘性界面校正(GPU)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_viscous.py`(原 723 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 粘性界面校正(GPU)"""
 
 
 from autoflowcfd.core.gpu import get_cupy
@@ -162,7 +159,7 @@ def _compute_viscous_interface_correction_gpu(
     与 core/fr_residual/viscous_flux_kernel.py::
     compute_viscous_interface_correction_kernel 逐字对应的数学移植，
     架构（分色、src0/src1 批量外插、scatter-add）仿照
-    gpu_inviscid.py::_compute_interface_correction_gpu 已验证过的模式。
+    gpu_inviscid/interface.py::_compute_interface_correction_gpu 已验证过的模式。
 
     与无粘 GPU 界面校正的两处刻意不同（都是有意的正确性选择，不是
     疏漏）：

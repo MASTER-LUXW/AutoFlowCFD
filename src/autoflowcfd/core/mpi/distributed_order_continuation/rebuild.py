@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值
-
-从 `src/autoflowcfd/core/mpi/distributed_order_continuation.py`(原 640 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值"""
 
 import numpy as np
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
@@ -20,11 +17,7 @@ def _interp_state_and_turbulence_local(solver, old_order: int,
     在下一步 `step()` 里重新获取，不需要在这里插值一份很快就会被覆盖
     的值）。
 
-    **按基分派（2026-09-20 修复）**：此前这里收一个一维 Gauss 张量积
-    Lagrange 矩阵 `W`，而那只对坍缩棱柱基的解点成立 —— native 四面体
-    （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20 起是
-    默认）线性场 P1->P2 的相对误差实测 7.0e-01 / 1.4e-01。改成传阶数、
-    由 `apply_order_interp` 按当前基与单元类型分派。local 索引空间同样是
+    `apply_order_interp` 按单元类型取各自原生基的精确延拓。local 索引空间同样是
     "棱柱在前"（见 `distributed_mesh_loader` 里 `n_prism_cells` 的来源）。
 
     Returns:
@@ -158,7 +151,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
             # Order Continuation 组合会在这里 AttributeError。
             if getattr(solver, '_iddes_h_max', None) is not None:
                 # h_max/h_wn 是全局、阶数无关的逐单元几何量（见
-                # des.py::compute_h_max_and_h_wn 文档），只需要按新的
+                # des/grid_scale.py::compute_h_max_and_h_wn 文档），只需要按新的
                 # compact_global_ids 重新切片，不需要重算。
                 compact_global_ids = new_dist_fc.compact_global_ids
                 solver.iddes_h_max_compact = solver._iddes_h_max[compact_global_ids]
@@ -175,7 +168,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     solver._local_solver = None
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效（见
-    # order_continuation.py::interpolate_to_new_order_checked 同名
+    # order_continuation/interp.py::interpolate_to_new_order_checked 同名
     # 处理文档——形状不再匹配，且严格来说也不再是同一离散空间下的解），
     # 否则下一步 BDF2 会静默用一份形状不匹配的历史层。
     reset_dual_time_history(solver)

@@ -1,20 +1,4 @@
-"""SolutionVector 数据结构。
-
-此前本文件还定义了 `BackendBase` 抽象基类，供 `cpu_backend.py`
-(`NumbaBackend`) / `gpu_backend.py` (`CUDABackend`) 实现——这两个类是
-V1 时代 Numba CUDA 方案的遗留骨架，与真正的生产求解路径
-（`core/fr_solver/solver.py::FRSolver` / `core/gpu/gpu_solver.py::
-GPUFRSolver`，全程 CuPy）完全脱节：`_cuda_flux_kernel` 用"中心平均"
-冒充 AUSM+up、`_cuda_residual_kernel` 恒返回 0、GPU 可用性检测用的是
-已被项目明确弃用的 `numba.cuda.is_available()`（见
-`ProjectFiles/V2.0/7_重大问题修复-GPU大规模并行计算.md` "统一采用
-CuPy……移除 Numba CUDA" 的既定决策，此前从未真正执行），且被自己的
-单元测试（已删除的 `test_backends.py`）当作真实可用的 GPU 后端做回归
-测试，制造"这是一套可用 GPU 后端"的假象（第四次评审发现7）。已确认
-`BackendBase`/`NumbaBackend`/`CUDABackend`/`create_backend` 全仓库
-零真实调用点（只有已删除的测试用到），第四次评审时一并删除，只保留
-真正被生产代码使用的 `SolutionVector`。
-"""
+"""SolutionVector：后处理用的单元平均守恒量与原始量访问器。"""
 
 import numpy as np
 from typing import Optional
@@ -35,13 +19,8 @@ class SolutionVector:
     - 2026-10-05 以前写出的 SST checkpoint 还有 data[:, 5:7]：状态数组的两个历史槽位（从未被更新，
       已删除；湍流量在模型对象上，后处理读 `core/turbulence/output.py` 的单元平均）
 
-    下面的 get_velocity()/get_pressure() 访问器会把
-    这些量转换成方法名所承诺的**原始**量（真实速度、静压）
-    ——以前这几个方法直接原样返回未转换的守恒量列（例如所谓的
-    "velocity" 其实是动量，"pressure" 其实是总能密度），会给任何调用方
-    悄悄地把数值标错好几个数量级。这里保留是为了向后兼容，但要注意
-    求解器自己的残差/边界条件代码**不**使用它们——那部分代码是按自己
-    的 gamma/下限约定就地推导原始量的（例如见 core/aero_coeffs.py）。
+    get_velocity()/get_pressure() 把守恒量换成**原始**量（真实速度、静压），供后处理（VTK 导出、瞬态统计）使用；
+    求解器自己的残差 / 边界条件代码不经过它们。
 
     Attributes:
         data: 解数组，形状=(n_cells, n_variables)

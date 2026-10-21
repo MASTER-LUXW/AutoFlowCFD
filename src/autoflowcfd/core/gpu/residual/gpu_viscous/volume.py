@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 粘性体积项与残差入口(GPU)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_viscous.py`(原 723 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 粘性体积项与残差入口(GPU)"""
 
 import numpy as np
 
@@ -83,7 +80,7 @@ def compute_viscous_residual_fr_gpu(
 ):
     """GPU 版粘性残差计算。
 
-    与 core/fr_viscous_flux.py::compute_viscous_residual_fr 公式一致。
+    与 core/fr_residual/viscous_flux/residual.py::compute_viscous_residual_fr 公式一致。
 
     Args:
         U: CuPy 数组 (n_cells, n_sps, n_vars)
@@ -97,7 +94,7 @@ def compute_viscous_residual_fr_gpu(
         mesh_data: 预上传的网格数据
         ops_data: 预上传的算子数据
         flat_face_gpu: 预构建的 GPU 面几何（可选，None 时自动构建，见
-            gpu_inviscid.py::compute_inviscid_residual_fr_gpu 同名参数）
+            gpu_inviscid/::compute_inviscid_residual_fr_gpu 同名参数）
         device_id: GPU 设备 ID
 
     Returns:
@@ -114,7 +111,7 @@ def compute_viscous_residual_fr_gpu(
             if mu_t_field is not None and isinstance(mu_t_field, np.ndarray):
                 mu_t_field = cp.asarray(mu_t_field)
 
-    # #1（2026-08-28）：见 gpu_inviscid.py::compute_inviscid_residual_fr_gpu
+    # #1（2026-08-28）：见 gpu_inviscid/::compute_inviscid_residual_fr_gpu
     # 同名注释——分布式多 GPU 路径下 n_cells/n_prism 必须从显式传入的
     # （已按 local+halo 压缩索引空间构造好的）mesh_data 读取，不能用
     # `mesh`（完整全局网格，供下面 get_flat_face_geometry 取真实
@@ -144,7 +141,7 @@ def compute_viscous_residual_fr_gpu(
     # 但 `grad(rho*u) = rho*grad(u) + u*grad(rho)`，不是 `grad(u)`，
     # 只有密度处处均匀（`grad(rho)=0`）时两者才恰好相等，这正是本项目
     # 大量"均匀自由流场"/"小密度扰动"测试从未捕捉到这个 bug 的原因。
-    # CPU 版 `viscous_flux.py::compute_viscous_residual_fr` 一直是对
+    # CPU 版 `core/fr_residual/viscous_flux/residual.py::compute_viscous_residual_fr` 一直是对
     # **原始变量** `Q`（`grad_Q=compute_physical_gradient(Q,...)`，
     # `grad_vel=grad_Q[:,:,1:4,:]`，`Q[1:4]` 本来就是 u/v/w 本身）求梯度
     # ——改为与 CPU 一致：对 `Q` 求梯度，不对 `U` 求梯度。
@@ -196,7 +193,7 @@ def compute_viscous_residual_fr_gpu(
     viscous_residual = div_G / det_jacs[..., None]
 
     # 3. 界面项（BR1 平均 + 边界 Interior Penalty 罚项）
-    # #1（2026-08-28）：见 gpu_inviscid.py::compute_inviscid_residual_fr_gpu
+    # #1（2026-08-28）：见 gpu_inviscid/::compute_inviscid_residual_fr_gpu
     # 同名注释——分布式路径必须用 dist_flat_face.base_flat（已按
     # local+halo 压缩索引重映射、只含本 rank 面）而不是全局 flat_face，
     # 否则边界幽灵态计算会用全局单元编号误当压缩索引读 Q。
@@ -236,24 +233,6 @@ def compute_viscous_residual_fr_gpu(
 
     viscous_residual = viscous_residual + interface_correction
 
-    # 真实 bug 修复（2026-09-03，排查"native tet P2 粘性残差与 CPU 不符"
-    # 时决定性定位——用真实合成网格逐项对照 CPU 参考实现，发现 P1 完全
-    # 一致但 P2 有真实数值分歧，volume/interface 两项单独拿出来对照都
-    # 逐位相同，只有把两者相加、比较"最终返回值"才复现分歧，说明分歧
-    # 发生在"相加之后"这一步——CPU 版 `viscous_flux.py::compute_
-    # viscous_residual_fr` 的最后一步是 `return suppress_residual_
-    # outliers(residual, U[...,:5])`（机制3：按 cell/SP/变量粒度检测
-    # 残差量级异常并清零，见 troubled_cell.py 模块文档），但本函数此前
-    # 直接 `return viscous_residual`——完全没有这一步。P1 阶段残差量级
-    # 小，从未越过异常判据的阈值，两者恰好"看起来"一致；P2 阶段（这次
-    # 合成测试用的随机扰动流场）残差量级更大，CPU 侧机制3 真实触发、
-    # 清零了部分 SP，GPU 侧未清零，二者从这一步起分道扬镳——不是
-    # native/collapsed 专属缺陷，是任意网格上 GPU 粘性残差路径一直
-    # 缺失的一个功能点（`gpu_inviscid.py::compute_inviscid_residual_fr_
-    # gpu` 早就在做同一件事，这里之前被漏掉了，两个函数本该对称）。
-    # 机制3 已于 2026-09-19 删除（完整依据见 `fr_residual/inviscid.py`
-    # 同一处）。上面那段"CPU 侧触发、GPU 侧未触发所以两条路径分道扬镳"
-    # 的记录因此成为历史：两侧现在都不做这一步，对称性由"都没有"保证。
-    # 同时省掉一次 `GPU -> CPU -> GPU` 往返。
+    # 与 CPU 版一致：不对残差做异常抑制。
     return (cp.asnumpy(viscous_residual) if input_is_numpy
             else viscous_residual)

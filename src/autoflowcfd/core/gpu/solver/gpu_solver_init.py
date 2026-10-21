@@ -21,7 +21,7 @@ class _GPUSolverInitMixin:
 
         此前这里用宽 `except Exception` 吞掉一切异常、把
         `self.flat_face_gpu` 静默设为 None——这正是分布式版本
-        `gpu_distributed_init.py::_init_distributed_face_geometry` 在上
+        `gpu_distributed_init/geometry.py::_init_distributed_face_geometry` 在上
         一轮评审中被认定为"必须移除的假通过错误处理"的同一类问题（该
         文件文档明确记录了这个反面教材），第四次评审发现单 GPU 版本没
         有同步修复（发现9）：`flat_face_gpu=None` 时，`gpu_inviscid.py`/

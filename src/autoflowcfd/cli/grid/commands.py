@@ -6,19 +6,11 @@
     - parse: 解析 .nas 网格文件
     - validate: 验证网格质量
     - info: 显示网格统计信息
-    - convert: 转换网格格式（v1.0）
-    - generate-volume: 从面网格 .nas 生成体网格
-      （已搬至 grid_volume_commands.py，见下）
-    - import-volume: 导入外部生成的体网格
-      （已搬至 grid_volume_commands.py，见下）
+    - convert: 转换网格格式（`convert_command.py`）
+    - generate-volume: 从面网格 .nas 生成体网格（`volume_commands.py`）
+    - import-volume: 导入外部生成的体网格（`volume_commands.py`）
 
-拆分说明（本文件原有 700 行，超过 400 行硬性拆分阈值）：
-`generate-volume`/`import-volume` 这两个围绕"体网格"主题的重量级命令
-（合计约 300 行）已搬到 grid_volume_commands.py，用普通
-`@click.command()` 定义后在本文件末尾通过 `grid.add_command(...)`
-注册——与 cli/main.py 给 `grid`/`solve`/`post`/... 这几个顶层命令组
-注册到 `cli` 的方式完全一致，只是往下多了一层。命令名、选项、帮助
-文本、`autoflowcfd grid --help` 里的可见效果都与拆分前完全一致。
+另外两个文件里的命令用普通 `@click.command()` 定义，在本文件末尾通过 `grid.add_command(...)` 注册到 `grid` 组。
 
 Example:
     $ autoflowcfd grid parse model.nas
@@ -357,10 +349,7 @@ def info(input_file: str, units: str, json_output: bool) -> None:
         raise click.ClickException(f"Failed to get grid info: {e}")
 
 
-# generate-volume / import-volume 两个体网格重量级命令已搬到
-# grid_volume_commands.py（见本文件顶部拆分说明），这里用与
-# cli/main.py 给 grid/solve/post/... 注册到 cli 完全一致的
-# add_command 机制接回来，注册后 CLI 可见效果与拆分前完全一致。
+# 体网格命令与格式转换命令定义在同目录的另外两个文件里，在此注册到 grid 组。
 from autoflowcfd.cli.grid.volume_commands import generate_volume, import_volume  # noqa: E402
 from autoflowcfd.cli.grid.convert_command import convert  # noqa: E402,F401
 

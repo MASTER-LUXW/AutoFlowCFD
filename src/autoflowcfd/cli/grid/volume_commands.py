@@ -1,17 +1,8 @@
-"""体网格生成/导入子命令。
+"""体网格子命令：`generate-volume`（从面网格生成体网格）与 `import-volume`（导入外部已生成的体网格，例如 ANSA
+导出的体网格）。
 
-从 grid_commands.py 中拆分出来（该文件超过 400 行硬性拆分阈值）：
-`generate-volume`（从面网格生成体网格）和 `import-volume`（导入外部
-已生成的体网格，例如 ANSA 自己的体网格导出）这两个命令都是围绕"体
-网格"这一主题的重量级命令（合计约 300 行），与 grid_commands.py 里
-剩下的 parse/validate/info/convert（轻量、面网格层面的操作）自成
-一组，是清晰的拆分边界。
-
-这里的两个命令用普通的 `@click.command()`（而不是 `@grid.command()`）
-定义——因为定义时这里还拿不到 `grid` 这个 group 对象——由
-grid_commands.py 在模块加载末尾 `grid.add_command(...)` 注册，注册后
-在 `autoflowcfd grid --help` 里的可见效果、命令名、选项、帮助文本与
-拆分前完全一致（都用了显式 `name=` 参数，不依赖函数名推导）。
+两个命令用普通的 `@click.command()`（显式 `name=`）定义，由 `commands.py` 在模块末尾 `grid.add_command(...)`
+注册到 `grid` 组（定义时这里还拿不到 `grid` 组对象）。
 """
 
 import click
@@ -167,17 +158,10 @@ def generate_volume(
         if not skip_quality_report:
             logger.info("Validating volume mesh quality...")
             quality_report = MeshQualityValidator().validate_volume_mesh(volume_mesh)
-            # Stage A/B（mesh_gen/mesh_repair.py）在上面生成体网格的过程中
-            # 已经跑完了——这里纯粹是对其结果的信息展示，不是导出门槛：
-            # 无论通过与否，下面都会照常写出体网格文件，因为一个真正无法
-            # 收敛的 case（例如真实的尖锐凸角——见 mesh_repair.py 自己
-            # 记录的、实测出的极限）否则就完全产不出任何可供检查/手动
-            # 修复的结果。这里以前还有一个 Stage C（全局 min_cell_size
-            # 退让 + 完整重新生成）——按用户要求已移除：实测下来是个不
-            # 可靠的净收益（3 组受控 cube_demo 对比里有 2 组反而比原始
-            # 参数更差），同时还会让导出的网格静默偏离用户实际要求的
-            # min_cell_size。真正的求解期质量门（cli/solve/commands.py）
-            # 才是任何迭代开始前真正拦截的地方。
+            # 修复 Stage A/B（grid/mesh_gen/repair/mesh_repair.py）在上面生成体网格的过程中已经跑完——这里只展示
+            # 结果，不是导出门槛：无论通过与否都照常写出体网格，否则真正修不好的 case（例如尖锐凸角，见
+            # mesh_repair.py 记录的实测极限）就产不出任何可供检查 / 手动修复的结果。拦截在求解前的质量门
+            # （grid/validation/solve_gate.py）。
             if quality_report.passed:
                 logger.info(f"\n{quality_report.summary()}")
             else:

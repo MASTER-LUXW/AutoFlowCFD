@@ -4,9 +4,6 @@ AutoFlowCFD V2.0 - P0 无粘残差的 CuPy CUDA 实现（`GPUFRSolver` 的 P0 �
 经典分片常数有限体积格式，每个面独立取真实几何法向/面积，调用 AUSM+up 黎曼求解器，原子累加到
 owner/neighbor 单元残差（与 CPU 版 `_compute_inviscid_residual_fv_p0` 同一算法）。
 
-2026-10-04 删除了两个旧入口：带主机<->设备传输的 `compute_inviscid_residual_p0_cupy`（只有
-`FRSolver(backend='gpu')` 在用，该分支已随单 GPU 统一到 `GPUFRSolver` 删除）与它的前身
-`core/backend/fr_gpu_p0.py`（numba.cuda 版，生产代码零调用）。
 """
 
 import numpy as np
@@ -32,7 +29,7 @@ void ausm_up_flux(
     double* flux
 ) {
     // ── AUSM+up 数值通量 ──
-    // 与 core/fr_kernels.py::compute_ausm_up_flux 逐字对应
+    // 与 core/fr_operators/kernels.py::compute_ausm_up_flux 逐字对应
     double gamma = AFCFD_GAMMA;   // core/thermo.py::GAMMA
 
     // 两侧状态不钳制（与 CPU compute_ausm_up_flux 同一约定，I-18）
@@ -56,7 +53,7 @@ void ausm_up_flux(
     fa = fmax(fa, 1e-6);
 
     // M4±/P5± 耗散系数——真实 bug 修复（V2.0 专家组盲审第四次评审，
-    // 2026-08-28，#12），与 core/fr_kernels.py::compute_ausm_up_flux
+    // 2026-08-28，#12），与 core/fr_operators/kernels.py::compute_ausm_up_flux
     // 逐字对应，完整推导/文献交叉核实见该文件同名注释。
     double beta_mass = 1.0 / 8.0;
     // P5± 的 alpha 项不乘 1/4（Liou 2006 式 (24)；2026-09-25 修正，见

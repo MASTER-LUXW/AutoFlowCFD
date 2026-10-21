@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 逐点量：温度、粘性物理通量
-
-从 `src/autoflowcfd/core/fr_residual/viscous_flux.py`(原 560 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 逐点量：温度、粘性物理通量"""
 
 
 import numpy as np

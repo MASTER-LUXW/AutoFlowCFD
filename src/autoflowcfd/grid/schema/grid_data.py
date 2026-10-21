@@ -270,8 +270,7 @@ class VolumeMeshData:
                 boundary_groups = self.boundaries.groups if self.boundaries else None
 
                 # strict=True：这是真正的求解/导出时守卫
-                # （从 solver_steady.py、transient_solver_loop.py、
-                # nas_export.py、quality_validator.py、后处理调用）——
+                # （求解前质量门、nas 导出、质量校验与后处理调用）——
                 # 此时网格生成自身的修复阶段已全部运行完毕，
                 # 因此这里一个被 >2 个单元共享的面是真实的、
                 # 未修正的拓扑缺陷（静默通量损失，见

@@ -107,13 +107,13 @@ def step(solver, dt: float) -> float:
                                    else dt_local[::max(n_sps, 1)])
 
         # 湍流源项在当前状态下求值一次（沿用旧有的单步显式-半隐式
-        # 阻尼更新，见 turbulence_sst.py::update_fields）。
+        # 阻尼更新，见 core/turbulence/sst/update.py::update_fields）。
         #
         # 关键修复（真实复现：cube_demo 生产网格 + 小合成 Couette+SST 算例
         # 均可复现）：此前这里传的是 step() 收到的原始物理 dt（CLI
         # `solve steady` 固定传 1e-3，且 Order Continuation 各阶数共用
         # 同一个值，从不随阶数/网格收紧），而不是刚算出来的、真正随阶数
-        # /粘性刚性/几何退化收紧过的 dt_local（cfl.py::compute_local_
+        # /粘性刚性/几何退化收紧过的 dt_local（core/fr_solver/cfl.py::compute_local_
         # time_step，三种机制取最小值，专门为压制包括湍流交叉扩散在内的
         # 刚性子系统设计——见该文件文档第2条）。k/omega 场的更新
         # （SSTModelFR.update_fields）是纯显式前向欧拉

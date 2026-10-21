@@ -29,41 +29,21 @@ def decode_attr(value):
     return value
 
 
-#: checkpoint 记录的棱柱基（唯一实现是原生基；坍缩棱柱基 2026-09-23 删除）
+#: checkpoint 记录的棱柱基（唯一实现是原生基）
 PRISM_BASIS = "native"
 
 
 def _check_prism_basis(meta_group, checkpoint_path) -> None:
     """校验 checkpoint 是原生棱柱基下写的，否则硬失败。
 
-    **为什么必须硬失败**（2026-09-20）：两条棱柱基的每单元解点布局不同
-    —— 原生基 P1 每单元只有前 6 个槽位是自由度，其余是按
-    `fr/native_padding.py` 约定复制真实 SP#0 的填充位；坍缩基 8 个全是
-    自由度。同一份 `(n_cells, n_sps, n_vars)` 数组在两条基下**含义不同**，
-    跨基 resume 会静默重解释它，给出一个看不出异常的错解（不会报形状
-    不符：形状恰好相同）。
-
-    与 `config_hash` 那条**刻意不同级别**：配置哈希不一致只是"可能影响
-    结果"（例如 CFL 上限变了），而棱柱基不一致是"这份数据的含义变了"。
-
-    `prism_basis` 属性是 2026-09-20 才开始写的，而坍缩棱柱基已于
-    2026-09-23 删除（原生是唯一实现）。于是只剩两种不兼容情形，**都必须
-    硬失败**：
-
-    * 属性缺失 -> 那是 2026-09-20 之前写的 checkpoint，那时唯一的默认值
-      是 collapsed；
-    * 属性存在但不是 `"native"` -> 显式在坍缩档下写的。
-
-    两者都拒绝，因为两条基的每单元解点布局不同（原生基有零填充槽位），
-    而形状恰好相同、**不会报错**，只会静默重解释成错解。
+    没有 `prism_basis` 属性（坍缩坐标棱柱基时期写的）或值不是 `"native"` 的 checkpoint，解点布局与原生基不同
+    （同一个解点数组在两条基下含义不同），续算会把它重解释成错解，所以拒绝而不是告警。与 `config_hash` 不一致
+    （"可能影响结果"，只告警）不是同一级别：这里是"数据的含义变了"。
     """
     if 'prism_basis' not in meta_group.attrs:
         raise ValueError(
-            f"Checkpoint {checkpoint_path} 没有记录棱柱基（2026-09-20 之前"
-            f"写的，那时唯一的默认值是已删除的 collapsed）。两条基的每单元"
-            f"解点布局不同，跨基 resume 会静默给出错解（形状恰好相同、"
-            f"不会报错）。坍缩棱柱基已于 2026-09-23 删除，没有"
-            f"“用坍缩档续算”这个选项了 —— 只能在原生基下从头开始。")
+            f"Checkpoint {checkpoint_path} 没有记录棱柱基：它是坍缩坐标棱柱基时期写的，解点布局与现行原生基"
+            f"不同，不能续算——请在当前版本下从头开始计算。")
 
     saved = decode_attr(meta_group.attrs['prism_basis'])
     if saved != PRISM_BASIS:

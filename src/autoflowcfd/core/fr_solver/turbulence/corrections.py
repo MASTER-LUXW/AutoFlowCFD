@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 湍流涡粘修正的施加与涡粘场取用。
-
-从 `core/fr_solver/turbulence.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
-"""
+"""AutoFlowCFD V2.0 - 湍流涡粘修正的施加与涡粘场取用。"""
 
 from typing import Optional
 

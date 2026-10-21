@@ -1,11 +1,6 @@
-"""分布式求解器（CPU MPI"传统模式"/"完全分布式加载"/多GPU）的
-checkpoint 重建辅助函数——从 `solve_checkpoint_io.py` 同一套单机重建
-逻辑镜像而来（2026-09-02，用户明确要求"不允许出现完成度不是100%的
-功能点"后补齐——此前分布式路径只能"保存一次最终 checkpoint"，没有
-任何"从分布式 checkpoint 继续跑"的机制，`solve resume` 对
-`--n-ranks`/`--multi-gpu`/`--fully-distributed` 完全没有感知）。
+"""分布式求解器（CPU MPI"传统模式"/"完全分布式加载"/多GPU）的 checkpoint 重建。
 
-设计与单机版 `rebuild_solver_from_checkpoint` 完全一致：checkpoint
+设计与单机版 `cli/solve/checkpoint_io/rebuild.py::rebuild_solver_from_checkpoint` 一致：checkpoint
 的 metadata 记录了重建求解器所需的全部构造参数（input_file/order/
 turbulence_model/backend/自由来流条件），据此重新走一遍
 `load_mesh_for_solver` + 对应的分布式求解器构造函数，再用
@@ -47,15 +42,8 @@ def rebuild_distributed_solver_from_checkpoint(
             state`/`scatter_local_state` 这类纯数组操作理论上支持变
             rank 数，但重建构造过程本身（分区）依赖调用方传入正确的
             `n_ranks`）
-        cfl_start / cfl_max / cfl_min: 自适应 CFL 的初始值/上限/下限。
-            **真实缺口修复（2026-09-17）**：本函数此前四个构造点一个都
-            不传 CFL 参数，于是全部分布式 `solve resume` 都静默使用控制器
-            自身的默认值（0.1 / 0.5 / 0.05）——那个下限 0.05 高于本项目在
-            两张真实网格上实测稳定的 CFL（~0.03），所以一条原本固定 CFL
-            0.03 稳定收敛的分布式运行，一旦 resume 就会被抬到发散。
-            `solve steady` 的同一组四个构造点早在 2026-09-15 就补齐了
-            （见 `solve_steady_command.py` 那处注释），resume 这条命令
-            被漏掉了。
+        cfl_start / cfl_max / cfl_min: 自适应 CFL 的初始值/上限/下限，传给全部四个构造点（不传则续算静默用
+            控制器自身的默认值，与原运行的 CFL 律不一致）。
         multi_gpu: 是否重建为 `MultiGPUDistributedSolver`
         fully_distributed: 是否走"完全分布式加载"重建（只有 root 加载
             完整网格）——与 `multi_gpu` 互斥，两者都为 False 时是 CPU
@@ -96,12 +84,8 @@ def rebuild_distributed_solver_from_checkpoint(
     # target_order（Order Continuation 的最终目标阶数，solver.order）与
     # order（checkpoint 保存那一刻的 solver.current_order，决定重建
     # mesh/求解器初始状态要用哪个 n_sps 才能跟保存的 U_sps 形状对上）
-    # 是两个独立的量（2026-09-02，Order Continuation 接入分布式路径后
-    # 补齐，与单机 solve_checkpoint_io.py::rebuild_solver_from_checkpoint
-    # 同一处修复同一个设计——见该文件同名字段文档）。缺省回退到 order
-    # 本身，兼容本次修复之前保存的旧 checkpoint（没有 target_order
-    # 字段，那种情况下当时 order 记的就是静态目标阶数，二者天然相等，
-    # 回退安全）。
+    # 是两个独立的量（与单机 rebuild_solver_from_checkpoint 同一设计）。缺省回退到 order 本身：没有
+    # target_order 字段的 checkpoint 不是 Order Continuation 写的，order 就是目标阶数。
     target_order = int(metadata.get("target_order", order))
     turbulence_model = metadata["turbulence_model"]
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")

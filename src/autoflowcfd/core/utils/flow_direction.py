@@ -176,12 +176,9 @@ def freestream_conservative_state(freestream: dict, n_vars: int = 5) -> np.ndarr
 def direction_from_freestream(freestream: dict) -> np.ndarray:
     """从 `solver.freestream` 字典取来流方向，缺字段时退化为 +x。
 
-    为什么要容忍缺字段：`freestream` 字典由多条路径各自构造（单机 /
-    CPU MPI 两种模式 / 多 GPU 两种模式 / checkpoint 重建），旧
-    checkpoint 的 metadata 里也没有 aoa/aos。退化为 +x 与此前的硬编码
-    行为**完全一致**，所以对旧数据是向后兼容的、不是静默吞掉配置
-    ——真正需要报错的是"用户显式传了攻角但某条路径没转发"，那由
-    `tests/unit/test_flow_direction_wiring.py` 的跨入口一致性检查覆盖。
+    为什么要容忍缺字段：`freestream` 字典由多条路径各自构造（单机 / CPU MPI 两种模式 / 多 GPU 两种模式 /
+    checkpoint 重建），未写 aoa/aos 的 checkpoint 就是零攻角零侧滑。"用户显式传了攻角但某条路径没转发"由
+    `tests/unit/test_freestream_direction_everywhere.py` 的跨入口一致性检查覆盖。
     """
     return freestream_direction(
         float(freestream.get("aoa_deg", 0.0) or 0.0),

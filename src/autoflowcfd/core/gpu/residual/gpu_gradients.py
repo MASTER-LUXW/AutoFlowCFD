@@ -1,7 +1,7 @@
 """
 AutoFlowCFD V2.0 - GPU 版物理空间梯度计算
 
-与 core/fr_gradients.py 对应的 CuPy 版本。
+与 core/fr_operators/gradients.py 对应的 CuPy 版本。
 核心操作：共享算子张量收缩 + 度量项链式法则。
 
 数学公式完全一致：
@@ -16,7 +16,7 @@ from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_share
 def compute_physical_gradient_gpu(field, mesh_data, ops_data):
     """GPU 版物理空间梯度计算。
 
-    与 core/fr_gradients.py::compute_physical_gradient 公式完全一致。
+    与 core/fr_operators/gradients.py::compute_physical_gradient 公式完全一致。
 
     Args:
         field: CuPy 数组 (n_cells, n_sps, n_field_vars)

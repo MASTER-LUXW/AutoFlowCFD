@@ -6,15 +6,9 @@
 ——本项目已经反复因为"同一件事有两份实现、只改了一份"出真实缺陷（见
 项目记忆 `feedback-prefer-deleting-redundant-code`）。
 
-为什么单独成一个模块：这个判断本身曾经有**两份**实现，且判据不同——
-`core/gpu/gpu_overintegration.py` 按 `type(arr).__module__` 前缀判断，
-`core/fr_operators/bounds_sensor.py`（2026-10-18 随模态滤波删除）按有没有 `__cuda_array_interface__`
-判断。两者在 CuPy 与 NumPy 上结论一致，但对第三方数组（例如 numba 的
-`DeviceNDArray`——它有 `__cuda_array_interface__` 却**不是** CuPy 数组，
-`cupy.ndarray` 的方法在它上面不存在）结论相反：前者返回 NumPy（会在
-后续运算里报错，能看见），后者返回 CuPy（会拿 CuPy 函数去操作一个
-非 CuPy 对象，行为不可预期）。所以这里统一取**模块前缀**判据，并显式
-拒绝"有 CUDA 接口但不是 CuPy"的对象，而不是默默按 NumPy 处理。
+判据取数组类型的**模块前缀**，并显式拒绝"有 `__cuda_array_interface__` 但不是 CuPy"的对象（例如 numba 的
+`DeviceNDArray`，`cupy.ndarray` 的方法在它上面不存在）：按"有 CUDA 接口"判断会拿 CuPy 函数去操作非 CuPy
+对象，行为不可预期；默默按 NumPy 处理同样不对。
 
 不能无条件 `import cupy`：本机与 CI 都没有 CuPy，GPU 模块按"有则用、
 无则跳过测试"的方式组织（见 `core/gpu/__init__.py`）。

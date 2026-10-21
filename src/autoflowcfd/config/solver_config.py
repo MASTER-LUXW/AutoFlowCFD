@@ -51,21 +51,7 @@ class TurbulenceModel(str, Enum):
 
 
 
-# **2026-09-18：配置层原本在这里定义了一个独立的同名枚举，已删除。**
-#
-# 那是一个"同一语义两个事实来源"的典型：配置层的是 `str, Enum`、取值
-# `backward_euler/rk2/rk3/ab3`；核心层的是普通 `Enum`、取值
-# `forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time`（imex_euler 已于 2026-10-17 删除）。两者取值范围既
-# 不相同、也不可互相表达（配置层没有 dual_time/imex_euler，核心层没有
-# backward_euler/ab3 —— 后两个在核心层**从未实现**）。
-#
-# 后果不是理论上的：`api_config.py::api_create_transient_config` 把
-# `dual-time` 映到 `BACKWARD_EULER`、把 `imex` 映到 `RK3`（两者都不是
-# 所选的方案），未知取值还 `.get(..., RK3)` 静默退回。之所以一直没人
-# 发现，是因为这个字段本身未接入求解器 —— 而"未接入"不是让错误映射
-# 留在代码里的理由：一旦有人把它接上就是静默跑错格式。
-#
-# 现在配置层直接复用核心层那个枚举，字符串解析统一走
+# 时间格式：配置层直接复用核心层的枚举，字符串解析统一走
 # `core/time_integration/base.py::scheme_from_name`（唯一那张词汇表，
 # 未知取值报错而不是静默换方案）。
 from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL, STEADY_SCHEMES  # noqa: E402
@@ -97,7 +83,7 @@ class SolverConfig:
         output_dir: 输出目录路径
         checkpoint_interval: 检查点保存间隔（步数）
         mu_molecular: 分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气）。
-            与 core/fr_solver/solver.py::FRSolver 构造参数同名同义——
+            与 core/fr_solver/solver/core.py::FRSolver 构造参数同名同义——
             粘性残差组装和粘性 CFL 步长必须用同一个值，不能各自硬编码
             （历史教训见该参数在 FRSolver 里的文档）。CLI `solve steady`/
             `solve transient` 的 `--mu-molecular` 选项、或本 YAML 配置的
@@ -144,8 +130,7 @@ class SolverConfig:
 
     def __post_init__(self):
         """配置的唯一校验点（YAML 加载、API、直接构造都经过这里）：枚举字段接受字符串并转换，取值范围与 CLI
-        同一组常量。2026-10-18 以前另有 `config/schema.py::ConfigSchema` 再校验一遍（口径不同、生产不调用），
-        YAML 加载器另做一遍枚举转换；直接构造 `SteadyConfig(backend="gpuu")` 不报错。"""
+        同一组常量；直接构造时非法取值同样报错（例如 `SteadyConfig(backend="gpuu")`）。"""
         self.backend = _enum_value(BackendType, self.backend, "后端")
         # 湍流模型名接受枚举值与命令行名（sst_kw / sst 同义），唯一映射在 turbulence_names.py
         from autoflowcfd.config.turbulence_names import turbulence_from_name
@@ -185,7 +170,7 @@ class SolverConfig:
         # ——用户两次明确要求项目文件夹里不许出现这些目录，根源就在这。
         #
         # 而且它是**冗余**的：真正写输出的两处都自己建目录
-        # （`cli/solve/checkpoint_io.py::save_results` 与
+        # （`cli/solve/checkpoint_io/write.py::save_results` 与
         # `cli/solve/steady.py` 的保存分支都有
         # `os.makedirs(output_dir, exist_ok=True)`）。要显式预建请调用
         # 下面的 `ensure_output_dir()`。

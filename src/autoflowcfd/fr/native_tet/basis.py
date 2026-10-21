@@ -1,49 +1,22 @@
 """
-AutoFlowCFD V2.0 - 四面体独立（非坍缩坐标）单纯形基函数与微分算子。
+AutoFlowCFD V2.0 - 四面体原生单纯形基函数与微分算子。
 
-背景（完整原理见 `ProjectFiles/V2.0/8_算法重构-微分算子对坍缩坐标退化
-参考轴的病态条件数-Part1~6.md`，本文件是 Part6 整改计划阶段0的落地）：
-`collapsed_basis.py` 的坍缩坐标（Duffy变换）方案已被决定性证明是 P1
-缓慢发散的根本原因——不是数值精度问题，是"用一个立方体的整张面压缩
-成四面体一条棱/一个顶点"这个几何操作本身，在退化处引入了 P1 阶自由度
-（8个模态）根本无法表示的几何复杂度（真实测得相对误差862400%）。
+直接在四面体自己的参考单纯形 `(r,s,t)` 上构造 Dubiner/PKD 正交模态基（`i+j+k<=order`，
+`(order+1)(order+2)(order+3)/6` 个）、Warp & Blend 节点与它的**原生**梯度（直接对 r,s,t 求导）。
 
-本文件走一条完全独立的路线：不经过立方体坍缩坐标中间表示，直接在
-四面体自己的参考单纯形 `(r,s,t)` 上构造 Dubiner/PKD 正交模态基
-（`i+j+k<=order`，比 `collapsed_basis.py` 的 `(order+1)^3` 族少
-2~3倍自由度）和它的**原生**梯度（直接对 r,s,t 求导，不经过 a,b,c
-坍缩坐标这个有真实几何奇点的中间变量）。
+为什么不用坍缩坐标（Duffy）张量积基：把立方体的整张面压缩成四面体的一条棱 / 一个顶点，在退化处引入了低阶
+模态根本无法表示的几何复杂度——实测是 P1 缓慢发散的根因（真实测得相对误差 862400%），且三分之一的四面体把
+残差放大 6~7 个量级（与棱柱同类，见 `fr/native_prism/__init__.py` 的对照表）。
 
-`simplex3d_value`/`simplex3d_grad` 逐行移植自 Hesthaven & Warburton
-《Nodal Discontinuous Galerkin Methods》配套参考实现
-`Simplex3DP.m`/`GradSimplex3DP.m`（2026-08-30 从
-https://github.com/tcew/nodal-dg 抓取核实的原始 MATLAB 源码，Codes1.1/
-Codes3D/ 目录）。这两个函数内部仍然要用到 (a,b,c) 这套坍缩坐标记号
-来**写出**多项式公式（这是 Dubiner 1991 年构造这套正交多项式时用的
-数学工具，任何实现都绕不开，包括 Nektar++），但 `simplex3d_grad`
-给出的是对 **(a,b,c) 本身**的导数，全程只用非负整数次幂
-的 `(1-b)`、`(1-c)`，不含任何除法——真正会带来坐标奇点的，是
-"(r,s,t)→(a,b,c) 这个方向的映射"（多对一、不可逆，见 Part1 3.1节
-解析推导），本文件从头到尾没有用到这个方向的映射：`build_native_
-tet_operators` 直接用 Warp&Blend 节点的 (r,s,t) 坐标去调用
-`rst_to_abc`（这个方向：(r,s,t)→(a,b,c)，同样需要用到，但只用于取值，
-不用于求导——`simplex3d_value` 在退化轴上的取值本身处处有限，
-`rst_to_abc` 在那里的 fallback 分支不影响取值结果，因为对应的权重
-因子在那里恰好为零，见 `rst_to_abc` 文档），然后用 `Simplex3DP`/
-`GradSimplex3DP` 的封闭解析公式直接在这组 (a,b,c) 上求值/求梯度——
-`GradSimplex3DP` 给出的实际上已经是对参考三角形/四面体原生坐标的
-正确梯度（这是 Warburton 团队封闭解析推导的结果，本文件只是逐行
-移植，不是重新推导）。
+`simplex3d_value`/`simplex3d_grad` 逐行移植自 Hesthaven & Warburton《Nodal Discontinuous Galerkin Methods》配套
+参考实现 `Simplex3DP.m`/`GradSimplex3DP.m`（https://github.com/tcew/nodal-dg，Codes1.1/Codes3D/）。这两个
+函数内部用 (a,b,c) 坍缩坐标记号**写出**多项式公式（Dubiner 1991 构造这套正交多项式的数学工具，任何实现都绕不
+开，包括 Nektar++），但全程只用非负整数次幂的 `(1-b)`、`(1-c)`，不含除法；会带来坐标奇点的是
+"(r,s,t)→(a,b,c)"这个方向的映射，这里只用它**取值**（`rst_to_abc` 在退化轴上的 fallback 不影响取值，因为对应
+权重因子在那里恰好为零），梯度由 `GradSimplex3DP` 的封闭解析公式直接给出对原生坐标的正确梯度。
 
-决定性验证结果（scratchpad 原型，`path_c_regular_gradient_test.py`，
-真实 Couette 解析解、180 个随机四面体样本）：
-恒等映射测试（参考四面体自身顶点当物理坐标）det_jacs 在 P1~P3 全部
-节点精确等于 1.000000（坍缩坐标方案在同样测试下会在退化顶点直接给出
-0——即使用有限差分抄近路也会，只有本文件这种解析封闭解才能避开）；
-Couette 剪切流残差 P1 改善约 10400 倍、P2 约 37000 倍、P3 约 4200 倍，
-100% 样本更优，且自由度更少。
-
-本文件只是基础库，尚未接入任何求解器路径（Part6 阶段0范围）。
+验证：恒等映射（参考四面体自身顶点当物理坐标）下 det_jacs 在 P1~P3 全部节点精确等于 1.000000；Couette
+剪切流残差相对坍缩基 P1 改善约 10400 倍、P2 约 37000 倍、P3 约 4200 倍（180 个随机四面体样本 100% 更优）。
 """
 
 from typing import List, Tuple
@@ -56,9 +29,8 @@ from ..jacobi import jacobi_polynomial, grad_jacobi_polynomial
 
 def restricted_tet_modes(order: int) -> List[Tuple[int, int, int]]:
     """四面体最小 PKD/Dubiner 模态索引集合：`i+j+k<=order`，
-    共 `(order+1)(order+2)(order+3)/6` 个——与 `collapsed_basis.py` 的
-    `(order+1)^3`（各方向独立取阶数）族相比，这才是四面体真正所属的
-    单纯形多项式空间维度，不含任何冗余自由度。
+    共 `(order+1)(order+2)(order+3)/6` 个——四面体真正所属的单纯形多项式空间维度，不含冗余自由度
+    （各方向独立取阶数的 `(order+1)^3` 族里多出来的模态在单纯形上不独立）。
 
     展平顺序：先按 i、再按 j、再按 k 递增（与 `simplex3d_value`/
     `simplex3d_grad` 循环顺序一致，供调用方在同一顺序下构造
@@ -151,9 +123,7 @@ def rst_to_abc(r: np.ndarray, s: np.ndarray, t: np.ndarray) -> Tuple[np.ndarray,
     fallback 值不影响任何下游结果：`simplex3d_value`/`simplex3d_grad`
     在 i>0（或 i+j>0）的模态上，权重因子 `(1-b)^i`/`(1-c)^(i+j)`
     在这些点上恰好为零，把 'a' 或 'b' 的具体取值直接乘没了；i=0
-    的模态则根本不依赖 'a'/'b'（`g_00≡1`）。这与
-    `collapsed_basis.py::build_collapsed_boundary_extrap` 文档描述的
-    "取值在退化轴处处有限"是同一个数学事实，这里只是复用它。
+    的模态则根本不依赖 'a'/'b'（`g_00≡1`）——取值在退化轴上处处有限。
     """
     c = t
     denom_b = 1.0 - c
@@ -181,11 +151,9 @@ def build_native_tet_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
         (ref_rst, D_native)：
         `ref_rst` 形状 `(n_native_sps, 3)`，Warp & Blend 优化节点在
         标准参考四面体 `(r,s,t)` 上的坐标（`n_native_sps =
-        (order+1)(order+2)(order+3)/6`，比 `collapsed_basis.py` 同阶数
-        的 `(order+1)^3` 少 2~3 倍）；
-        `D_native` 形状 `(n_native_sps, n_native_sps, 3)`，与现有
-        `D_3d_tet` 同样的消费方式（`D[:,:,m]@field` 给出对参考坐标
-        第 m 个方向——这里是 r/s/t，不是 a/b/c——的导数）。
+        (order+1)(order+2)(order+3)/6`）；
+        `D_native` 形状 `(n_native_sps, n_native_sps, 3)`，`D[:,:,m]@field` 给出对参考坐标第 m 个方向
+        （r/s/t）的导数。
     """
     from ..warp_blend_nodes import warp_blend_nodes_3d
     from ..diff_matrix_consistency import enforce_constant_annihilation
@@ -232,7 +200,7 @@ def map_native_tet_to_physical(ref_rst: np.ndarray, cell_nodes: np.ndarray) -> n
     Args:
         ref_rst: (n_native_sps, 3)，来自 `build_native_tet_operators`
         cell_nodes: (4, 3)，四面体 4 个顶点物理坐标，顺序需保证正体积
-            （与 `curved_mapping.py::fix_tet_orientation` 同一约定）
+            （与 `grid/curved_mapping/curved_mapping_orientation.py::fix_tet_orientation` 同一约定）
 
     Returns:
         phys: (n_native_sps, 3)
@@ -355,19 +323,15 @@ def _native_mode_norm_squared(i: int, j: int, k: int) -> float:
     """`simplex3d_value` 给出的模态 `∫_ref P_i,j,k^2 dV` 闭式解析解——
     **重要说明**：这些模态是正交的（不同模态内积恒为 0，`build_native_
     tet_lift` 用到的关键性质），但**不是**正交*归一*的（模长不是 1）：
-    `simplex3d_value` 内部复用的 `collapsed_basis.py::jacobi_polynomial`
-    是"未归一化" Jacobi 多项式（该函数文档明确说明——那个模块给坍缩
-    坐标用，只要求可逆不要求正交归一），本文件复用它构造 Dubiner
-    正交基时没有另外补上 Hesthaven-Warburton 原始 `JacobiP.m` 那个
-    L2 归一化前缀，因此继承了"正交但非归一"这个性质，与本文件顶部
-    模块文档"正交模态基"的表述是一致的（正交号≠归一化）。
+    `simplex3d_value` 内部用的 `fr/jacobi.py::jacobi_polynomial` 是"未归一化" Jacobi 多项式，构造 Dubiner
+    正交基时没有另外补上 Hesthaven-Warburton 原始 `JacobiP.m` 那个 L2 归一化前缀，因此是"正交但非归一"。
 
     推导（标准 Jacobi 多项式加权模方公式，A&S 22.2.1，代入本构造里
     全部用到的 β=0 情形后化简为不含 Gamma 函数的初等表达式）：
     `γ_n^(α,0) = 2^(α+1)/(2n+α+1)`，`simplex3d_value` 三个因子
     `h1=P_i^(0,0)(a)`、`h2=P_j^(2i+1,0)(b)*(1-b)^i`、
     `h3=P_k^(2(i+j)+2,0)(c)*(1-c)^(i+j)` 各自对应一段区间积分，配合
-    (a,b,c)→物理坐标坍缩坐标 Jacobian `(1-b)(1-c)^2/8` 与前缀
+    (a,b,c)→(r,s,t) 的 Duffy 变换 Jacobian `(1-b)(1-c)^2/8` 与前缀
     `(2*sqrt(2))^2=8` 恰好抵消，最终得到
     `N(i,j,k)=γ_i^(0,0)*γ_j^(2i+1,0)*γ_k^(2(i+j)+2,0)
     =2^(4i+2j+5)/[(2i+1)(i+j+1)(2i+2j+2k+3)]`。
@@ -381,22 +345,17 @@ def _native_mode_norm_squared(i: int, j: int, k: int) -> float:
 
 
 def build_native_tet_boundary_extrap(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
-    """native 四面体（路径C）体积->自身面外插矩阵，与
-    `collapsed_basis.py::build_collapsed_boundary_extrap` 同样的用途和
-    消费方式（`E @ Q_volume_nodal` 给出该面 Flux Points 上的取值），
-    但只依赖 `(order, excluded_vertex)`，与具体物理单元形状无关——
-    与坍缩坐标方案的 `boundary_extrap_tet[(axis,side)]` 同一个可预计算
-    一次、全网格所有同阶数单元共享的性质（已用真实数值验证：两个形状
+    """native 四面体体积->自身面外插矩阵（`E @ Q_volume_nodal` 给出该面 Flux Points 上的取值），
+    只依赖 `(order, excluded_vertex, slot)`，与具体物理单元形状无关——可预计算一次、全网格所有同阶数单元
+    共享（已用真实数值验证：两个形状
     差异很大的四面体，用 `fr/face_flux_points/geometry.py::native_tet_face_points_
     physical` 生成的面物理点，反解出的参考坐标 (r,s,t) 完全相同，机器
     精度，因为反解本质上是在还原生成这些物理点时用过的同一组重心坐标
     权重，这组权重只取决于 (a,b) 采样网格本身，不取决于具体单元形状）。
 
-    face Flux Points 的数量固定为 `n1d*n1d`（`n1d=order+1`），与坍缩
-    坐标方案的面 Flux Points 数量一致（不是 native 最小面节点数
-    `(order+1)(order+2)/2`）——这是 Part7 文档"二·五"节记录的必要修正：
-    `_KernelFaceData` flat 数组假设全网格所有面的 Flux Points 数量统一，
-    native 面必须提供同样数量的点，用与棱柱三角形封盖相同的坍缩三角形
+    face Flux Points 的数量固定为 `n1d*n1d`（`n1d=order+1`，不是 native 最小面节点数
+    `(order+1)(order+2)/2`）：`_KernelFaceData` flat 数组要求全网格所有面（含棱柱四边形侧面）的 Flux Points
+    数量统一，三角形面用与棱柱三角形封盖相同的坍缩三角形
     采样网格生成面上的参考点位置（见 `face_flux_points/geometry.py::
     native_tet_face_points_physical` 的物理版本，这里是它的参考坐标
     版本，直接给出 (r,s,t) 不需要另外反解）。
@@ -416,14 +375,9 @@ def build_native_tet_boundary_extrap(order: int, excluded_vertex: int, slot: int
 
 
 def build_native_tet_lift(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
-    """native 四面体（路径C）DG 提升算子（"lift"/"LIFT matrix"）——把
-    某个真实面上逐 Flux Point 的通量跳跃（`F_common - F_own`，与坍缩
-    坐标方案 `_distribute_point` 消费的 `jump` 同一物理含义）提升成对
-    体积节点（nodal）自由度的修正贡献，是坍缩坐标方案里"1D Radau/VCJH
-    修正函数 `g_left`/`g_right` + `_distribute_point`"这一步对 native
-    （非张量积、非坍缩坐标）单纯形基的**唯一正确推广**——native 基没有
-    "坍缩计算方向"，1D 修正函数沿某一轴分布这个概念不适用，必须换成
-    标准 DG 的提升算子（Hesthaven-Warburton《Nodal DG》第6章
+    """native 四面体 DG 提升算子（"lift"/"LIFT matrix"）——把某个真实面上逐 Flux Point 的通量跳跃提升成对
+    体积节点（nodal）自由度的修正贡献。单纯形基没有张量积计算方向，1D Radau/VCJH 修正函数沿某一轴分布这个
+    概念不适用，用的是标准 DG 的提升算子（Hesthaven-Warburton《Nodal DG》第6章
     `Lift3D.m`），但这里的 Flux Points 不是体积节点的子集（`n1d*n1d`
     个，用坍缩三角形采样生成，见 `native_tet_face_points_physical`
     文档"二·五"节的必要修正），不能照抄该书假设"面节点=体积节点子集"
@@ -462,9 +416,7 @@ def build_native_tet_lift(order: int, excluded_vertex: int, slot: int = 0) -> np
 
     调用方（残差 kernel）消费方式：
     `correction[s,v] = -Lift_ref[s,:]@(true_area_weight[:,None]*jump)[:,v] / det_j`
-    ——与坍缩坐标分支 `-contrib_owner[s,v]/dj`（`dj=det_jacs[oc,s]`，
-    直边四面体处处相同）逐项对应，可以复用外层同一次 `/dj` 除法，不需要
-    在这里预先乘 `1/det_j`（详见调用处）。
+    ——`dj=det_jacs[oc,s]` 在直边四面体处处相同，复用外层同一次 `/dj` 除法，不在这里预先乘 `1/det_j`。
 
     `slot`：坍缩顶点槽位（`fr/triangle_apex.py`），与 `build_native_tet_boundary_extrap`
     同一组通量点。
@@ -481,9 +433,7 @@ def compute_native_tet_jacobian(cell_nodes: np.ndarray) -> Tuple[float, np.ndarr
     """直边四面体物理雅可比——重心坐标仿射映射对 (r,s,t) 的偏导数是
     **常数矩阵**（`tet_barycentric` 展开：dphys/dr=0.5*(p1-p0)，
     dphys/ds=0.5*(p2-p0)，dphys/dt=0.5*(p3-p0)，均与 (r,s,t) 无关），
-    处处非奇异（只要四面体本身体积非零），不需要像坍缩坐标方案那样
-    逐点用微分矩阵 `D@phys` 算一遍——这是路径C相对现有实现的一个真实、
-    免费的简化：每个单元只需要算一次。
+    处处非奇异（只要四面体本身体积非零），每个单元只需要算一次（不逐点用微分矩阵 `D@phys` 求）。
 
     Returns:
         (det_j, adj_j)：det_j 是标量（该单元的常数 Jacobian 行列式），

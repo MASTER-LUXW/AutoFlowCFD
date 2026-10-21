@@ -15,9 +15,9 @@ LES（WALE）同样不经过本文件的 SST/DDES/IDDES 主函数（没有 ODE �
 09-02 续接）两条路径都接入。
 
 设计原则：**复用**而不是重新实现单机 SST 的完整数值逻辑
-（`core/fr_solver/turbulence.py::compute_turbulence_source`、
-`core/turbulence/sst.py::SSTModelFR.compute_source_terms/update_fields`、
-`core/turbulence/transport.py::compute_turbulence_transport_residual`）——
+（`core/fr_solver/turbulence/source.py::compute_turbulence_source`、
+`core/turbulence/sst/model.py::SSTModelFR.compute_source_terms/update_fields`、
+`core/turbulence/transport/residual.py::compute_turbulence_transport_residual`）——
 这些函数本身已经是纯 (状态, 网格, 算子) -> 残差的函数式接口（唯一状态
 来自传入的 `solver`-like 对象），分布式版本只需要：
 1. 对 k/omega 做与平均流 U 同一套 halo 交换 + compact 索引空间重排
@@ -183,7 +183,7 @@ def build_distributed_turbulence_view(
     `adapter` 满足单机 `fr_solver/turbulence/source.py` 求值件的鸭子类型接口，
     `turb_view` 是 n_compact 大小的临时模型（`turb_model.like`，输运场经 halo 交换填好）。
     显式更新（`distributed_compute_turbulence_source_and_viscosity`）与隐式
-    k-omega Newton（`distributed_implicit_turbulence.py`）共用这一份构造。
+    湍流 Newton（`core/mpi/distributed_implicit.py`）共用这一份构造。
     """
     n_sps = local_mesh.n_sps_per_cell
 

@@ -1,7 +1,7 @@
 """体积项/梯度里"共享算子 (不依赖 cell) 张量收缩"的高效实现 (性能优化配套)。
 
-`fr_residual_inviscid.py`（体积项 over-integration 三件套 + 无 fine 几何回退
-分支）、`fr_viscous_flux.py`（体积项散度）、`fr_gradients.py`（物理空间梯度）
+`core/fr_residual/inviscid.py`（体积项过积分）、`core/fr_residual/viscous_flux/`（体积项散度）、
+`core/fr_operators/gradients.py`（物理空间梯度）
 里大量出现形如::
 
     np.einsum("fs,csv->cfv", D, X)      # D 不依赖 cell，只收缩 1 个轴
@@ -17,9 +17,7 @@
 `np.tensordot` 对两个操作数的收缩，内部本身就是"reshape 成 2D + 调用
 `np.dot`（BLAS gemm）+ reshape 回去"（numpy 自己的实现，非本项目新写的
 数值算法）——用它替换这些 einsum 调用，是完全等价的同一个求和公式，
-只是换一条计算路径，不改变数学结果（浮点重结合误差与此前 numba 化
-界面项时处理的是同一类、已用相对容差验证过的现象，见
-`fr_residual_inviscid_kernel.py` 模块文档）。
+只是换一条计算路径，不改变数学结果（只有浮点重结合误差，已用相对容差验证）。
 
 两个小函数只处理"D 在前、X 在后，D 的收缩轴固定是紧跟在输出轴之后的
 1 或 2 个轴"这一种调用形状——这正是本代码库里所有出现该模式的调用点
@@ -58,7 +56,7 @@ def compute_adj_j(det_jacs: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
 
     性能优化：这是一个纯 numpy 广播乘法，此前直接写成
     `det_jacs[...,None,None] * inv_jacs`——数学上没问题，但 numpy 的
-    ufunc 广播默认单线程执行，在 `fr_residual_inviscid.py` 的过积分
+    ufunc 广播默认单线程执行，在无粘残差的过积分
     fine 网格上（P2 阶数 n_pts=64）这一行单次调用要处理约 3.6GiB 数据，
     py-spy 采样过的真实 79万单元生产网格 profile 证实
     `compute_inviscid_residual_fr` 自身（不算任何子函数调用）的耗时里

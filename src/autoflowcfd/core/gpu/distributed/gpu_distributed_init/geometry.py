@@ -65,36 +65,13 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         # compact_global_ids（构造压缩 mesh_data、在残差计算前后重排
         # U_extended_gpu，见 compute_inviscid_residual_gpu 文档）以及
         # base_flat（边界幽灵态计算需要的、按压缩索引重映射过的 CPU 侧
-        # FlatFaceGeometry，见 gpu_inviscid.py::compute_inviscid_residual_
+        # FlatFaceGeometry，见 gpu_inviscid/::compute_inviscid_residual_
         # fr_gpu 的 flat_face_cpu 参数文档），因此这里保留一份引用。
         self.dist_flat_face = dist_flat_face
         from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
-        # 真实 bug 修复（2026-09-02，排查"--multi-gpu 仍拒绝 native"时发现，
-        # 与 native 无关，collapsed 模式下同样必现）：此前这里把
-        # `dist_flat_face`（`DistributedFlatFaceGeometry` 包装对象）直接
-        # 传给 `build_gpu_flat_face`，但该函数（`GPUFlatFaceGeometry.
-        # __init__`）需要的是一个真正的 `FlatFaceGeometry`（`.owner_cell`/
-        # `.neighbor_cell`/`.owner_adj_row_exact`/`.color_face_indices`等
-        # 字段直接存在）——`DistributedFlatFaceGeometry` 只对其中一部分
-        # 字段提供了 `@property` 转发到 `base_flat`（`owner_axis`/
-        # `true_normal`/`boundary_extrap`等），但**没有**为 `owner_cell`/
-        # `neighbor_cell`/`owner_adj_row_exact`/`neighbor_adj_row_exact`/
-        # `owner_face_op`/`neighbor_face_op`/`true_area_weight`/
-        # `boundary_extrap_native`/`lift_native`/`mixed_*`/
-        # `color_face_indices`/`n_colors` 提供转发（该类真正持有的对应
-        # 字段名是 `owner_cell_local`/`neighbor_cell_local`，与
-        # `GPUFlatFaceGeometry` 期望的名字不同）——直接传 `dist_flat_face`
-        # 会在 `GPUFlatFaceGeometry.__init__` 第一次访问 `flat_face.
-        # owner_cell` 时 `AttributeError`，`MultiGPUDistributedSolver`
-        # 从未真正构造成功过（本机无 CuPy/MPI，这条路径此前完全没有可
-        # 执行的测试覆盖，用纯 CPU/numpy 的 `DistributedFlatFaceGeometry`
-        # 构造+ `hasattr` 检查已经能独立于 CuPy 决定性验证这个
-        # AttributeError，见 tests/unit/test_distributed_flat_face_gpu_
-        # compat.py）。正确对象是 `dist_flat_face.base_flat`——已经是
-        # 按 local+halo 压缩索引空间重新构造好的完整 `FlatFaceGeometry`
-        # （`owner_cell=owner_cell_local`/`neighbor_cell=neighbor_cell_local`
-        # 等，见 build_distributed_flat_face 构造 `sub_flat` 处），包含
-        # native 四面体（路径C）字段在内的全部数据。
+        # 传 `dist_flat_face.base_flat`（按 local+halo 压缩索引空间构造好的完整 `FlatFaceGeometry`），不是
+        # `DistributedFlatFaceGeometry` 包装对象：后者只转发部分字段，`GPUFlatFaceGeometry` 要的 `owner_cell` 等
+        # 字段它没有（`tests/unit/test_distributed_flat_face_gpu_compat.py`）。
         self.flat_face_gpu = build_gpu_flat_face(dist_flat_face.base_flat, self.device_id)
 
     def _halo_exchange_gpu(self):

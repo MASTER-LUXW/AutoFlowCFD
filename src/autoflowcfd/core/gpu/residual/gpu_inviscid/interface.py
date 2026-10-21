@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 无粘界面校正与其 gather/scatter 辅助(GPU)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_inviscid.py`(原 710 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 无粘界面校正与其 gather/scatter 辅助(GPU)"""
 
 
 
@@ -18,7 +15,7 @@ def _extrap_q_to_fp(cp, mat, src_cell, Q_gpu):
 
 def _add_q_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, Q_gpu):
     """叠加稀疏第二来源（分裂面场景），Q 专用版本，见
-    gpu_viscous.py::_add_src1_to_fp 同名通用版本的文档（这里内联一份
+    gpu_viscous/extrap.py::_add_src1_to_fp 同名通用版本的文档（这里内联一份
     Q-only 版本，避免 gpu_inviscid.py<->gpu_viscous.py 产生循环 import：
     两者都从 gpu_inviscid_volume.py 导入 prepare_mesh_data/prepare_ops_data，
     不再互相 import）。"""

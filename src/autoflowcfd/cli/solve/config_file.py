@@ -2,15 +2,8 @@
 
 优先级：命令行显式给出的选项 > YAML 里**显式写出**的字段 > click 声明的默认值。
 
-2026-10-09 以前（`physical_constants.py`）有三处缺陷：
-* 只要某个 CLI 参数取的是 click 默认值，就用配置对象里的同名字段覆盖——而那可能只是配置类自己的默认值，YAML
-  里根本没写。实测：只写了物理常数的 YAML 让 `solve steady` 的最大迭代步数从 1000 变成 50（`SteadyConfig.max_iter`
-  默认值）、`solve transient` 的时间步长从 1e-5 放大到 1e-4，`physical_time` 取 `total_time` 的默认 0.1 s、把
-  `--max-iter` 换算成几千上万步；湍流模型被换成配置默认的 SST。现在只用 YAML 里显式出现的键。
-* 只处理物理常数与少数几个同名字段：`cfl_init`/`n_threads`/`checkpoint_interval`/`output_dir`/`gpu_device`/
-  `backend`/`time_scheme`/`init_from_checkpoint`/`convergence_tol` 写进 YAML 不起作用。现在凡是有对应 CLI 参数的
-  配置字段都生效（名字不同的经 `_CLI_NAME`，枚举经 `_cli_value` 换成 CLI 词汇）。
-* YAML 里出现本命令没有的参数（例如瞬态字段写进稳态配置）时静默忽略；现在报错。
+YAML 里只有**显式出现**的键参与覆盖（配置类自己的默认值不算）；凡是有对应 CLI 参数的配置字段都生效（名字不同的
+经 `_CLI_NAME`，枚举经 `_cli_value` 换成 CLI 词汇）；出现本命令没有的参数（例如瞬态字段写进稳态配置）时报错。
 """
 
 import functools

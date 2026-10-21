@@ -173,8 +173,8 @@ def apply_periodic_pairing_from_boundary_map(face_conn: FRFaceConnectivity, boun
     所有 `bc_type=='PERIODIC'` 的边界组，按 `parameters[name]` 里的
     `paired_with`/`translation` 逐对调用 `pair_periodic_boundary_faces`。
 
-    `parameters[name]` 约定（写入方：boundary/config.py 的 YAML 手动/
-    混合模式配置合并逻辑，或调用方直接构造 BoundaryMap 时手工填入）：
+    `parameters[name]` 约定（由直接构造 BoundaryMap 的调用方填入，例如 `tests/validation/_periodic_mesh.py`；
+    CLI 不提供周期边界配置）：
         {"paired_with": "<另一侧边界组名>", "translation": [tx,ty,tz]}
     只需在配对两侧之一填写（另一侧若也标了 PERIODIC 但没填 参数，
     仍会被从已处理一侧正确配对、跳过重复处理；若两侧都填了，要求

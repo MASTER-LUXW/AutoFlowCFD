@@ -48,8 +48,7 @@ def solve():
     pass
 
 
-# 导入子命令模块，触发 @solve.command() 注册（2026-09-25 起直接导入，删掉了
-# 只做转发的 solve_steady_commands.py 中间层）
+# 导入子命令模块，触发 @solve.command() 注册
 from autoflowcfd.cli.solve import steady as _steady_cmd  # noqa: F401,E402
 from autoflowcfd.cli.solve import transient as _transient_cmd  # noqa: F401,E402
 from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients  # noqa: E402

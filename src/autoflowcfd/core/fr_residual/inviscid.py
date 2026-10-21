@@ -1,25 +1,15 @@
 """
-AutoFlowCFD V2.0 - FR 无粘残差组装 (Tier-0 重建版, 对应 S-02/S-04)
+AutoFlowCFD V2.0 - FR 无粘残差组装（S-02/S-04）。
 
-替换旧版本中「全场单元平均态 + 硬编码法向量」的伪校正项
-(fr_solver.py::_compute_fr_correction_ausm)。真正实现：
+1. **体积项**：在参考空间对逆变通量 F̃_m = Σ_i adj(J)_{m,i} F_i(U) 做散度，再除以 det(J) 得到物理残差——
+   曲边 / 任意直边映射单元下与离散 GCL 一致的散度形式。P>=1 在过积分细点上求逆变通量（去混叠），本侧通量迹
+   并进体积算子 K（`fr/face_flux_trace.py`）。
+2. **界面项**：按单元-面连接关系（`grid/connectivity/face_connectivity.py` + `fr/face_flux_points/`）取得
+   owner/neighbor 双方在物理重合通量点上的解，AUSM+up 黎曼求解器（`core/fr_operators/kernels.py::compute_ausm_up_flux`）
+   用精确 adj(J) 行给出公共法向通量，经原生基 DG 提升算子（`lift_native`）投影回解点残差。
 
-1. **体积项**：在计算立方体空间用逆变通量 (contravariant flux)
-   F̃_m = Σ_i adj(J)_{m,i} F_i(U) 做散度，再除以 det(J) 得到物理残差——
-   这是曲边/坍缩坐标单元下唯一能保证与 GCL 一致的散度计算方式；旧版本
-   `fr_kernels.compute_fr_residual_kernel` 把计算空间微分算子 D_3d 直接
-   当作物理空间导数使用，缺少度量项变换，对任何非笛卡尔映射的单元
-   （即本代码库中的每一个四面体/棱柱单元）给出的都是错误导数。
-
-2. **界面项**：用真实单元-面连接关系（grid/face_connectivity.py +
-   fr/face_flux_points/geometry.py）取得 owner/neighbor 双方在物理重合点上的解，
-   用已验证正确的 AUSM+up 黎曼求解器（fr_kernels.compute_ausm_up_flux）
-   结合 FaceExtractor 给出的真实物理法向量/面积计算公共通量，再通过
-   Radau/VCJH 校正函数导数 (matrix_operators.compute_correction_weights)
-   投影回 SPs 残差。
-
-正确性通过「均匀自由流场残差应严格为零」(free-stream preservation /
-离散 GCL 的实际检验) 数值验证，见 tests/unit/test_fr_residual_inviscid.py。
+正确性判据：均匀自由流场残差严格为零（free-stream preservation，离散 GCL 的实际检验），见
+`tests/unit/test_fr_residual_inviscid.py`。
 """
 
 from typing import Callable, NamedTuple, Optional
@@ -224,10 +214,8 @@ def compute_inviscid_residual_fr(
         )
 
     if mesh.n_points_1d == 1:
-        # P0（Order Continuation 最低阶）：坍缩坐标单点度量方向在数学上
-        # 无法代表单元各面各自的真实法向，完全绕开度量张量外插机制，走
-        # 独立的真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0
-        # 文档。面着色取自与 P>=1 同一份面几何（CPU 分布式为 flat_face_override）。
+        # P0（Order Continuation 最低阶）：单个解点的度量无法代表单元各面各自的真实法向，走独立的
+        # 真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0 文档。面着色取自与 P>=1 同一份面几何（CPU 分布式为 flat_face_override）。
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from .inviscid_p0 import compute_inviscid_residual_fv_p0
 
@@ -240,16 +228,11 @@ def compute_inviscid_residual_fr(
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
 
-    # 过积分上下文改用共享 helper（2026-09-17）：此前本函数自己直读
-    # `mesh.jacobians_fine` / `mesh.n_sps_per_cell_fine` 并硬编码两段
-    # 算子，与 `viscous_flux.py` / `turbulence/transport.py` 那两个消费方
-    # 各写一份。native 四面体的过积分细网格轴不再填充到棱柱宽度之后，
-    # "每段的 n_fine 和度量切片"这件事必须三处完全一致，所以收敛到
-    # `volume_contract.get_overintegration_context` 这一个来源。
+    # 过积分上下文（每段的 n_fine 与度量切片）与粘性 / 湍流输运共用 `volume_contract.get_overintegration_context`。
     _oi = get_overintegration_context(mesh, ops)
     if _oi is not None:
         # 体积项去混叠（over-integration，V2.0 二次评审 Tier 0 #2）：直接
-        # 在 coarse SPs 上对 adj(J)*F_phys(Q) 做 D_3d_tet/prism 散度会
+        # 在 coarse SPs 上对 adj(J)*F_phys(Q) 做散度会
         # 把这个非线性乘积（真实多项式次数远高于 order）混叠到
         # degree-order 空间再求导——真实数值实验：对解析残差恒为 0 的
         # 线性剪切场，P2 算出的残差是真值的 43~62 倍。改为：① 把 Q
@@ -258,8 +241,7 @@ def compute_inviscid_residual_fr(
         # 与 coarse 版同源，见 HighOrderMesh._build_order_geometry）和
         # 在 FINE 点上重新算的物理通量算出逆变通量；③ 用 FINE 网格自己
         # 的微分矩阵求散度（差分的是更接近真实非线性次数的插值多项式）；
-        # ④ 把结果插值限制回 coarse SPs。见
-        # fr/collapsed_basis.py::build_overintegration_operators 文档。
+        # ④ 把结果插值限制回 coarse SPs。细点阶数见 `fr/overintegration_order.py`。
 
         # 逐单元执行整条 插值→物理通量→逆变通量→体积算子 K 链（`inviscid_volume_divergence`）。
         div_comp = inviscid_volume_divergence(Q, _oi)
@@ -281,7 +263,7 @@ def compute_inviscid_residual_fr(
     # 每次残差求值都要跑一遍，纯 Python 解释器 + 逐次小 numpy 调用的
     # 开销是实测 1546s/次残差求值的主因。控制流/数学公式与原实现逐字
     # 对应，只是执行方式换成编译后的原生代码，见
-    # fr_residual_inviscid_kernel.py 模块文档、
+    # core/fr_residual/inviscid_kernel.py 模块文档、
     # tests/unit/test_fr_residual_inviscid_kernel_crosscheck.py 的新旧
     # 实现逐位对比验证）。
     ghost_provider = require_ghost_provider(boundary_ghost_provider, "compute_inviscid_residual_fr")
@@ -302,7 +284,7 @@ def compute_inviscid_residual_fr(
     # 重新构建一遍等于试图从不完整/类型不匹配的数据重新推导面几何，
     # 必然出错或产出错误结果。调用方需要直接传入已经按同一套 local+halo
     # 压缩索引空间构造好的 `DistributedFlatFaceGeometry.base_flat`（与
-    # gpu_inviscid.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
+    # gpu_inviscid/residual.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
     # 参数同一个道理）。单机路径不传，行为完全不变。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider) if primitives is None else primitives.Q_ghost
@@ -337,36 +319,4 @@ def compute_inviscid_residual_fr(
     residual += correction
     del correction
 
-    # 机制3（`suppress_residual_outliers`，按 (cell,SP,变量) 粒度检测残差
-    # 量级异常并清零）**已于 2026-09-19 删除**。删除依据是真实网格上的
-    # 消融对照（plate_demo_volume_les，179,237 单元，P1 + LES）：
-    #
-    #     机制3 开：888 次调用，触发 15 次，清零 729 个槽位，末残差 nan
-    #     机制3 关：876 次调用，触发  0 次，清零   0 个槽位，末残差 nan
-    #
-    #     step      开                    关                  相对差
-    #        1      9.9435206851e+08      9.9435206857e+08    6e-11
-    #      100      7.1528723012e+08      7.1528722999e+08    1.8e-10
-    #      140      9.0997334909e+08      9.0997334913e+08    4e-11
-    #
-    # 也就是它**触发了、清零了、但把残差轨迹只改变了 ~1e-10 相对量，
-    # 并且没有改变发散这个结局**（两条都在 146~148 步 nan）。健康运行上
-    # 它从不触发（真实 LES 网格前 40 步 240 次调用 0 次、检查 17.2 亿个
-    # 槽位；合成 Couette/Blasius 两档棱柱基 x 两个阶数 0 次）。
-    #
-    # 删除后在**健康**运行上做了逐位对照（同一份 plate_demo_volume_les
-    # 第 400 步 checkpoint 续算，固定 CFL 0.03、sensor+bounds 默认档，
-    # 删除前/删除后各跑 5 步）：`U` 与 `Q` 两个 (179237, 8, 7) 场
-    # **逐位完全相同**；另一组 20 步对照的逐步残差也在日志的 7 位
-    # 有效数字上全部相同。也就是删除它对健康运行零影响。
-    # 单步耗时 11.117 s -> 10.634 s（去掉前 2 步 JIT 预热后的均值，
-    # 20 步），省 4.34%。
-    #
-    # 它的设立理由是**坍缩坐标四面体基**的各向异性放大（1/3 的四面体
-    # 单元把残差放大 6~7 个量级），而那套基已于 2026-09-03 删除；原生基
-    # 的 `max|D|` 是 O(1~5)，"同单元内残差比达 1e4" 这个触发条件已不可
-    # 达。代价是实测 79 万单元 P1 约 2.5 s/步（约占单步 11%），GPU 三条
-    # 路径还要为它做一次 GPU->CPU->GPU 往返。
-    # 加上 F2 记录的那个"整单元均匀放大逃过检测"的固有盲区与一次
-    # 灾难性误判史（P2/P3 四面体残差被整体清零），结论是删除。
     return residual

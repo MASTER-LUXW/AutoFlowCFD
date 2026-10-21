@@ -19,7 +19,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
 符号约定:
     残差 = 对流残差 + 扩散残差，返回值直接作为 dphi/dt 被调用方相加
-    （fr_solver/turbulence.py::update_fields: k += dt*(Sk + transport_k)），
+    （模型的 `update_fields`：k += dt*(Sk + transport_k)），
     与平均流残差的 RHS 约定一致（step.py: dU/dt = inv_res + visc_res）:
     - 对流残差 = -div(rho*U*phi)/det(J)（含界面上风校正）
     - 扩散残差 = +div(Gamma*grad(phi))/det(J)（含 IIPG 内罚界面项）——
@@ -30,7 +30,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
     更新: phi += dt * (transport_residual + source/rho)
 
 
-## 文件分工（2026-09-24 拆包，原 1476 行）
+## 文件分工
 
     face_frames.py  两侧坐标系的面外插、质量通量与 DG 提升（numba kernel）
     faces.py        上面几个 kernel 的调用层与共享对流几何（对流/扩散共用）

@@ -22,13 +22,13 @@ AutoFlowCFD V2.0 - GPU 版湍流标量（k/omega）输运残差 (#7 第四次评
 omega_wall / residual), 便于两侧对照 -- 本项目反复出过"同一语义两份实现、
 只改了一份"的缺陷, 让两边的文件边界重合能让漏改更容易被看见。
 
-## 文件分工(2026-09-24 拆包, 原 743 行)
+## 文件分工
 
     faces.py             两侧坐标系的面外插、质量通量与 DG 提升(GPU，对应 CPU 版 face_frames.py)
     omega_wall.py        omega 壁面目标值/Dirichlet 掩码(GPU)
     residual.py          对流/扩散残差与顶层编排(GPU)
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .omega_wall import (  # noqa: F401

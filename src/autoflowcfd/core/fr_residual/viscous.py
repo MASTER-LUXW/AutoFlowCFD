@@ -1,13 +1,8 @@
 """
-AutoFlowCFD V2.0 - FR 粘性残差计算入口 (S-03, Tier-0 重建版)
+AutoFlowCFD V2.0 - 守恒变量 / 标量场的物理梯度入口（S-03）。
 
-真正的物理通量函数、度量项一致的体积项、基于真实单元-面连接关系的
-BR1 界面耦合都在 core/fr_viscous_flux.py 中实现（该文件的历史版本
-体积过大且混杂了从未被真正触发的"完整LDG"死代码分支，已拆分——
-理由与验证记录见该文件模块文档）。本文件保留梯度的公开函数名
-（compute_gradients/compute_scalar_gradient），函数体委托给已验证正确的新实现。粘性残差
-直接调用 `compute_viscous_residual_fr`（2026-10-15 删掉了旧签名包装 `compute_viscous_residual`：
-它的 `state_Q` 参数从未被使用，分布式路径为了凑这个参数每次多算一遍原始变量）。
+粘性物理通量、体积项与界面耦合在 `core/fr_residual/viscous_flux/`（`compute_viscous_residual_fr`）；
+本文件给求解器与湍流模型提供梯度函数，委托给 `core/fr_operators/gradients.py`。
 """
 
 import numpy as np
@@ -20,18 +15,15 @@ def compute_gradients(U: np.ndarray, ops, mesh=None) -> np.ndarray:
 
     Args:
         U: 守恒变量，形状 (n_cells, n_sps, n_vars)
-        mesh: 需要提供 jacobians；为兼容旧调用位置参数保持在最后且可选，
-            但物理正确的梯度离不开度量项，缺失时直接报错而不是静默退化
-            为错误的（旧版本行为——直接用 D_3d 冒充物理导数）。
+        mesh: 提供度量项（jacobians）；缺失时报错（没有度量项就算不出物理梯度）。
 
     Returns:
         grad_U: 形状 (n_cells, n_sps, n_vars, 3)
     """
     if mesh is None:
         raise ValueError(
-            "compute_gradients now requires `mesh` to apply the metric-term chain rule "
-            "(see core/fr_gradients.py) - physical gradients cannot be computed correctly "
-            "without it for curved/collapsed-coordinate cells."
+            "compute_gradients requires `mesh` to apply the metric-term chain rule "
+            "(see core/fr_operators/gradients.py)"
         )
     return compute_physical_gradient(U, mesh, ops)
 

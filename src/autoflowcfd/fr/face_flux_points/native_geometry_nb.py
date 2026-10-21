@@ -1,12 +1,8 @@
 """AutoFlowCFD V2.0 - **原生**基参考几何的 numba 原语 + 插值共用入口。
 
 原生四面体（路径C）的 numba 版几何原语与"面点 -> 体积节点"插值矩阵；原生棱柱的插值矩阵在
-`fr/native_prism/interp_numba.py::native_prism_interp_matrix_nb`。2026-10-19 以前这里另有坍缩棱柱/坍缩四面体
-两条插值分支（面编码 0~5，生产网格的面编码全在 [6,15)，不可达），随坍缩模态基一并删除。
-
-从原 `kernel_helpers.py`（699 行）按功能拆出（2026-09-19，项目"单文件
-不超 500 行"规范）：坍缩坐标那一半在 `ref_geometry_nb.py`，面编码查找表
-在 `face_code_tables.py`。纯搬家，未改任何逻辑。
+`fr/native_prism/interp_numba.py::native_prism_interp_matrix_nb`。立方体参考坐标下的几何原语（三角形采样、
+棱柱面点的 Newton 定位）在 `ref_geometry_nb.py`，面编码查找表在 `face_code_tables.py`。
 """
 
 import numpy as np
@@ -17,9 +13,9 @@ from .ref_geometry_nb import _cube_to_tri_rs_nb, _tri_barycentric_nb
 
 
 # ============================================================================
-# native 四面体（路径C，非坍缩坐标）numba 版几何原语
+# native 四面体 numba 版几何原语
 #
-# 与上面坍缩坐标（(axis,side)）版本平行——见
+# 见
 # `fr/native_tet/basis.py`/`fr/face_flux_points/locate.py::
 # locate_native_tet_face_point`/`fr/face_flux_points/geometry.py::
 # native_tet_face_points_physical` 的纯 Python 参考实现，本节是它们的

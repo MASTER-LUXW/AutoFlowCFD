@@ -27,12 +27,8 @@ class _MultiGPUTimeStepMixin:
            一旦被调用必定 `AttributeError`（本轮在 CPU 侧实现分布式局部
            CFL 时实测触发过同一个错误）。
 
-        另有一处被记作"与既有实现保持一致，不在此扩大范围"的简化：只用
-        SP0 算谱半径。逐 SP 的几何/度量 CFL 限制（`dt_geometric`）正是
-        为了防住坍缩坐标下同一单元内不同 SP 的 det(J) 相差几百倍导致的
-        局部刚性失稳（项目记忆 `tet_collapsed_coord_anisotropy`），只取
-        SP0 等于把这层保护削掉大部分。现在与单机 GPU 路径一致：按所有 SP
-        逐个算、取单元内最小值。
+        与单机 GPU 路径一致：逐 SP 的几何/度量 CFL 限制（`dt_geometric`，见 `core/fr_solver/cfl.py` 文档第 3 条）
+        按所有 SP 逐个算、取单元内最小值。
 
         实现方式与 CPU 分布式一致：面积/法向取**与单机同一个几何量**
         （全局 `FRFaceConnectivity` 的逐面 area/normal，按
@@ -134,7 +130,7 @@ class _MultiGPUTimeStepMixin:
         # 影响；这里做了 `min(axis=1)` 把它归约成逐单元一个标量，冻结
         # 槽位就真的参与了竞争。
         # 具体污染路径：det_jacs/adj_j 对直边 native 四面体是**每单元一个
-        # 常数**（见 high_order_mesh_order.py::compute_native_tet_jacobians，
+        # 常数**（见 grid/high_order/order_jacobians.py::compute_native_tet_jacobians，
         # 真实行与填充行同值），所以 dt_geometric 不受影响；受影响的是
         # 逐 SP 的波速 (|u|+a) 与 rho/mu_eff——填充槽位给的是初始条件的值。
         # min 取的是"最大波速/最大 mu_eff"那一侧，因此典型来流初始化下

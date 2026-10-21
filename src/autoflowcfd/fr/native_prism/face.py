@@ -1,7 +1,6 @@
 """AutoFlowCFD V2.0 - 原生棱柱基的面算子：面通量点、体积->面外插、DG 提升。
 
-从 `native_prism_basis.py` 拆出（单文件 400 行上限的项目约定）。与
-`native_tet/basis.py` 里四面体那三个同名构造是**同一套推导**，只是
+与 `native_tet/basis.py` 里四面体那三个同名构造是**同一套推导**，只是
 参考单元换成 `三角形 × 直线`：
 
     build_native_tet_boundary_extrap  ->  build_native_prism_boundary_extrap
@@ -22,10 +21,8 @@
       3      侧四边形（排除 V1）  三角形边 V0-V2（r=-1 边）    x t
       4      侧四边形（排除 V2）  三角形边 V0-V1（s=-1 边）    x t
 
-**每个面恒有 `n1d^2 = (order+1)^2` 个通量点**，与坍缩棱柱方案、与 native
-四面体方案完全一致 —— `_KernelFaceData` 的 flat 数组假设全网格所有面的
-通量点数统一（见 `native_tet/basis.py::build_native_tet_boundary_
-extrap` 文档"二·五"节记录的那条必要修正）。这里不需要任何填充：
+**每个面恒有 `n1d^2 = (order+1)^2` 个通量点**，与原生四面体一致 —— `_KernelFaceData` 的 flat 数组要求全网格
+所有面的通量点数统一（见 `native_tet/basis.py::build_native_tet_boundary_extrap` 文档）。这里不需要任何填充：
   * 两个三角形封盖用**与 native 四面体三角形面相同**的坍缩三角形采样
     网格（`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上），
     天然 `n1d^2` 个点；
@@ -35,12 +32,7 @@ extrap` 文档"二·五"节记录的那条必要修正）。这里不需要任�
 习惯；封盖用 `t` 的符号区分。两者合成 0~4 的单一整数键，让消费方
 （残差 kernel 的面分派）只需要一个查找表。
 
-## 为什么要这一套（病根）
-
-坍缩棱柱基的 `max|D|` 随阶数爆炸（P1 2.05 -> P3 560.1），实测后果是
-自由流保持性只有 ~1e-9、以及只在被三角化的两个参考轴上长出的伪横流
-（P1 饱和、P2 无界增长导致发散）。完整数据见
-`native_triangle_basis.py` 与 `native_prism_basis.py` 的模块文档。
+选型依据（与坍缩坐标基的对照实测）见包文档 `fr/native_prism/__init__.py`。
 """
 
 from typing import Dict, Tuple
@@ -162,8 +154,7 @@ def build_native_prism_boundary_extrap(order: int, face_id: int, slot: int = 0) 
     """体积 -> 自身某个面的外插矩阵，`E @ Q_volume_nodal` 给出该面通量点
     上的取值。
 
-    与 `collapsed_basis.py::build_collapsed_boundary_extrap` 同样的用途与
-    消费方式，但只依赖 `(order, face_id)`、与具体物理单元形状无关：外插是
+    只依赖 `(order, face_id, slot)`、与具体物理单元形状无关：外插是
     **参考空间**里的运算，同阶数全网格共享一份（与 native 四面体那条
     同一个性质）。
 
@@ -213,9 +204,7 @@ def build_native_prism_lift(order: int, face_id: int, slot: int = 0) -> np.ndarr
     """某个面的 DG 提升算子（"lift"）：把该面逐通量点的通量跳跃
     （`F_common - F_own`）提升成对体积节点自由度的修正贡献。
 
-    这是坍缩坐标方案里"1D Radau/VCJH 修正函数 `g_left`/`g_right` +
-    `_distribute_point`"对原生棱柱基的**唯一正确推广**。参考空间的代数
-    推导与四面体侧 `build_native_tet_lift` **逐字相同**（那边有完整推导），
+    参考空间的代数推导与四面体侧 `build_native_tet_lift` **逐字相同**（那边有完整推导），
     这里只重述结论与本单元的特殊之处：
 
         Lift_ref = V @ diag(1/N) @ B^T
@@ -242,12 +231,8 @@ def build_native_prism_lift(order: int, face_id: int, slot: int = 0) -> np.ndarr
         du/dt = -(1/det_j(s)) [ sum_m D_m (adj_m . F) + sum_f C_f(xi) * (w_f ⊙ jump) ]
 
     其中 `C_f` 是**参考空间**里固定的修正函数、`w_f` 是物理面积权重、
-    `1/det_j` **逐 SP**。生产中的坍缩棱柱路径用的正是这个形式（参考空间的
-    `g_left`/`g_right` + 逐 SP 的 `det_jacs[oc, s]` 除法），所以把
-    `Lift_ref` 当 `C_f` 用、配逐 SP 的 `1/det_j`，与已长期验证的现有实现
-    是**同一类形式**，没有引入新的近似 —— 换的只是修正函数本身（1D
-    Radau/VCJH -> DG 提升），因为原生基没有"坍缩计算方向"、1D 修正函数
-    沿某一轴分布这个概念不适用。
+    `1/det_j` **逐 SP**。把 `Lift_ref` 当 `C_f` 用、配逐 SP 的 `1/det_j`，就是这个强形式本身，没有引入近似
+    （张量积基上 `C_f` 是 1D Radau/VCJH 修正函数，单纯形 / 棱柱原生基没有张量积计算方向，用 DG 提升）。
 
     常度量棱柱（右棱柱）上它额外地**恰好**等于精确的 `M_phys^{-1}`。
 
@@ -287,9 +272,9 @@ def build_all_native_prism_face_operators(
 # 立方体面 <-> 原生棱柱面 的对应表
 # ---------------------------------------------------------------------------
 #
-# 现有面连接/残差 kernel 用 `(axis, side)`（"立方体面"）给单元的面编号，
-# 因为坍缩棱柱的参考单元就是个立方体（其中 `b=+1` 退化为一条侧棱、不携带
-# 独立通量信息，见 `grid/curved_mapping/curved_mapping.py::PRISM_CUBE_FACES`）。
+# 面连接识别先用 `(axis, side)`（"立方体面"，棱柱局部顶点表 `PRISM_CUBE_FACES` 以立方体面名为键，其中
+# `b=+1` 退化为一条侧棱、不携带独立通量信息，见 `grid/curved_mapping/curved_mapping.py::PRISM_CUBE_FACES`）
+# 给单元的面编号，再翻译成原生面编码。
 # 原生棱柱的参考单元不是立方体，它的 5 个面用本模块的 `face_id` 编号。
 # 两者之间是**精确双射**：
 #

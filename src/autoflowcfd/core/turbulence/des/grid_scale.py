@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - DES 网格尺度(h_max / h_wn)
-
-从 `src/autoflowcfd/core/turbulence/des.py`(原 657 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - DES 网格尺度(h_max / h_wn)"""
 
 import numpy as np
 
@@ -26,11 +23,8 @@ def compute_h_max_and_h_wn(mesh) -> tuple:
     - 四面体单元（核心/尾流 LES 区域，本项目网格生成上设计为接近各向
       同性，不像棱柱层刻意拉伸）：没有明确的"法向"方向概念，取
       h_wn = h_max。
-      **这条标注已更正（2026-09-14）**：此前写"是标准简化"，那个说法不
-      准确，正确的理由是——h_wn 只进入 IDDES 的 `f_e2` **近壁抬升项**，
-      而本项目的近壁区按网格架构设计**全部是棱柱**（边界层挤出层，见
-      项目记忆 `tet_collapsed_coord_anisotropy`：近壁/高剪切区必须用
-      棱柱，这是架构要求而不是偏好）。四面体只出现在核心/尾流区，那里
+      理由：h_wn 只进入 IDDES 的 `f_e2` **近壁抬升项**，而本项目的近壁区按网格架构设计**全部是棱柱**（边界层
+      挤出层）。四面体只出现在核心/尾流区，那里
       `d_wall` 很大、`alpha = 0.25 - d_w/h_max` 深度为负、f_e2 的近壁
       修正本来就不激活——所以这个取值实际上从不进入起作用的那一项。
       它不是"用近似换简单"，而是在该项不激活的区域里取的合理定义。
@@ -79,7 +73,7 @@ def compute_h_max_and_h_wn(mesh) -> tuple:
             h_max）——**这条退路只在调用方确实拿不到壁面节点时使用**
             （例如 DDES 只需要 h_max、根本不消费 h_wn 的场景）。IDDES
             的生产路径一定会先算壁面距离，那时壁面节点是已知的，见
-            `fr_solver/turbulence.py::compute_wall_distance_for_solver`。
+            `cli/solve/wall_distance.py::compute_wall_distance_for_solver`。
 
     Returns:
         (h_max, h_wn): 均为形状 (n_cells,) 的数组

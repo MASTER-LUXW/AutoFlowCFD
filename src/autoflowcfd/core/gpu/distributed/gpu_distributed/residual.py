@@ -23,7 +23,7 @@ class _MultiGPUResidualMixin:
     def _permute_to_compact(self, U_native):
         """把 halo 交换协议原生排列（local在前、halo在后）的场数组重排到
         本类残差计算实际使用的"棱柱在前、四面体在后"压缩索引空间——见
-        distributed_flat_face.py::DistributedFlatFaceGeometry.perm 文档。
+        distributed_flat_face/types.py::DistributedFlatFaceGeometry.perm 文档。
         """
         return U_native[self._perm_gpu]
 

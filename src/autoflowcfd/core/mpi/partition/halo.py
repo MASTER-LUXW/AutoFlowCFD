@@ -47,7 +47,7 @@ def extend_halo_for_flux_point_cross_references(
         extra_dep_arrays: List[np.ndarray]，每个形状 (n_faces,)，每个面
             额外依赖的单元全局索引（-1 表示无）。调用方负责把 src1 的
             紧凑数组展开成这种 per-face 形式（见
-            `distributed_flat_face.py::_expand_compact_src1`）。
+            `distributed_flat_face/types.py::_expand_compact_src1`）。
 
     Returns:
         原地扩展后的 partition（同一个对象，为了链式调用方便返回它）

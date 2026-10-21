@@ -96,16 +96,9 @@ def build_fp_newton_parallel(
     nb_resid = np.zeros((n_faces, n_fp))
     ow_fc = np.zeros((n_faces, n_fp, 2))
     ow_resid = np.zeros((n_faces, n_fp))
-    # nb_interp/ow_interp 必须是 float64，不能降到 float32——已经真实
-    # 验证过 float32 在这里不安全，不是假设：cross-interpolation 用的
-    # 坍缩坐标模态 Vandermonde 矩阵条件数随阶数快速增长（collapsed_basis.py
-    # 文档实测 P2 时 cond~1e5、P3 时 cond~1e9），这意味着矩阵单个条目的
-    # 量级可以比"重构常数场应得的求和结果"大出条件数那么多倍——float64
-    # 的 lu_solve 正是为控制这个病态而不用显式求逆引入的（见
-    # face_flux_points.py::_get_v_sps_lu 文档），把算出来的矩阵条目本身
-    # 再降到 float32 存储，等于在最后一步重新引入同样量级的舍入误差，
-    # 白费了前面用 lu_solve 控制条件数的努力。真实回归测试证实了这一点：
-    # 把这两个数组改成 float32 后，tests/unit/test_fr_residual_inviscid.py
+    # nb_interp/ow_interp 必须是 float64，不能降到 float32：插值矩阵由体积 Vandermonde 的 LU 解出
+    # （`geometry.py::_get_v_sps_lu_native`），矩阵条目在相互抵消中重构常数场，降到 float32 存储会在最后一步
+    # 重新引入舍入误差。实测把这两个数组改成 float32 后，tests/unit/test_fr_residual_inviscid.py
     # 的自由流场保持性测试在 P=2（生产阶数）从 3e-5 容差內失败到
     # rel_res 量级压根不通过，线性剪切流去混叠测试在 P=3 下 max|mass
     # residual| 从应有的 <1e-2 暴涨到 1.512e+05——不是"略微变差"，是完全

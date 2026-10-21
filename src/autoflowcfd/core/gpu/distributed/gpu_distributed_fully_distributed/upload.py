@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 把紧凑索引空间的壁面几何上传到设备
-
-从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_fully_distributed.py`(原 557 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 把紧凑索引空间的壁面几何上传到设备"""
 
 
 

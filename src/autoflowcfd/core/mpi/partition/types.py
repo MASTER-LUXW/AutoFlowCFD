@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 分区结果的数据结构
-
-从 `src/autoflowcfd/core/mpi/partition.py`(原 612 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 分区结果的数据结构"""
 
 import numpy as np
 

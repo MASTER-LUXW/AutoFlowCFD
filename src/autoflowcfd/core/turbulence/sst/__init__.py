@@ -9,7 +9,7 @@ AutoFlowCFD V2.0 - SST k-omega 湍流模型 FR 离散 (T-01, T-02)
    标准公式里的一项，已改正并用近壁/远场极限数值验证）
 
 已知局限（V2.0 已修复）：k/omega 输运方程现已包含完整的对流+扩散输运项
-（见 core/turbulence_transport.py），k/omega 随流场对流、跨单元扩散，
+（见 core/turbulence/transport/），k/omega 随流场对流、跨单元扩散，
 不再仅是逐点源项 ODE 近似。F1/F2 混合函数、源项量纲、正性限制器等
 此前的问题也均已在 V2.0 评审中修复。
 """

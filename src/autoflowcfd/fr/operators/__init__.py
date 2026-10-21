@@ -11,7 +11,7 @@ AutoFlowCFD V2.0 - FR 算子生成器主接口
 四面体与三棱柱都只有原生基（四面体：受限 PKD/Dubiner + Warp&Blend 节点，`fr/native_tet/`；三棱柱：原生棱柱基，
 `fr/native_prism/`）。全部算子零填充块对角到统一的解点宽度 `FROperators.n_sps`（`fr/native_padding.py`）。
 
-## 文件分工（2026-09-19 拆包）
+## 文件分工
 
     container.py   `FROperators` 数据容器与它的取算子方法
     build.py       `generate_fr_operators` 构建流程

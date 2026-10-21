@@ -1,9 +1,9 @@
 """欧拉/粘性物理通量的逐点标量 numba 版本 (性能优化配套)。
 
-`core/fr_residual_inviscid.py::euler_physical_flux` 和
-`core/fr_viscous_flux.py::viscous_physical_flux` 是向量化 numpy 实现
+`core/fr_residual/inviscid.py::euler_physical_flux` 和
+`core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux` 是向量化 numpy 实现
 （`np.stack`/`np.zeros`/`np.swapaxes`/`np.eye`/`einsum`），在
-`fr_residual_inviscid_kernel.py`/`fr_viscous_flux_kernel.py` 的逐点
+`core/fr_residual/inviscid_kernel.py`/`core/fr_residual/viscous_flux_kernel.py` 的逐点
 numba `@njit` 主循环里会被反复调用（每个 Flux Point 调一次）——numba
 nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须重新写
 逐点标量版。这是整个性能优化里除了 AUSM+up 之外风险最高的新代码
@@ -13,18 +13,18 @@ nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须
 逐位对比验证（见 `tests/unit/test_fr_flux_kernels_pointwise.py`），不
 把这一步的验证并入端到端残差对比，出问题能立刻定位到这里而不是别处。
 
-两个函数的公式必须与 `fr_residual_inviscid.py::euler_physical_flux`/
-`fr_viscous_flux.py::viscous_physical_flux` 严格一致，改动前者时必须
+两个函数的公式必须与 `core/fr_residual/inviscid.py::euler_physical_flux`/
+`core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux` 严格一致，改动前者时必须
 同步检查后者是否也要改。
 
 
-## 文件分工(2026-09-24 拆包, 原 615 行)
+## 文件分工
 
     euler.py             欧拉物理通量与熵稳定体积散度
     viscous.py           粘性物理通量与 IP 罚项
     viscous_bc.py        粘性边界种类与边界"另一侧"梯度镜像
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .constants import (  # noqa: F401

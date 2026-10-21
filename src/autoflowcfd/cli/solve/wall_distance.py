@@ -63,13 +63,7 @@ def compute_wall_distance_for_solver(solver, volume_data):
     except click.ClickException:
         raise
     except Exception as e:
-        # 此前这里是裸 except Exception：任何失败都打印一行 warning 后静默降级为"simplified estimate"继续
-        # 求解——但 solver.wall_distance 实际仍是 None，SST/DDES 下游会在
-        # fr_solver_turbulence.py 里因 wall_distance is None 抛
-        # RuntimeError（等于这里的"降级"从未真正发生），LES/WMLES 下游则
-        # 没有这道保护、会真的带着错误的湍流模型悄悄跑完。与
-        # load_mesh_for_solver 的质量门"宁可报错也不静默放行"原则矛盾，
-        # 统一改为向上抛出可读错误。
+        # 壁面距离是湍流模型的必需输入，算不出来就报错（不降级为估计值继续求解）。
         raise click.ClickException(
             f"壁面距离场计算失败，无法为湍流模型 '{turb_model}' 提供有效的 "
             f"d_w：{e}\n如需临时绕过做诊断，请改用 --turbulence-model none。"

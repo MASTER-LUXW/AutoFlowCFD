@@ -1,8 +1,4 @@
-"""AutoFlowCFD V2.0 - 完全分布式加载入口与跨阶数重分发。
-
-从 `core/mpi/distributed_mesh_loader.py` 拆出（2026-09-24）。纯搬家，
-逻辑未改。
-"""
+"""AutoFlowCFD V2.0 - 完全分布式加载入口与跨阶数重分发。"""
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import numpy as np

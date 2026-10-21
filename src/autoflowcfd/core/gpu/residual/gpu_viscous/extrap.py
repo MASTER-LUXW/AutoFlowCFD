@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - 面通量点外插与 tilde 通量配对(GPU 粘性)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_viscous.py`(原 723 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - 面通量点外插与 tilde 通量配对(GPU 粘性)"""
 
 
 
@@ -14,7 +11,7 @@ def _extrap_to_fp(cp, mat, src_cell, field):
 
     mat: (nF, n_fp, n_sps)，src_cell: (nF,)，
     field: (n_cells, n_sps, *rest) -> 返回 (nF, n_fp, *rest)。
-    与 gpu_inviscid.py::_compute_interface_correction_gpu 里
+    与 gpu_inviscid/::_compute_interface_correction_gpu 里
     `cp.matmul(owner_src0_mat, Q_owner)` 同一机制的通用化版本（那里
     只对 Q 这一个 5 分量场手写了一次，这里额外要对 grad_vel(3,3)/
     grad_T(3)/mu_t(1) 复用，做成通用 helper 避免抄 4 遍同样的 reshape）。
@@ -87,7 +84,7 @@ def _self_extrap_side(cp, cell_idx, face_op, boundary_extrap_native,
     与 CPU 版 `viscous_flux_kernel.py` 的
     `E_o = boundary_extrap_native[oc_op]` /
     `Q_o = _extrap_matmul(Q[oc], E_o)` 逐字对应，复用与
-    `gpu_inviscid.py::_compute_interface_correction_gpu` 完全同一个
+    `gpu_inviscid/::_compute_interface_correction_gpu` 完全同一个
     `_native_self_extrap` helper。
 
     真实 bug 修复（问题清单 #5 排查附带发现，2026-09-02，均匀自由流场
@@ -98,7 +95,7 @@ def _self_extrap_side(cp, cell_idx, face_op, boundary_extrap_native,
     是 `neighbor_src0_cell`/`neighbor_src0_mat`——但这两组数组的真实
     语义是"对侧记录用来查询*另一侧*单元值的交叉引用表"（`owner_src0_*`
     是给 neighbor-primary 块查 owner 值用的，`neighbor_src0_*` 是给
-    owner-primary 块查 neighbor 值用的，见 `gpu_inviscid.py::_compute_
+    owner-primary 块查 neighbor 值用的，见 `gpu_inviscid/::_compute_
     interface_correction_gpu` 里 `Q_n=_extrap_q_to_fp(...,ff.neighbor_
     src0_mat[idx_o],...)`/`Q_o_at_n=_extrap_q_to_fp(...,ff.owner_src0_
     mat[idx_n],...)` 的对称用法），不是"本单元查自己"——对 owner-primary

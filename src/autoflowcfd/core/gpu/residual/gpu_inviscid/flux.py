@@ -1,7 +1,4 @@
-"""AutoFlowCFD V2.0 - AUSM+up 批量通量(GPU, 与 kernels.py 逐字对应)
-
-从 `src/autoflowcfd/core/gpu/residual/gpu_inviscid.py`(原 710 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
-"""
+"""AutoFlowCFD V2.0 - AUSM+up 批量通量(GPU, 与 kernels.py 逐字对应)"""
 
 
 from autoflowcfd.core.gpu import get_cupy
@@ -13,37 +10,13 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     见该函数文档，这里不重复；两处必须同步修改（该文件模块文档要求
     "逐字对应"）。
 
-    真实 bug 修复（问题清单 #5，2026-09-02，用真实含多源/混合拆分面的
-    合成网格 + numpy-as-cupy 替身 + 完整 `GPUFRSolver.step()` 首次真正
-    走到这里才发现——`test_gpu_solver_order_continuation.py`"发现但
-    本次未修复"一节记录过这个缺口，本次专项排查修复）：`normal` 形参
-    此前文档标注/实现都当作 `(N, 3)`（逐面一个法向，`nx=normal[...,
-    0:1]` 故意保留末尾长度 1 的维度，为的是广播到 `uL` 等 `(N,n_fp)`
-    形状——对应 CPU kernel 里"同一面内全部 FP 共用同一个法向"这个
-    从未真正成立的假设）——但两个真实调用点（本文件
-    `_compute_interface_correction_gpu` 的 owner/neighbor 两个分支）
-    传入的 `direction_o`/`direction_n` 来自 `_ausm_direction_with_
-    fallback`，形状恒为 `(N, n_fp, 3)`（逐 FP 各自独立的方向，因为
-    对齐安全阀是逐 FP 用该 FP 自己的 `adjrow`/`true_normal_ref` 判定
-    的，不是全面共享同一个值——与 CPU numba kernel 逐 FP 独立调用
-    `compute_ausm_up_flux(qL, qR, normal_at_this_fp, ...)` 完全对应）。
-    `nx=normal[...,0:1]` 对 `(N,n_fp,3)` 输入会产出 `(N,n_fp,1)`，
-    与 `uL`（`(N,n_fp)`）相乘时 NumPy/CuPy 广播规则按从右往左对齐，
-    `uL` 的 `n_fp` 维度会被错误地对上 `nx` 的长度-1 维度、`uL` 隐式
-    补出的前导维度又被要求匹配 `nx` 的 `n_fp` 维——只有 `N==n_fp`（本
-    次合成测试网格的巧合，两者都恰好是 4）时这个错误广播才会"成功"
-    但产出一个多出一维、内容完全错误的结果，`N!=n_fp` 的一般网格上
-    会在这里直接 `ValueError`（这正是该测试文件此前报告的"P1/P2 直接
-    构造时同样复现"的崩溃点，只是那次调查停在了更下游的
-    `distribute_face_correction_to_sps`（已随坍缩路径删除））。修复：`nx=normal[...,0]`
-    （不保留末尾维度）——这样在真实的 `(N,n_fp,3)` 输入下 `nx` 形状
-    恰好是 `(N,n_fp)`，与 `uL` 等逐 FP 量逐元素精确匹配，不再依赖任何
-    隐式广播。
+    `normal` 是逐 FP 各自独立的方向 `(N, n_fp, 3)`（与 CPU numba kernel 逐 FP 调用
+    `compute_ausm_up_flux(qL, qR, normal_at_this_fp, ...)` 对应），分量取 `normal[..., d]`（不保留末尾长度 1 的维度），
+    与 `uL` 等 `(N, n_fp)` 逐 FP 量逐元素对齐，不依赖隐式广播。
 
     Args:
         Q_L, Q_R: (N, n_fp, 5) 左右状态
-        normal: (N, n_fp, 3) 单位法向量——逐 FP 各自独立（不是逐面共享
-            同一个值，见上方"真实 bug 修复"说明）
+        normal: (N, n_fp, 3) 单位法向量——逐 FP 各自独立
         mach_ref: 参考（自由来流）马赫数，见 kernels.py::
             compute_ausm_up_flux 文档
 

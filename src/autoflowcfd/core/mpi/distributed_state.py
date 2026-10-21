@@ -46,31 +46,12 @@ class DistributedFRState:
 
     def initialize_uniform(self, rho: float = 1.0, u: float = 0.0, v: float = 0.0,
                             w: float = 0.0, p: float = 1.0) -> None:
-        """用均匀自由流场初始化 local+halo 全部单元（真实 bug 修复，
-        2026-09-02，Order Continuation 分布式移植排查中发现，与其本身
-        无关的独立问题）：`DistributedFRSolver.__init__`/
-        `from_fully_distributed_package` 构造完 `self.state`（本类）后，
-        此前从未对 `U`/`Q` 赋过初值——`__init__` 只是 `np.zeros(...)`，
-        CLI 生产路径（`solve_steady_command.py` 的 `n_ranks>1` 分支）
-        构造完 `DistributedFRSolver` 后直接调用 `solve()`，意味着
-        `solve steady --n-ranks>1`（不加 `--fully-distributed`）以及
-        `--fully-distributed`本身，从构造完成那一刻起 conserved state
-        恒为全零（rho=0）——第一次残差计算
-        （`conserved_to_primitive` 用 rho 做分母求速度/压力）必然产生
-        NaN，这条 CLI 生产路径自 `DistributedFRSolver` 存在以来就没有
-        真正跑通过这一步（单 GPU/多GPU 路径 `gpu_solver.py`/
-        `gpu_distributed.py` 一直有对应的均匀自由流初始化，只有 CPU
-        MPI 分布式路径遗漏）。与单机 `FRState.initialize_uniform`
-        同一个公式（gamma=1.4 量热完全气体），只是没有湍流 k/omega
-        分量——分布式路径的 k/omega 场由 `SSTModelFR`/`DDESModel`/
-        `IDDESModel` 独立持有（`solver.turb_model.k_field`/
-        `.omega_field`），不放在 `self.U`/`self.Q` 里（`n_vars` 恒为
-        5，见 `DistributedFRSolver.__init__`），不需要在这里处理。
+        """用均匀自由流场初始化 local+halo 全部单元（构造后必须调用：`__init__` 只分配零数组，rho=0 会让第一次
+        原始变量换算产生 NaN）。公式与单机 `FRState.initialize_uniform` 同一份（`uniform_conservative`）；湍流场
+        由湍流模型独立持有，不在 `self.U`/`self.Q` 里（`n_vars` 恒为 5）。
         """
         from autoflowcfd.core.fr_solver.state import uniform_conservative
 
-        # 公式的唯一事实来源是 `uniform_conservative`（此前本方法与单机
-        # `FRState.initialize_uniform` 各抄一份）
         self.U[:, :, :5] = uniform_conservative(rho, u, v, w, p)
         self.Q[:, :, 0] = rho
         self.Q[:, :, 1] = u

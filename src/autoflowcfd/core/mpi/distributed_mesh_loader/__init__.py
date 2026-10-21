@@ -16,7 +16,7 @@ AutoFlowCFD V2.0 - 完全分布式网格加载
 - 面连接关系的 owner_cell/neighbor_cell 使用局部索引
 - halo cell 信息通过 partition 的 recv_lists 获取
 
-## 文件分工（2026-09-24 拆包，原 1030 行）
+## 文件分工
 
     package.py            root 端预切的紧凑包（`PrecompactedMeshData` +
                           `build_fully_distributed_rank_package`）

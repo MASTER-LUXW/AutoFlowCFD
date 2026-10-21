@@ -75,10 +75,7 @@ def compute_viscous_interface_correction_p0_kernel(
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
     # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
     # 厚度，两侧单值取较薄一侧，湍流扩散读同一个）。见 `flux_kernels.viscous_ip_penalty_tilde`
-    # 的"长度尺度"一节：此前用 `mean(det_jacs)**(1/3)`，两处都错 ——
-    # `mean(det_jacs)` 不是体积而是体积/参考体积（参考体积基相关：
-    # 坍缩 8 / 原生棱柱 4 / 原生四面体 4/3），且几何平均在各向异性
-    # 贴壁单元上比壁法向厚度大 2.48 倍（实测平板算例）。
+    # 的"长度尺度"一节。
     ip_length: np.ndarray,
     # IP 罚项常数，按阶数解析（见 `flux_kernels.resolve_viscous_ip_constant`）。
     # 做成形参而不是模块全局：njit 把全局当编译期常量、且
@@ -107,29 +104,9 @@ def compute_viscous_interface_correction_p0_kernel(
     `lift_native[op]` 形状 `(1, n_fp)`，矩阵乘本身就是这里 P0 特化
     要的标量化形式。
 
-    **2026-09-23 修复的真实缺陷（度量伴随行用错了量）**：这里此前用
-    `adj_o_s0 = adj_j[oc, 0, oax]`，也就是**坍缩坐标那条"取 SP 网格度量
-    的第 oax 个轴行"**的做法。两个独立后果：
-
-    1. `owner_axis` 对原生面是**复用槽位**（原生四面体存 excluded_vertex
-       ∈ {0,1,2,3}，原生棱柱存面序号 ∈ {0..4}），而 `adj_j` 的轴维只有
-       3 —— `excluded_vertex == 3` 的四面体面直接**越界读**（numba
-       nopython 不做边界检查，读到的是相邻单元的内存）。
-    2. 即使没越界，那个量本身也是错的：合成混合网格实测，`adj_j[oc,0,
-       oax]` 与精确行 `owner_adj_row_exact[f,i]` 的相对差在**每一个**面
-       上都是 O(1)（0.5 ~ 3.0，好几个面方向完全不同）。
-
-    P>=1 的通用 kernel 早在 2026-08-23 就改用了逐 FP 精确
-    `owner_adj_row_exact`/`neighbor_adj_row_exact`（见
-    `fr/face_flux_points/exact_normal.py` 模块文档），**P0 这份拷贝被
-    漏掉了** —— 又一次"同一语义两份实现、只改了一份"。现已改成同一个
-    来源并逐 FP 读取，`adj_j`/`owner_axis`/`neighbor_axis` 三个参数因此
-    从签名里移除。
-
-    同批（2026-09-23）删除的还有坍缩坐标那条并行路径
-    （`boundary_extrap[celltype,axis,side]` 外插 + 1D Radau/VCJH 分布），
-    生产不可达，完整论证见 `inviscid_kernel.py::
-    compute_inviscid_interface_correction_kernel` 文档。
+    度量伴随行逐 FP 读精确值 `owner_adj_row_exact`/`neighbor_adj_row_exact`（与 P>=1 核同一个来源）——
+    `owner_axis` 对原生面是复用槽位（四面体存 excluded_vertex ∈ {0,1,2,3}、棱柱存面序号 ∈ {0..4}），
+    不能拿来索引解点度量的轴维。
     """
     n_fp = Q_ghost.shape[1]
 
@@ -137,21 +114,16 @@ def compute_viscous_interface_correction_p0_kernel(
         f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
-        # **原生面的罚项 side 因子必须是 +1**（2026-09-22 修复真实缺陷）：
-        # 原生面的 `owner_adj_row_exact` 已按 outward 定向（见
-        # `native_prism/face.py::native_prism_face_adj_rows` 与
-        # `exact_normal.py::compute_exact_face_normals_and_weights` 里
-        # `side_factor = np.where(owner_code >= 6, 1.0, owner_side)` 的同一
-        # 处理），而坍缩面的 adj_row 未定向、外向性由 `oside` 给出。此前
-        # 这里直接乘 `oside`，于是 `owner_side = -1` 的原生面（棱柱 f0/f3/f4、
-        # 四面体全部 4 个面）罚项符号反了 —— 从耗散变成往壁面单元注入动量。
+        # **罚项 side 因子恒为 +1**：原生面的 `owner_adj_row_exact` 已按 outward 定向（见
+        # `native_prism/face.py::native_prism_face_adj_rows` 与 `exact_normal.py::compute_exact_face_normals_and_weights`），
+        # 再乘 `owner_side` 会让 `owner_side = -1` 的面（棱柱 f0/f3/f4、四面体全部 4 个面）罚项反号——从耗散
+        # 变成往壁面单元注入动量。
 
         if owner_is_primary[f]:
             E_o = boundary_extrap_native[oc_op]  # (n_fp, 1)
 
             # P0 外插：n_sps=1 时 E (n_fp,1) @ field (1,k) 与
-            # E[i,0]*field[0,...] 是**同一个矩阵乘**，不是近似——原注释
-            # 写成「P0 简化外插」不准确（2026-09-14 更正）。
+            # E[i,0]*field[0,...] 是**同一个矩阵乘**，不是近似。
             # 而且 P0 的唯一基函数是常数 1，正确的插值算子在这里恒有
             # E[i,0]=1（order=0 下全部面算子整表 `face_extrap_by_op` 的有效行
             # 全为 1.0），所以外插结果就等于

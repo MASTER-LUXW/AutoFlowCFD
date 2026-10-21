@@ -16,12 +16,12 @@ AutoFlowCFD V2.0 - 分布式面几何
 - FlatFaceGeometry 中的 owner_cell/neighbor_cell 使用扩展索引
 
 
-## 文件分工(2026-09-24 拆包, 原 552 行)
+## 文件分工
 
     types.py             分布式扁平面几何的数据类与紧凑 src1 展开
     build.py             从局部网格 + 分区构造分布式扁平面几何
 
-本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
+本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .types import DistributedFlatFaceGeometry, native_cell_is_prism  # noqa: F401

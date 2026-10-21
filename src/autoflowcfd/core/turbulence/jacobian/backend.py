@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - k-omega 解析单元块装配器的后端适配。
 
-湍流 Newton 步的块缓存（`fr_solver/turbulence/implicit.py::_newton_state`）每步向
+湍流 Newton 步（`core/fr_solver/turbulence/implicit.py` 适配器的 `block_assembler()`）每步向
 它要一次块：`assembler(u0_flat, r0_flat)`，`u0` 是 Newton 行（本 rank 单元）上的
 `(k, omega)`。与平均流装配器（`fr_residual/jacobian/backend.py`）同一套约定：
 单机恒等映射；分布式先把 `(k, omega)` halo 交换到"棱柱在前"的紧凑空间

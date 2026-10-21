@@ -1,8 +1,7 @@
 """AutoFlowCFD V2.0 - AutoFlowCFDAPI 主类：构造、版本与环境信息。
 
 方法按职责分在同目录的 mixin 里：`grid.py`（网格）、`config.py`（配置）、`solve.py`（求解与续算）、`post.py`
-（后处理）。2026-10-19 以前网格与配置方法写在包外的 `api_grid_ops.py`/`api_config.py` 里，以"传 self 的模块函数"
-实现，门面再逐个转调（12 个方法只是一层转发）。
+（后处理）。
 """
 
 import os
