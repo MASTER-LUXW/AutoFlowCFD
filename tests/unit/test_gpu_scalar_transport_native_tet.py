@@ -92,7 +92,6 @@ def _prepare_mesh_ops_data(mesh, ops):
     adj_j = det_jacs[..., None, None] * inv_jacs
     mesh_data = {
         'det_jacs': det_jacs,
-        'inv_jacs': inv_jacs,
         'adj_j': adj_j,
         'n_cells': n_cells,
         'n_prism': mesh.n_prism_cells,

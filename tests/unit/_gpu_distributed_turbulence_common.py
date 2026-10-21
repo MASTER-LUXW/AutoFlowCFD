@@ -51,7 +51,7 @@ def _prepare_compact_mesh_data(mesh, ops, compact_global_ids):
     inv_jacs = mesh.jacobians['inv_jacs'].reshape(mesh.n_cells, n_sps, 3, 3)[compact_global_ids]
     adj_j = det_jacs[..., None, None] * inv_jacs
     mesh_data = {
-        'det_jacs': det_jacs, 'inv_jacs': inv_jacs, 'adj_j': adj_j,
+        'det_jacs': det_jacs, 'adj_j': adj_j,
         'n_cells': len(compact_global_ids), 'n_prism': None,  # 调用方会覆盖 n_prism
         'D_native_prism_padded': ops.D_native_prism_padded, 'D_native_tet_padded': ops.D_native_tet_padded,
     }

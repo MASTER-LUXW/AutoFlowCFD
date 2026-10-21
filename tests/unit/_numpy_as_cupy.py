@@ -54,6 +54,9 @@ class NumpyAsCupy:
             def __enter__(self):
                 return self
 
+            def synchronize(self):
+                pass
+
             def __exit__(self, *args):
                 return False
 

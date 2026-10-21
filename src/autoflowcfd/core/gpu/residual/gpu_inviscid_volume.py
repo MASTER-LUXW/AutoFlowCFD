@@ -16,27 +16,20 @@ from autoflowcfd.core.gpu.residual.gpu_flux import (
 
 
 def prepare_mesh_data(cp, mesh, device_id):
-    """准备网格度量数据到 GPU。"""
+    """网格度量上传到 GPU（单 GPU 与多 GPU 同一个函数）：解点 det(J) 与 adj(J) = det(J) inv(J)（逆变通量、局部
+    步长的度量尺度用它；物理梯度按 adj/det 现算，`gpu_gradients.py`），以及过积分细点度量。
+
+    不另存 inv(J)：它与 adj(J) 只差逐点的 det 因子，多存一份是 9 个 double/解点（P2 30 万单元约 0.6 GB，
+    2026-10-22 以前三份都存，I-113）。"""
     with cp.cuda.Device(device_id):
         n_cells = mesh.n_cells
         n_sps = mesh.n_sps_per_cell
-
-        det_jacs = cp.asarray(
-            np.ascontiguousarray(
-                mesh.jacobians['det_jacs'].reshape(n_cells, n_sps), dtype=np.float64
-            )
-        )
-        inv_jacs = cp.asarray(
-            np.ascontiguousarray(
-                mesh.jacobians['inv_jacs'].reshape(n_cells, n_sps, 3, 3), dtype=np.float64
-            )
-        )
-        adj_j = det_jacs[..., None, None] * inv_jacs
-
+        det_np = np.asarray(mesh.jacobians['det_jacs'], dtype=np.float64).reshape(n_cells, n_sps)
+        inv_np = np.asarray(mesh.jacobians['inv_jacs'], dtype=np.float64).reshape(n_cells, n_sps, 3, 3)
         data = {
-            'det_jacs': det_jacs,
-            'inv_jacs': inv_jacs,
-            'adj_j': adj_j,
+            'det_jacs': cp.asarray(np.ascontiguousarray(det_np)),
+            # 与 CPU 体积项同一个乘积（`volume_contract.compute_adj_j`：det * inv）
+            'adj_j': cp.asarray(np.ascontiguousarray(det_np[..., None, None] * inv_np)),
             'n_prism': mesh.n_prism_cells,
         }
 

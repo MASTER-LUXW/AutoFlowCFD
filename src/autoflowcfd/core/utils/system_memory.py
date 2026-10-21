@@ -41,8 +41,9 @@ def _host_available_bytes() -> int:
     return int(os.sysconf("SC_AVPHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
 
 
-def _device_available_bytes(xp) -> int:
-    """当前 GPU 设备的空闲内存加 CuPy 内存池里已缓存的空闲块（字节）。"""
+def device_available_bytes(xp) -> int:
+    """当前 GPU 设备的空闲内存加 CuPy 内存池里已缓存的空闲块（字节；分块规划与 `GPUArrayManager.get_memory_usage`
+    同一口径）。"""
     free, _total = xp.cuda.runtime.memGetInfo()
     return int(free) + int(xp.get_default_memory_pool().free_bytes())
 
@@ -69,4 +70,4 @@ def available_bytes(xp) -> int:
 
     if xp is np:
         return _host_available_bytes() // _ranks_sharing_host()
-    return _device_available_bytes(xp)
+    return device_available_bytes(xp)

@@ -72,7 +72,7 @@ def _prepare_mesh_ops_data(mesh, ops):
     inv_jacs = mesh.jacobians['inv_jacs'].reshape(n_cells, n_sps, 3, 3)
     adj_j = det_jacs[..., None, None] * inv_jacs
     mesh_data = {
-        'det_jacs': det_jacs, 'inv_jacs': inv_jacs, 'adj_j': adj_j,
+        'det_jacs': det_jacs, 'adj_j': adj_j,
         'n_cells': n_cells, 'n_prism': mesh.n_prism_cells,
         'cell_volumes': mesh.cell_volumes,
         'D_native_prism_padded': ops.D_native_prism_padded, 'D_native_tet_padded': ops.D_native_tet_padded,

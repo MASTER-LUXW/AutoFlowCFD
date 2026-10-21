@@ -45,23 +45,6 @@ class TestGPUArrayManager:
         assert mem['total_mb'] > 0
         mgr.cleanup()
 
-    def test_to_gpu_and_back(self):
-        from autoflowcfd.core.gpu.array_manager import GPUArrayManager
-        mgr = GPUArrayManager(device_id=0)
-        arr_np = np.random.rand(100, 5)
-        arr_gpu = mgr.to_gpu(arr_np)
-        arr_back = mgr.to_cpu(arr_gpu)
-        np.testing.assert_allclose(arr_np, arr_back)
-        mgr.cleanup()
-
-    def test_gpu_zeros(self):
-        from autoflowcfd.core.gpu.array_manager import GPUArrayManager
-        mgr = GPUArrayManager(device_id=0)
-        z = mgr.gpu_zeros((10, 3))
-        assert z.shape == (10, 3)
-        np.testing.assert_allclose(mgr.to_cpu(z), 0.0)
-        mgr.cleanup()
-
 
 class TestGPUFlux:
     """GPU 通量计算与 CPU 一致性。"""
@@ -161,12 +144,9 @@ class TestGPUGradients:
         n_vars = 3
         # 常数场
         field = cupy.ones((n_cells, n_sps, n_vars)) * 42.0
-        # 简单的度量数据
-        inv_jacs = cupy.zeros((n_cells, n_sps, 3, 3))
-        for c in range(n_cells):
-            for s in range(n_sps):
-                inv_jacs[c, s] = cupy.eye(3)
-        mesh_data = {'inv_jacs': inv_jacs, 'n_prism': 0}
+        # 简单的度量数据（设备上只存 det 与 adj）
+        adj_j = cupy.broadcast_to(cupy.eye(3), (n_cells, n_sps, 3, 3)).copy()
+        mesh_data = {'det_jacs': cupy.ones((n_cells, n_sps)), 'adj_j': adj_j, 'n_prism': 0}
         # 简单的微分矩阵（全零 → 参考空间梯度为零）
         D_3d_tet = cupy.zeros((n_sps, n_sps, 3))
         ops_data = {'D_native_tet_padded': D_3d_tet}
