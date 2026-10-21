@@ -12,20 +12,21 @@ class TestTranslateTetgenFailure:
         original = RuntimeError("Self-intersection detected at facet 42")
         translated = translate_tetgen_failure(original)
         assert translated is not None
-        assert "fewer/thinner BL layers" in str(translated)
+        assert "--bl-layers" in str(translated) and "局部间隙" in str(translated)
+        assert "yet" not in str(translated) and "no per-feature thickness limiting" not in str(translated)
         assert "Self-intersection detected at facet 42" in str(translated)
 
     def test_removevertexbyflips_error_is_translated_with_guidance(self):
         original = RuntimeError("removevertexbyflips() failed")
         translated = translate_tetgen_failure(original)
         assert translated is not None
-        assert "internal robustness limit" in str(translated)
+        assert "鲁棒性极限" in str(translated)
 
     def test_internal_tetgen_error_phrase_is_also_matched(self):
         original = RuntimeError("Internal TetGen error occurred")
         translated = translate_tetgen_failure(original)
         assert translated is not None
-        assert "internal robustness limit" in str(translated)
+        assert "鲁棒性极限" in str(translated)
 
     def test_unrecognized_error_returns_none(self):
         original = RuntimeError("some completely unrelated tetgen failure")

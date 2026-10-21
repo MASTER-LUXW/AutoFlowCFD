@@ -165,15 +165,10 @@ def generate_volume(
             else:
                 logger.error(
                     f"\n{quality_report.summary()}\n"
-                    "Volume mesh quality check failed after Stage A/B repair - "
-                    "exporting anyway (see report above). This mesh would very "
-                    "likely diverge if solved as-is; common causes: sharp convex "
-                    "edges/corners on the body (BL extrusion degrades there; "
-                    "consider a small chamfer/fillet in the source geometry), or "
-                    "an overly aggressive --growth-rate/--min-cell-size for this "
-                    "geometry's feature sizes. 'autoflowcfd solve steady' will still enforce this gate "
-                    "before any iterations run, unless --skip-quality-check is "
-                    "passed there too."
+                    "体网格经 Stage A/B 修复后质量检查仍未通过，照常导出（见上方报告）。按原样求解很可能发散；"
+                    "常见原因：物体上的尖锐凸边 / 凸角（边界层挤出在那里退化，可在源几何上做小倒角 / 圆角），"
+                    "或 --growth-rate / --min-cell-size 相对该几何的特征尺寸过于激进。'autoflowcfd solve steady' "
+                    "在迭代开始前仍会执行这道质量门，除非同样给出 --skip-quality-check。"
                 )
 
         logger.info("Step 4/4: Exporting volume mesh to NAS...")

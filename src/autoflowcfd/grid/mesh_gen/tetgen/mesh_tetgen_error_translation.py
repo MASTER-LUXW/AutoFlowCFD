@@ -23,14 +23,14 @@ def translate_tetgen_failure(exc: RuntimeError) -> Optional[RuntimeError]:
     message = str(exc).lower()
 
     if "self-intersection" in message:
+        # 现行挤出按"与对面表面的局部间隙"限厚（`mesh_tetgen_seam.compute_local_thickness_limit`：累积厚度不超过
+        # 间隙的 0.45 倍，间隙在未变形表面上评估、搜索半径为域尺寸的 8%）。它是几何启发式，不是非交叉保证：两侧都在
+        # 挤出的强烈弯曲前沿，以及搜索半径之外的对面（大域里的细长缝隙）仍可能相交
         return RuntimeError(
-            f"{exc}. The BL outer surface self-intersects at a tight local "
-            f"feature (common at small welded contact patches with sharp "
-            f"edges). Try fewer/thinner BL layers (--bl-layers, "
-            f"--min-cell-size) - naive normal-offset extrusion has no "
-            f"per-feature thickness limiting yet, so cumulative BL "
-            f"thickness must stay well under the tightest local gap in "
-            f"the geometry."
+            f"{exc}。边界层外表面在局部紧致特征处自相交（常见于带锐边的小面积焊接接触区、细长缝隙）。"
+            f"挤出已按与对面表面的局部间隙限制累积厚度，但该限制在未变形表面上评估：两侧都在挤出的强烈弯曲前沿、"
+            f"或间隙对面在搜索半径（域尺寸的 8%）之外时仍可能相交。可减少层数或减小厚度（--bl-layers、"
+            f"--first-layer-height / --target-yplus、--growth-rate），或在源几何的该处做小倒角 / 圆角。"
         )
 
     if "removevertexbyflips" in message or "internal tetgen error" in message:
@@ -39,11 +39,8 @@ def translate_tetgen_failure(exc: RuntimeError) -> Optional[RuntimeError]:
         # tetgen 自身的内部数值鲁棒性极限（tetgen 的实现限制），而不是
         # 像上面自交情况那样给出更清晰的诊断。
         return RuntimeError(
-            f"{exc}. tetgen hit an internal robustness limit - on a case "
-            f"seen directly, this followed boundary-layer extrusion stalling "
-            f"over a large fraction of the surface (many near-coincident "
-            f"points). Try loosening --growth-rate/--min-cell-size/--bl-layers "
-            f"so fewer BL columns stall."
+            f"{exc}。tetgen 触到内部数值鲁棒性极限。实测案例里它发生在边界层挤出于大比例表面顶点上停长之后"
+            f"（大量近重合点）。可放宽 --growth-rate / --min-cell-size / --bl-layers，让停长的边界层柱更少。"
         )
 
     return None
