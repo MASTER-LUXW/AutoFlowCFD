@@ -111,7 +111,7 @@ vel_inf: 40.0
 
 | 设置 | 给法 |
 |---|---|
-| 边界条件类型 | 生成/导入体网格时按边界组名识别，识别不了或有歧义的组用 `grid generate-volume/import-volume --bc-type 组名=类型` 指定（`WALL`/`SLIP_WALL`/`VELOCITY_INLET`/`PRESSURE_OUTLET`/`SYMMETRY`/`FARFIELD`），保存在 `.pkl` 体网格里（`.nas` 不记录类型，重新读入时按组名识别） |
+| 边界条件类型 | 生成/导入体网格时按边界组名识别，识别不了或有歧义的组用 `--bc-type 组名=类型` 指定（`grid generate-volume / import-volume` 与 `solve steady / transient` 都接受；`WALL`/`SLIP_WALL`/`VELOCITY_INLET`/`PRESSURE_OUTLET`/`SYMMETRY`/`FARFIELD`），保存在 `.pkl` 体网格里（`.nas` 不记录类型，重新读入时按组名识别） |
 | 来流方向 | `solve steady/transient --aoa/--aos`（度） |
 | 参考面积 | `--reference-area`，不给时按迎风投影自动估算 |
 | 并行方式 | `--n-ranks`、`--multi-gpu`、`--fully-distributed` |

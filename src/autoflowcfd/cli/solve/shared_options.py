@@ -12,6 +12,7 @@ Python API 与命令行三条入口的默认值是同一份。2026-10-19 以前 
 
 import click
 
+from autoflowcfd.cli.grid.options import bc_type_option
 from autoflowcfd.grid.nas_io.units import UNITS_CHOICES
 
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
@@ -67,6 +68,7 @@ def shared_solve_options(config_cls):
                      help='输入是 .nas 体网格时它与 --surface-mesh 的坐标单位（入口处转存成输出目录下的米制 '
                           'volume_mesh.pkl，续算与后处理都用它）；.pkl 不需要'),
         click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）'),
+        bc_type_option,
         click.option('--reference-area', type=float, default=None,
                      help='气动系数参考面积 (m^2)；不给时沿来流方向的迎风投影自动估算'),
         click.option('--threads', '-j', type=int, default=d('n_threads'), show_default=True, help=THREADS_HELP),

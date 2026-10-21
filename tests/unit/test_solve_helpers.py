@@ -96,7 +96,8 @@ class TestLoadMeshForSolverExtensionDispatch:
             str(volume_nas), order=2, surface_mesh=str(surface_nas)
         )
 
-        mock_import.assert_called_once_with(str(volume_nas), str(surface_nas), repair=False, units="mm", validate=True)
+        mock_import.assert_called_once_with(str(volume_nas), str(surface_nas), repair=False, units="mm", validate=True,
+                                            bc_types=None)
         assert volume_data is mock_import.return_value[0]
 
     @patch("autoflowcfd.grid.validation.solve_gate.HighOrderMesh")

@@ -55,7 +55,7 @@ _TIME_SCHEME_CHOICES = ['rk3', 'newton-krylov']
 @shared_solve_options(SteadyConfig)
 @config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment, low_mach_precond, units):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment, low_mach_precond, units, bc_type=()):
     """执行稳态 FR 求解（P0~P3，全部湍流模型）。
 
     输入文件必须是体网格 - .pkl（`grid generate-volume`/`grid
@@ -68,7 +68,9 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         print("=== Starting Steady FR Simulation ===")
     # .nas 体网格按 --units 导入并转存成输出目录下的米制 volume_mesh.pkl，之后全程用它
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
-    input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir)
+    from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
+    input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir,
+                                                     parse_bc_type_options(bc_type))
 
     # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
     check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)

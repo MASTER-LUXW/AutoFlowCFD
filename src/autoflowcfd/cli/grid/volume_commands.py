@@ -19,14 +19,11 @@ import json
 from pathlib import Path
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
 from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import DEFAULT_GROWTH_RATE, DEFAULT_MIN_CELL_SIZE
-from autoflowcfd.cli.grid.options import units_option
+from autoflowcfd.cli.grid.options import bc_type_option, units_option
 from typing import Optional
 from loguru import logger
 
 
-#: `--bc-type`（体网格生成与导入共用）
-_BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按属性名识别的结果；名字识别不了或有歧义的组必须给出。"
-                 "类型取 WALL/SLIP_WALL/VELOCITY_INLET/PRESSURE_OUTLET/SYMMETRY/FARFIELD")
 
 
 def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu):
@@ -58,7 +55,7 @@ def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, 
     help="在核心区 tetgen 填充完成后立即导出网格（只有核心区四面体，未与"
     "边界层拼接）——跳过后续全部步骤",
 )
-@click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
+@bc_type_option
 @units_option
 @click.option("--first-layer-height", type=float, default=None,
               help="边界层第一层高度 (m)；不给时取 min(--min-cell-size, 0.2% 域尺寸)。与 --target-yplus 二选一")
@@ -273,7 +270,7 @@ def generate_volume(
               help="跳过物理重叠检查（大网格上单项开销最大的质量检查）——"
                    "用于快速预览")
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
-@click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
+@bc_type_option
 @units_option
 def import_volume(
     volume_mesh_file: str,

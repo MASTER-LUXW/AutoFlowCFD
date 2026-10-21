@@ -16,6 +16,7 @@
 import click
 
 from autoflowcfd.cli.solve.steady.command import _TIME_SCHEME_CHOICES, _TURBULENCE_CHOICES
+from autoflowcfd.cli.grid.options import bc_type_option
 from autoflowcfd.grid.nas_io.units import UNITS_CHOICES
 import json
 import sys
@@ -247,6 +248,7 @@ def doctor(json_output: bool) -> None:
               help="时间格式（与 solve steady 同义）")
 @click.option("--turbulence-model", "-m", type=click.Choice(_TURBULENCE_CHOICES), default="none", show_default=True,
               help="湍流模型（与 solve steady 同义）")
+@bc_type_option
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def benchmark(
     grid_file: str,
@@ -258,6 +260,7 @@ def benchmark(
     order: int,
     time_scheme: str,
     turbulence_model: str,
+    bc_type: tuple,
     json_output: bool
 ) -> None:
     """单机完整求解步的计时与内存基准（固定阶数，所选时间格式与湍流模型）。
@@ -296,8 +299,11 @@ def benchmark(
 
     logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
     t_start = _time.perf_counter()
+    from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
+
     mesh, volume_data = load_mesh_for_solver(grid_file, order, surface_mesh=surface_mesh,
-                                             skip_quality_check=skip_quality_check, units=units)
+                                             skip_quality_check=skip_quality_check, units=units,
+                                             bc_types=parse_bc_type_options(bc_type))
     t_load = _time.perf_counter() - t_start
     # GPU 不可用时 build_single_node_solver 显式报错（不退化成 CPU 却仍打着 GPU 的标签）
     # 来流与时间格式取配置层默认值（与 solve steady 不给参数时同一组，`config/solver_config.py`）

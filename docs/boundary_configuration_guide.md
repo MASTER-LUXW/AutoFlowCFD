@@ -46,8 +46,13 @@ autoflowcfd grid import-volume ext_volume.nas --surface-mesh car.nas -o car_volu
 ```
 
 `--bc-type 组名=类型` 可重复给出，覆盖按名字识别的结果；组名必须存在、类型必须是上表（除 `PERIODIC`）之一。类型保存在
-`.pkl` 体网格里，求解、续算与后处理沿用；`.nas` 文件不记录类型，重新读入时按组名识别——组名识别不了的算例用
-`grid import-volume ... --bc-type` 转成 `.pkl` 再求解。
+`.pkl` 体网格里，求解、续算与后处理沿用。`.nas` 文件不记录类型，重新读入时按组名识别，所以求解命令也接受
+`--bc-type`：输入是 `.nas` 体网格时在导入时应用、写进输出目录的 `volume_mesh.pkl`；输入是 `.pkl` 时把覆盖后的副本写到
+输出目录（原文件不改）：
+
+```bash
+autoflowcfd solve steady car_volume.nas --surface-mesh car.nas --bc-type TUNNEL_WALL=SLIP_WALL -o results
+```
 
 `grid info` 列出各组及单元数；`grid convert -f vtk` 导出的网格带组号，可在 ParaView 里核对分组。
 

@@ -2,7 +2,7 @@
 
 import os
 import pickle
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import click
 
@@ -26,8 +26,10 @@ def save_volume_mesh_cache(volume_mesh: VolumeMeshData, output_dir: str) -> str:
     return path
 
 
-def _import_volume_nas(input_file: str, surface_mesh: Optional[str], units: str, validate: bool):
-    """.nas 体网格 + 面网格 -> (VolumeMeshData, 质量报告或 None)，不修复（修复只在 `grid import-volume` 里显式做）。"""
+def _import_volume_nas(input_file: str, surface_mesh: Optional[str], units: str, validate: bool,
+                       bc_types: Optional[Dict[str, str]] = None):
+    """.nas 体网格 + 面网格 -> (VolumeMeshData, 质量报告或 None)，不修复（修复只在 `grid import-volume` 里显式做）。
+    `bc_types`：`--bc-type` 给出的边界条件类型（覆盖按组名识别的结果）。"""
     if not surface_mesh:
         raise click.ClickException(
             f"'{input_file}' 是 .nas 体网格，缺少 --surface-mesh/-s：需要原始面网格来反推 WALL/INLET/OUTLET 等边界分组，"
@@ -38,11 +40,10 @@ def _import_volume_nas(input_file: str, surface_mesh: Optional[str], units: str,
     try:
         # repair=False：求解用的必须是用户给的网格（Stage A 光顺会移动节点）；质量不过由求解前质量门拦截。
         # 2026-10-20 以前用默认 repair=True，质量门不过就静默移动用户网格的节点再求解
-        return import_external_volume_mesh(input_file, surface_mesh, repair=False, units=units, validate=validate)
+        return import_external_volume_mesh(input_file, surface_mesh, repair=False, units=units, validate=validate,
+                                           bc_types=bc_types)
     except BoundaryTypeError as e:
-        raise click.ClickException(
-            f"{e}\n边界条件类型在建立体网格时确定：请用 'autoflowcfd grid import-volume {input_file} "
-            f"-s {surface_mesh} -o <输出.pkl> --bc-type 组名=类型 ...' 生成 .pkl 后再提交计算。") from e
+        raise click.ClickException(f"{e}\n用 --bc-type 组名=类型（可重复）给出这些组的边界条件类型。") from e
     except ValueError as e:
         raise click.ClickException(
             f"无法把 '{input_file}' 当作体网格解析：{e}\n"
@@ -50,23 +51,59 @@ def _import_volume_nas(input_file: str, surface_mesh: Optional[str], units: str,
         ) from e
 
 
-def prepare_solver_input(input_file: str, surface_mesh: Optional[str], units: str,
-                         output_dir: str) -> Tuple[str, Optional[str]]:
+def _read_volume_pkl(path: str) -> VolumeMeshData:
+    """读 .pkl 体网格；不是 VolumeMeshData 时报错。"""
+    with open(path, 'rb') as f:
+        volume_data = pickle.load(f)
+    if not isinstance(volume_data, VolumeMeshData):
+        raise click.ClickException(
+            f"'{path}' 反序列化后不是 VolumeMeshData 实例 - 不是本软件自己生成/导入的体网格缓存文件。")
+    return volume_data
+
+
+def _apply_bc_types(volume_data: VolumeMeshData, bc_types: Optional[Dict[str, str]]) -> None:
+    """把 `--bc-type` 写进体网格及其面网格的边界映射（组名必须存在、类型必须受支持）。"""
+    if not bc_types:
+        return
+    from autoflowcfd.grid.nas_io.boundary_types import BoundaryTypeError, apply_bc_types
+
+    try:
+        apply_bc_types(volume_data.boundaries, bc_types)
+        surface = volume_data.surface_mesh or {}
+        if surface.get("boundaries") is not None and surface["boundaries"] is not volume_data.boundaries:
+            apply_bc_types(surface["boundaries"], bc_types)
+    except BoundaryTypeError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def prepare_solver_input(input_file: str, surface_mesh: Optional[str], units: str, output_dir: str,
+                         bc_types: Optional[Dict[str, str]] = None) -> Tuple[str, Optional[str]]:
     """求解命令入口：.nas 体网格按 `units` 导入（不修复、不在此做质量检查），存成 `output_dir/volume_mesh.pkl`，之后
     全程（各后端、checkpoint、续算、后处理）用这份米制 .pkl；.pkl 输入原样返回。集体操作（root 转换，全部 rank 调用）。
 
     2026-10-20 以前求解命令没有 --units，.nas 体网格一律按毫米读入；且续算 / 后处理按 checkpoint 记录的 .nas
     重新加载时同样只能按毫米。
 
+    `bc_types`（`--bc-type`）：边界条件类型覆盖，写进转存的 .pkl；输入本身是 .pkl 时也把覆盖后的体网格转存到输出目录
+    （用户的 .pkl 不改）。.nas 不记录类型，2026-10-21 以前求解命令没有这个选项：生成体网格时用 --bc-type 指定的类型
+    在读回 .nas 时丢失，组名有歧义的算例只能先 `grid import-volume` 转成 .pkl。
+
     Returns:
         (input_file, surface_mesh)：之后应使用的体网格文件与面网格（.pkl 已含边界与面网格，返回 None）
     """
-    if os.path.splitext(input_file)[1].lower() != ".nas":
+    is_nas = os.path.splitext(input_file)[1].lower() == ".nas"
+    if not is_nas and not bc_types:
         return input_file, surface_mesh
 
     def convert():
-        print(f"Importing volume-mesh NAS (units={units}) -> {os.path.join(output_dir, VOLUME_MESH_CACHE_NAME)}")
-        volume_data, _ = _import_volume_nas(input_file, surface_mesh, units, validate=False)
+        target = os.path.join(output_dir, VOLUME_MESH_CACHE_NAME)
+        if is_nas:
+            print(f"Importing volume-mesh NAS (units={units}) -> {target}")
+            volume_data, _ = _import_volume_nas(input_file, surface_mesh, units, validate=False, bc_types=bc_types)
+        else:
+            print(f"Applying --bc-type to {input_file} -> {target}")
+            volume_data = _read_volume_pkl(input_file)
+            _apply_bc_types(volume_data, bc_types)
         return save_volume_mesh_cache(volume_data, output_dir)
 
     run_on_root(convert)
@@ -79,6 +116,7 @@ def load_mesh_for_solver(
     surface_mesh: Optional[str] = None,
     skip_quality_check: bool = False,
     units: str = "mm",
+    bc_types: Optional[Dict[str, str]] = None,
 ) -> Tuple['HighOrderMesh', VolumeMeshData]:
     """
     工业级网格加载器：接受已经生成好的体网格，.pkl（VolumeMeshData 序列化）
@@ -129,6 +167,7 @@ def load_mesh_for_solver(
         units: input_file 为 .nas 体网格时它与面网格的坐标单位。求解命令在入口就把 .nas 转存成 .pkl
             （`prepare_solver_input`），走到这里的 .nas 是续算 2026-10-20 以前的 checkpoint（当时一律按毫米读入）
             或 `utils benchmark`
+        bc_types: 边界条件类型覆盖（`--bc-type`，`utils benchmark` 用；求解命令在 `prepare_solver_input` 里已应用）
 
     Returns:
         (mesh, volume_data): mesh 是给 FRSolver 用的 HighOrderMesh；
@@ -147,18 +186,12 @@ def load_mesh_for_solver(
 
     if ext == '.pkl':
         print("Detected pickle format. Loading volume mesh...")
-        with open(input_file, 'rb') as f:
-            volume_data = pickle.load(f)
-
-        if not isinstance(volume_data, VolumeMeshData):
-            raise click.ClickException(
-                f"'{input_file}' 反序列化后不是 VolumeMeshData 实例 - 不是本"
-                f"软件自己生成/导入的体网格缓存文件。"
-            )
+        volume_data = _read_volume_pkl(input_file)
+        _apply_bc_types(volume_data, bc_types)
 
     elif ext == '.nas':
         print("Detected volume-mesh NAS format. Parsing and attributing boundaries...")
-        volume_data, report = _import_volume_nas(input_file, surface_mesh, units, validate=True)
+        volume_data, report = _import_volume_nas(input_file, surface_mesh, units, validate=True, bc_types=bc_types)
 
     else:
         raise click.ClickException(

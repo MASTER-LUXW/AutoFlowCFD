@@ -70,7 +70,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
               fully_distributed: bool, gpu_device: Optional[int],
               artificial_viscosity_enabled: bool, artificial_viscosity_alpha: float, wall_treatment: str,
-              checkpoint_interval: int, units: str = "mm") -> None:
+              checkpoint_interval: int, units: str = "mm", bc_type: tuple = ()) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
     Args:
@@ -100,7 +100,9 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     if is_root():
         print("=== Starting Transient FR Simulation ===")
     from autoflowcfd.cli.solve.mesh_loader import prepare_solver_input
-    input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir)
+    from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
+    input_file, surface_mesh = prepare_solver_input(input_file, surface_mesh, units, output_dir,
+                                                     parse_bc_type_options(bc_type))
 
     # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
     check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)
