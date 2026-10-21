@@ -146,7 +146,7 @@ class _GPUSolverResidualMixin:
             artificial_diffusion_residual,
         )
         from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.residual import (
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.scalar_residuals import (
             compute_scalar_diffusion_residual_gpu,
         )
 

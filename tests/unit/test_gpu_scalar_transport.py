@@ -290,15 +290,10 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         return Q, U, k_field, omega_field, d_wall
 
     def _build_gpu_solver_stub(self, mesh, mesh_data, ops_data, flat, Q, U, k_field, omega_field, d_wall, mu):
-        turb = types.SimpleNamespace(
-            k_field=k_field.copy(), omega_field=omega_field.copy(),
-            nu_t=_source_nu_t(k_field, omega_field), _last_F1=_source_F1(k_field),
-            sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
-            beta_star=0.09, beta1=0.075, omega_max=1e6, wall_treatment="resolved",
-            # 来流值（来流条件用）：与 CPU 参照 `SSTModelFR(n_cells, n_sps)` 的
-            # 构造默认值一致
-            k_inf=1e-6, omega_inf=1.0,
-        )
+        # 与 CPU 参照同一个模型类、同一组场（GPU 入口只接受 SST 族模型）
+        turb = SSTModelFR(mesh.n_cells, mesh.n_sps_per_cell)
+        turb.k_field, turb.omega_field = k_field.copy(), omega_field.copy()
+        turb.nu_t, turb._last_F1 = _source_nu_t(k_field, omega_field), _source_F1(k_field)
         return types.SimpleNamespace(
             turb_model_gpu=turb,
             mesh=mesh,
@@ -354,6 +349,25 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
 
         np.testing.assert_allclose(dk_gpu, dk_cpu, rtol=1e-9, atol=1e-9)
         np.testing.assert_allclose(domega_gpu, domega_cpu, rtol=1e-9, atol=1e-9)
+
+    def test_nonfinite_values_are_counted_like_cpu(self, mesh_ops_flat):
+        """输运残差的非有限值替换为零并计入模型的 `nonfinite_count`（与 CPU 同一份 `replace_nonfinite`，I-186）。
+        此前 GPU 一侧静默归零，退化单元上的失控对用户不可见。"""
+        mesh, ops, flat = mesh_ops_flat
+        mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)
+        Q, U, k_field, omega_field, d_wall = self._build_state(mesh, np.random.default_rng(5))
+        k_field[0, 0] = np.nan
+        stub = self._build_gpu_solver_stub(mesh, mesh_data, ops_data, flat, Q, U, k_field, omega_field, d_wall,
+                                           1.8e-5)
+        dk, dw = gst.compute_turbulence_transport_residual_gpu(stub)
+        assert np.isfinite(dk).all() and np.isfinite(dw).all()
+        assert stub.turb_model_gpu.nonfinite_count > 0
+
+    def test_requires_an_sst_family_model(self):
+        """非 SST 族模型（或没有模型）报错——此前没有模型时静默返回全零输运（与 CPU 的 I-62 同一处理）。"""
+        with pytest.raises(TypeError, match="SST"):
+            gst.compute_turbulence_transport_residual_gpu(types.SimpleNamespace(
+                turb_model_gpu=None, mesh=types.SimpleNamespace(n_cells=2, n_sps_per_cell=6)))
 
 
 class TestComputeWallDirichletMaskGpu:

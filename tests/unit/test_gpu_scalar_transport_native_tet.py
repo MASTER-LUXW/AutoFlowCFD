@@ -226,15 +226,10 @@ class TestNativeScalarTransportMatchesCpu:
         # 源项求值刷新的 nu_t / F1（扩散系数读它们）：两侧同一份非平凡场
         nu_t = 1e-3 * k_field / omega_field
         F1 = k_field / k_field.max()
-        turb_gpu = types.SimpleNamespace(
-            k_field=k_field.copy(), omega_field=omega_field.copy(),
-            nu_t=nu_t.copy(), _last_F1=F1.copy(),
-            sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
-            beta_star=0.09, beta1=0.075, omega_max=1e6, wall_treatment="resolved",
-            # 来流值（来流条件用；本测试开放边界掩码全 False，只需存在）：与
-            # CPU 参照 `SSTModelFR` 的构造默认值一致
-            k_inf=1e-6, omega_inf=1.0,
-        )
+        # 与 CPU 参照同一个模型类、同一组场（GPU 入口只接受 SST 族模型）
+        turb_gpu = SSTModelFR(n_cells, n_sps)
+        turb_gpu.k_field, turb_gpu.omega_field = k_field.copy(), omega_field.copy()
+        turb_gpu.nu_t, turb_gpu._last_F1 = nu_t.copy(), F1.copy()
         gpu_solver = types.SimpleNamespace(
             turb_model_gpu=turb_gpu,
             mesh=mesh,

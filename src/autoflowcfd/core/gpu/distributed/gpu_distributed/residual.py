@@ -167,7 +167,7 @@ class _MultiGPUResidualMixin:
         """compact 空间的 `div(nu grad U_k)`，k = 0..4（GPU 标量扩散装配）。"""
         from autoflowcfd.core.fr_operators.artificial_viscosity import artificial_diffusion_residual
         from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.residual import (
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.scalar_residuals import (
             compute_scalar_diffusion_residual_gpu,
         )
 

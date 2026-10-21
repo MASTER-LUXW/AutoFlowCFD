@@ -26,7 +26,9 @@ omega_wall / residual), 便于两侧对照 -- 本项目反复出过"同一语义
 
     faces.py             两侧坐标系的面外插、质量通量与 DG 提升(GPU，对应 CPU 版 face_frames.py)
     omega_wall.py        omega 壁面目标值/Dirichlet 掩码(GPU)
-    residual.py          对流/扩散残差与顶层编排(GPU)
+    scalar_residuals.py  单个标量的对流/扩散残差(GPU，对应 CPU 版 convection.py / diffusion.py)
+    primitives.py        标量输运原语 GpuScalarTransport(GPU，对应 CPU 版 primitives.py)
+    residual.py          SST k/ln(omega) 输运编排(GPU，对应 CPU 版 residual.py)
 
 本 `__init__.py` re-export 各子模块的公开名。
 """
@@ -35,10 +37,11 @@ from .omega_wall import (  # noqa: F401
     compute_omega_wall_target_gpu,
     compute_turbulence_face_masks_gpu,
 )
-from .residual import (  # noqa: F401
+from .scalar_residuals import (  # noqa: F401
     compute_scalar_convection_residual_gpu, compute_scalar_diffusion_residual_gpu,
-    compute_turbulence_transport_residual_gpu, scalar_convection_volume_divergence_gpu,
+    scalar_convection_volume_divergence_gpu,
 )
+from .residual import compute_turbulence_transport_residual_gpu  # noqa: F401
 
 __all__ = [
     "compute_omega_wall_target_gpu",

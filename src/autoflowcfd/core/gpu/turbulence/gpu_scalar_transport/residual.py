@@ -1,299 +1,77 @@
-"""AutoFlowCFD V2.0 - 对流/扩散残差与顶层编排(GPU)"""
+"""AutoFlowCFD V2.0 - SST 族 k 与 `w = ln(omega)` 的输运残差编排（GPU）
+
+CPU 版 `core/turbulence/transport/residual.py::compute_turbulence_transport_residual` 的对应：离散经
+`primitives.py::GpuScalarTransport`（梯度、对流、扩散与壁面 / 来流条件），本文件只决定 k 与 w 各自的
+扩散系数与边界条件。2026-10-21（I-186）以前这里另拼一套调用参数（质量通量散度、开放边界掩码、扩散带宽、
+内罚常数各写一遍），非有限值静默归零。
+"""
 
 from typing import Tuple
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative_array
-
-from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
-    gpu_contract_shared_operator_1axis, gpu_contract_shared_operator_2axis,
-)
-
-from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
-
-
-from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
-from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets, inflow_points
+from autoflowcfd.core.turbulence.nonfinite import replace_nonfinite
 from autoflowcfd.core.turbulence.sst.bounds import k_wall_zero_mask
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
+from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 
-# 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
-# 体积项 GPU 侧补齐时共用同一份，避免 residual 模块反向依赖 turbulence
-# 模块）。原先那层 `as _turb_overint_segs_gpu` 兼容别名全仓库零引用，
-# 2026-09-24 拆包时一并删除，调用点直接用真名。
-from autoflowcfd.core.gpu.gpu_overintegration import (
-    get_overintegration_segs_gpu,
-)
-from .faces import (
-    _extrapolate_scalar_pair_gpu,
-    _face_mass_flux_gpu,
-    _lift_side_jumps_gpu,
-)
 from .omega_wall import compute_omega_wall_target_gpu
-
-
-def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
-                                          n_cells, n_sps, first_band=None):
-    """标量体积项 `div(adj(J) * prod(factors))` 的去混叠版（GPU）。
-
-    `factors` 是一串 (n_cells, n_sps, k) 的场，k 为 1 或 3；各自精确插值
-    到 FINE 点后**在 FINE 点相乘**（去混叠的全部内容就是"先插值再相乘"），
-    再用细点度量算逆变通量、细网格微分矩阵求散度、精确限制回 coarse。
-
-    对流用 (rho, phi, u)、扩散用 (gamma, grad_phi)，与 CPU 端
-    `_scalar_convection_volume_overintegrated` /
-    `_scalar_diffusion_volume_overintegrated` 逐字对应。`first_band` 不为 None 时第一个因子是扩散系数，
-    细点上的插值换成取用值 `smooth_nonnegative_array(., first_band)`（与 CPU 同一处理）。
-    """
-    div = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    # 每段自带自己的 n_fine 与**已切好**的细点度量（2026-09-17，与 CPU 端
-    # 同一次改动）：四面体过积分的细网格轴不再填充到棱柱宽度，两段的
-    # n_fine 不同，所以不能再用一份共享的 adj_j_fine 按全局 [lo:hi] 切。
-    # 本循环一次处理整段，`adj_seg` 正好就对应 [lo:hi]，直接用即可。
-    for lo, hi, _n_fine_seg, adj_seg, c2f, D_fine, f2c in segs:
-        if hi <= lo:
-            continue
-        prod = None
-        for f in factors:
-            ff_ = gpu_contract_shared_operator_1axis(c2f, f[lo:hi])
-            if prod is None and first_band is not None:
-                ff_ = smooth_nonnegative_array(ff_, first_band, cp)
-            prod = ff_ if prod is None else prod * ff_
-        F_tilde = cp.matmul(adj_seg, prod[..., None]).squeeze(-1)
-        div_f = gpu_contract_shared_operator_2axis(D_fine, F_tilde[..., None])[..., 0]
-        div[lo:hi] = gpu_contract_shared_operator_1axis(
-            f2c, div_f[..., None])[..., 0]
-    return div
-
-
-def scalar_convection_volume_divergence_gpu(cp, scalar_field, rho, velocity, mesh_data, ops_data,
-                                            n_cells, n_prism, n_sps):
-    """对流体积算子 `div_vol(adj(J) rho u phi)`（除 det 之前），与 CPU 版
-    `scalar_convection_volume_divergence` 逐字对应；残差（`phi`）与质量通量体积散度
-    （`phi = 1`）共用这一个函数。
-
-    体积项恒走过积分（去混叠），与 CPU 端同一条链路；P0 没有过积分几何时走单点路径。
-    """
-    segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism))
-    if segs is not None:
-        return _scalar_volume_div_overintegrated_gpu(
-            cp, (rho[..., None], scalar_field[..., None], velocity), segs, n_cells, n_sps)
-    rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
-    F_tilde = cp.matmul(mesh_data['adj_j'], rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
-    div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    if n_prism > 0:
-        div_F[:n_prism] = gpu_contract_shared_operator_2axis(
-            ops_data['D_native_prism_padded'], F_tilde[:n_prism, :, :, None])[..., 0]
-    if n_cells > n_prism:
-        # native 四面体 D 矩阵分派（gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）
-        D_tet_op = ops_data['D_native_tet_padded']
-        div_F[n_prism:] = gpu_contract_shared_operator_2axis(D_tet_op, F_tilde[n_prism:, :, :, None])[..., 0]
-    return div_F
-
-
-def compute_scalar_convection_residual_gpu(
-    scalar_field, rho, velocity, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, mass_divergence,
-    wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
-    open_boundary_face=None, freestream_value=None,
-):
-    """标量对流 FR 残差（对流形式体积项 + 界面上风校正），与 CPU 版
-    `compute_scalar_convection_residual` 逐字对应（含来流条件
-    `open_boundary_face/freestream_value`，见 CPU 版参数文档；来流点与 CPU 共用
-    `turbulence/transport/faces.py::inflow_points`）。`mass_divergence`：`scalar_convection_volume_divergence_gpu` 在
-    `phi = 1` 上的值（只依赖冻结平均流，k 与 omega 两次调用共用，CPU 版对应
-    `ScalarConvectionGeometry.mass_divergence`）。"""
-    cp = get_cupy()
-    det_jacs = mesh_data['det_jacs']
-    div_F = scalar_convection_volume_divergence_gpu(
-        cp, scalar_field, rho, velocity, mesh_data, ops_data, n_cells, n_prism, n_sps)
-    div_F -= scalar_field * mass_divergence
-    residual = -div_F / det_jacs
-
-    # 界面项：两侧各自坐标系（CPU 版 `compute_scalar_convection_residual` 同一结构）
-    masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
-    m_o, m_n = _face_mass_flux_gpu(cp, ff, rho[..., None] * velocity)
-    phi_o, phi_o_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "owner", *masks)
-    if open_boundary_face is not None:
-        phi_o_other = cp.where(inflow_points(cp, ff, "owner", open_boundary_face, m_o), freestream_value, phi_o_other)
-    jump_o = m_o * (cp.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
-    phi_n, phi_n_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "neighbor", *masks)
-    if open_boundary_face is not None:
-        phi_n_other = cp.where(inflow_points(cp, ff, "neighbor", open_boundary_face, m_n), freestream_value,
-                               phi_n_other)
-    jump_n = m_n * (cp.where(m_n >= 0, phi_n, phi_n_other) - phi_n)
-    return residual + _lift_side_jumps_gpu(cp, ff, jump_o, jump_n, -1.0, det_jacs, n_cells, n_sps)
-
-
-def compute_scalar_diffusion_residual_gpu(
-    scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, *, c_ip, gamma_band,
-    wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None, grad_phi=None,
-):
-    """标量扩散 FR 残差（体积项 + IIPG 内罚界面项），与 CPU 版
-    `compute_scalar_diffusion_residual` 逐项对应。`c_ip` 由调用方按阶数取
-    `flux_kernels.resolve_viscous_ip_constant`（与平均流粘性项同一处定义）；`gamma_band` 是非解点处扩散
-    系数取用值的过渡带宽（含义与取值同 CPU 版）。`grad_phi`：调用方已为源项算过的同一份物理梯度，None 时在这里算
-    （与 CPU 版同名参数一致，I-63）。"""
-    cp = get_cupy()
-    det_jacs = mesh_data['det_jacs']
-    adj_j = mesh_data['adj_j']
-
-    if grad_phi is None:
-        grad_phi = compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data)  # (n_cells,n_sps,3)
-
-    # 去混叠，与 CPU 端 `_scalar_diffusion_volume_overintegrated` 对应
-    # （含那边写明的"Gamma 自身混叠仍在"这条已量化、刻意不实施的局限）。
-    _segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism))
-    if _segs is not None:
-        div_G = _scalar_volume_div_overintegrated_gpu(
-            cp, (gamma_field[..., None], grad_phi),
-            _segs, n_cells, n_sps, first_band=float(gamma_band))
-    else:
-        G_phys = gamma_field[..., None] * grad_phi
-        G_tilde = cp.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
-
-        div_G = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-        if n_prism > 0:
-            div_G[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['D_native_prism_padded'], G_tilde[:n_prism, :, :, None]
-            )[..., 0]
-        if n_cells > n_prism:
-            # native 四面体 D 矩阵分派（2026-09-03 补齐，同上）。
-            D_tet_op = ops_data['D_native_tet_padded']
-            div_G[n_prism:] = gpu_contract_shared_operator_2axis(
-                D_tet_op, G_tilde[n_prism:, :, :, None]
-            )[..., 0]
-
-    residual = div_G / det_jacs
-
-    # 界面项：IIPG + 内罚项，两侧各自坐标系；边界点壁面内罚 Dirichlet、其余齐次
-    # Neumann（公式与边界分类见 CPU 版同名函数，分类规则共用 `boundary_diffusion_targets`）
-    h_face = ff.ip_length[:, None]
-    masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
-    jumps = []
-    for frame, normal in (("owner", ff.owner_unit_normal), ("neighbor", ff.neighbor_unit_normal)):
-        g_self, g_other = _extrapolate_scalar_pair_gpu(cp, ff, gamma_field, frame)
-        # 面上外插的扩散系数换成取用值（与 CPU `face_frames.py::diffusion_jump_point` 同一处理）
-        g_self = smooth_nonnegative_array(g_self, float(gamma_band), cp)
-        g_other = smooth_nonnegative_array(g_other, float(gamma_band), cp)
-        p_self, p_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, frame)
-        gn_self = 0.0
-        gn_other = 0.0
-        for d in range(3):
-            a, b = _extrapolate_scalar_pair_gpu(cp, ff, cp.ascontiguousarray(grad_phi[..., d]), frame)
-            gn_self = gn_self + a * normal[..., d]
-            gn_other = gn_other + b * normal[..., d]
-        eta = c_ip * 0.5 * (g_self + g_other) / h_face
-        is_bnd, is_dir, target = boundary_diffusion_targets(cp, ff, frame, *masks)
-        j_int = 0.5 * (g_other * gn_other - g_self * gn_self) - eta * (p_self - p_other)
-        j_bnd = cp.where(is_dir, -(c_ip * g_self / h_face) * (p_self - target), -g_self * gn_self)
-        jumps.append(cp.where(is_bnd, j_bnd, j_int))
-    return residual + _lift_side_jumps_gpu(cp, ff, jumps[0], jumps[1], +1.0, det_jacs, n_cells, n_sps)
+from .primitives import GpuScalarTransport
 
 
 def compute_turbulence_transport_residual_gpu(
     solver, grad_k=None, grad_log_omega=None,
 ) -> Tuple:
-    """GPU 版 k 与 `w = ln(omega)` 的完整输运残差入口（对流+扩散，w 另加
-    `Gamma_w |grad w|^2`，见 `core/turbulence/sst/log_omega.py`），与 CPU 版
-    `compute_turbulence_transport_residual` 逐字对应。
-
-    2026-09-02 补齐：此前这里不做 CPU 版末尾的 `suppress_residual_
-    outliers`（机制3，中位数离群值抑制）。那条"遗漏"曾于 2026-09-02
-    被补齐（照抄 gpu_inviscid.py 的"倒回 CPU 复用 numba 实现"模式），
-    **而机制3 已于 2026-09-19 整体删除** —— 真实网格消融对照证明它触发
-    了但只把残差轨迹改变 ~1e-10 相对量、不改变发散结局（完整记录见
-    `fr_residual/inviscid.py`）。所以这里连带去掉了那次
-    `GPU -> CPU -> GPU` 往返，CPU 与 GPU 两侧现在都只有 isfinite 归零，
-    对称性由"都没有"保证。
+    """GPU 版 k 与 `w = ln(omega)` 的完整输运残差（对流 + 扩散，w 另加 `Gamma_w |grad w|^2`，
+    见 `core/turbulence/sst/log_omega.py`），与 CPU 版逐项对应。
 
     Args:
-        solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
-            （SST/DDES/IDDES 均可，都是 GPUTurbulenceSST 实例）
-        grad_k, grad_log_omega: 可选，调用方为源项算好的 k、ln(omega)
-            物理梯度（CuPy），复用避免重复计算物理梯度这个真实热点，与 CPU 版
-            同名参数同一个考量。有效扩散系数读模型上源项刷新的 `nu_t` 与 `F1`，
-            调用方须先在同一组 `(k, omega)` 上求源项（同 CPU 版）。
+        solver: `GPUFRSolver` 或多 GPU 的紧凑空间桩（`ctx.transport`）；`turb_model_gpu` 为 SST 族模型
+            （SST/DDES/IDDES 都是 `GPUTurbulenceSST`），另需 `GpuScalarTransport` 要求的属性与
+            `wall_distance_gpu`
+        grad_k, grad_log_omega: 可选，调用方为源项算好的 k、ln(omega) 物理梯度，复用（物理梯度是热点）。
+            有效扩散系数读模型上源项刷新的 `nu_t` 与 `F1`，调用方须先在同一组 `(k, omega)` 上求源项。
 
     Returns:
         (dk_dt_transport, dw_dt_transport)，各自 (n_cells, n_sps)
     """
+    from autoflowcfd.core.turbulence.sst import SSTModelFR
+
     cp = get_cupy()
     turb = solver.turb_model_gpu
-    n_cells = solver.mesh.n_cells
-    n_sps = solver.mesh.n_sps_per_cell
-    if turb is None:
-        z = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-        return z, z
-
-    Q = solver.Q_gpu
-    rho = Q[:, :, 0]
-    vel = Q[:, :, 1:4]
+    if not isinstance(turb, SSTModelFR):
+        raise TypeError(f"k/ln(omega) 输运残差只对 SST 族模型定义，收到 {type(turb).__name__}")
     mu = solver.mu_molecular
+    transport = GpuScalarTransport(solver)
+    rho = transport.rho
 
     w_log = log_omega(turb.omega_field, cp)
     if grad_k is None:
-        grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
+        grad_k = transport.gradient(turb.k_field)
     if grad_log_omega is None:
-        grad_log_omega = compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data)
+        grad_log_omega = transport.gradient(w_log)
 
     gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
-    d_wall = solver.wall_distance_gpu
 
-    ff = solver.flat_face_gpu
-    n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)
-
-    wall_mask = solver._wall_mask_gpu    # 物理无滑移壁面（见 gpu_solver_io.py 缓存点文档）
-    # k：resolved 在壁面为 0，auto 为零通量（与 CPU 同一个函数 `sst/bounds.py::k_wall_zero_mask`）
-    wall_mask_k = k_wall_zero_mask(wall_mask, turb.wall_treatment, cp)
-    open_mask = solver._open_mask_gpu      # 同上，来流条件（compute_turbulence_face_masks_gpu）
-
-    # 对流形式体积项要减去的质量通量体积散度（k 与 omega 共用，CPU 版对应
-    # `ScalarConvectionGeometry.mass_divergence`）
-    mass_div = scalar_convection_volume_divergence_gpu(
-        cp, cp.ones((n_cells, n_sps), dtype=cp.float64), rho, vel, solver.mesh_data, solver.ops_data,
-        n_cells, n_prism, n_sps)
-    conv_k = compute_scalar_convection_residual_gpu(
-        turb.k_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps, mass_div,
-        wall_dirichlet_zero_face=wall_mask_k,
-        open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
-    )
-    c_ip = resolve_viscous_ip_constant(int(solver.mesh.order))
-    diff_k = compute_scalar_diffusion_residual_gpu(
-        turb.k_field, gamma_k, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_zero_face=wall_mask_k, grad_phi=grad_k,
-    )
+    # k 的壁面：resolved 在物理无滑移壁面为 0，auto 为零通量（与 CPU 同一个函数 `sst/bounds.py::k_wall_zero_mask`）
+    wall_mask_k = k_wall_zero_mask(transport.wall_zero, turb.wall_treatment, cp)
+    conv_k = transport.convection(turb.k_field, turb.k_inf, wall_zero_face=wall_mask_k)
+    diff_k = transport.diffusion(turb.k_field, gamma_k, wall_zero_face=wall_mask_k, grad=grad_k)
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
+    # omega 的壁面：解析壁面值作 Dirichlet 目标，w = ln(omega) 取它的对数（没有目标的面该值不被读取）
     omega_wall_value_face, has_omega_wall = compute_omega_wall_target_gpu(
-        cp, ff, wall_mask, d_wall, Q, mu, turb.beta1,
-        omega_max=turb.omega_max,
-        turb_k_field=turb.k_field,
-        wall_treatment=turb.wall_treatment,
+        cp, solver.flat_face_gpu, transport.wall_zero, solver.wall_distance_gpu, solver.Q_gpu, mu, turb.beta1,
+        omega_max=turb.omega_max, turb_k_field=turb.k_field, wall_treatment=turb.wall_treatment,
     )
-
-    # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf)
-    log_wall_value_face = log_omega(omega_wall_value_face, cp)
-    conv_w = compute_scalar_convection_residual_gpu(
-        w_log, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps, mass_div,
-        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        open_boundary_face=open_mask, freestream_value=float(np.log(turb.omega_inf)),
-    )
-    diff_w = compute_scalar_diffusion_residual_gpu(
-        w_log, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_value_face=log_wall_value_face,
-        has_wall_dirichlet_value=has_omega_wall, grad_phi=grad_log_omega,
-    )
+    wall_w = (log_omega(omega_wall_value_face, cp), has_omega_wall)
+    conv_w = transport.convection(w_log, float(np.log(turb.omega_inf)), wall_value=wall_w)
+    diff_w = transport.diffusion(w_log, gamma_w, wall_value=wall_w, grad=grad_log_omega)
     dw_dt_transport = ((conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, cp))
                        / cp.maximum(rho, 1e-10))
 
-    # 机制3 已于 2026-09-19 删除（依据见 `fr_residual/inviscid.py`
-    # 同一处）。这里同时去掉了那次为复用 CPU numba 实现而做的
-    # `GPU -> CPU -> GPU` 往返（k/omega 的残差场与场值各拷一轮）。
-
-    dk_dt_transport = cp.where(cp.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
-    dw_dt_transport = cp.where(cp.isfinite(dw_dt_transport), dw_dt_transport, 0.0)
-
+    # 非有限值替换并计数告警（`turbulence/nonfinite.py`，与 CPU 同一份）
+    dk_dt_transport = replace_nonfinite(turb, dk_dt_transport, "SST k 输运", cp)
+    dw_dt_transport = replace_nonfinite(turb, dw_dt_transport, "SST ln(omega) 输运", cp)
     return dk_dt_transport, dw_dt_transport
