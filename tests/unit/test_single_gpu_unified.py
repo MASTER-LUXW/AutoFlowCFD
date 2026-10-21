@@ -218,10 +218,12 @@ def test_transient_single_node_writes_periodic_checkpoints(tmp_path):
         return types.SimpleNamespace(iterations=6, final_residual=1.0)
 
     solver.solve.side_effect = _solve
-    with patch("autoflowcfd.cli.solve.transient.load_mesh_for_solver", return_value=(MagicMock(), MagicMock())), \
-            patch("autoflowcfd.cli.solve.transient.build_single_node_solver", return_value=solver) as build, \
-            patch("autoflowcfd.cli.solve.transient.resolve_reference_area", return_value=None) as ref, \
-            patch("autoflowcfd.cli.solve.transient.write_single_node_outputs") as final_write, \
+    # 单机与分布式同一个执行流程（cli/solve/run.py::run_solve，I-175）
+    with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(MagicMock(), MagicMock())), \
+            patch("autoflowcfd.cli.solve.solver_factory.build_single_node_solver", return_value=solver) as build, \
+            patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area", return_value=None) as ref, \
+            patch("autoflowcfd.cli.solve.aero_coefficients._report_aerodynamic_coefficients"), \
+            patch("autoflowcfd.cli.solve.checkpoint_io.write_single_node_outputs") as final_write, \
             patch("autoflowcfd.cli.solve.checkpoint_io.write.write_single_node_outputs") as periodic_write:
         result = CliRunner().invoke(cli, ["solve", "transient", str(mesh_file), "--max-iter", "6",
                                           "--checkpoint-interval", "3", "--backend", "gpu",

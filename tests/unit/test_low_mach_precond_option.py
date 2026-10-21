@@ -77,7 +77,7 @@ def _fake_solver(low_mach_precond, order=0, n_cells=2, n_sps=1, n_vars=7):
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
         bc_overrides=None,
         wall_treatment="resolved", low_mach_precond=low_mach_precond,
-        mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
+        mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0, _sem_num_eddies=None,
         artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV),
     ))

@@ -264,11 +264,12 @@ class TestEveryBackendConstructsAController:
         # `__init__.py`，控制器构造点在 `build.py` 里。
         src = module_source(fd)
         # 控制器统一经 `time_integration/time_accurate.py::configure_time_stepping`（内部调
-        # `adaptive_cfl/policy.py::build_cfl_policy`）构造。这里查这条路径确实调用它、并 None 感知地
-        # 从 package 取三个边界值；兜底默认值只能来自控制器签名（结构守卫见 test_cfl_policy_single_source.py）。
+        # `adaptive_cfl/policy.py::build_cfl_policy`）构造。这里查这条路径确实调用它、并从 package 按键取三个边界值
+        # （打包端恒写这三个键、值可为 None；缺键即报错，I-190）；兜底默认值只能来自控制器签名（结构守卫见
+        # test_cfl_policy_single_source.py）。
         assert 'configure_time_stepping(' in src
         for key in ('cfl_start', 'cfl_max', 'cfl_min'):
-            assert f"package.get('{key}')" in src, f"{key} 没有从 package 里取"
+            assert f"package['{key}']" in src, f"{key} 没有从 package 里取"
         assert "('cfl_start', 0.1)" not in src, (
             "又把兜底默认值硬编码回去了——默认值只能有一个事实来源"
             "（AdaptiveCFLController 的签名）")

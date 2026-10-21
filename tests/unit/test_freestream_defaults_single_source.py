@@ -26,7 +26,7 @@ def _constructors():
 
 _REQUIRED = {"FRSolver": ("order", "turb_model_name", "time_scheme"),
              "GPUFRSolver": ("order", "turb_model_name", "time_scheme"),
-             "MultiGPUDistributedSolver": ("turb_model", "time_scheme")}
+             "MultiGPUDistributedSolver": ("turb_model_name", "time_scheme")}
 
 
 @pytest.mark.parametrize("cls", _constructors(), ids=lambda c: c.__name__)
