@@ -178,7 +178,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                            "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
 
         # 低马赫数伪时间预处理开关与 CFL 策略在下面 `configure_time_stepping` 里设定（全部后端同一判据；
-        # GPU 侧 Gamma 的实现见 core/gpu/gpu_preconditioning.py）。
+        # Gamma 与 CPU 同一个函数，core/utils/preconditioning.py）。
         # 来流湍流强度 / 粘性比存到实例上：降阶到 P0 的重置与 resume 湍流检查（`_set_freestream_turbulence`）
         # 读它们重新推导来流湍流值（与 CPU / 分布式后端同一约定，缺失时不退回默认值）。
         self._turbulence_intensity = turbulence_intensity

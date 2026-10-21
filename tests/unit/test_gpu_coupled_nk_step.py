@@ -20,8 +20,8 @@ import types
 import numpy as np
 import pytest
 
-import autoflowcfd.core.gpu.gpu_preconditioning as gpu_pre_mod
 import autoflowcfd.core.gpu.residual.gpu_corrected_gradient as gpu_corrected_gradient_mod
+import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
 import autoflowcfd.core.gpu.residual.gpu_inviscid as gpu_inviscid_mod
 import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
@@ -41,8 +41,8 @@ from tests.unit._numpy_as_cupy import NumpyAsCupy
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod, gst_mod,
-        gpu_turbulence_sst_mod, gpu_implicit_turb_mod, gpu_pre_mod, gpu_inviscid_mod,
-        gpu_corrected_gradient_mod], NumpyAsCupy())
+        gpu_turbulence_sst_mod, gpu_implicit_turb_mod, gpu_inviscid_mod,
+        gpu_corrected_gradient_mod, gpu_flux_mod], NumpyAsCupy())
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 

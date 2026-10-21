@@ -28,6 +28,8 @@ from typing import Optional
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.core.utils.array_module import array_module
+
 from autoflowcfd.core.thermo import GAMMA
 
 
@@ -98,11 +100,12 @@ def preconditioned_sound_speed(vel_mag, a, mach_ref: float, k: float = 1.1):
         k: 下限的安全裕度倍数（与 Gamma 保持一致，默认 1.1）
 
     Returns:
-        c_precond = sqrt(beta^2) * a；M >= mach_ref 的区域精确退化为 a。
+        c_precond = sqrt(beta^2) * a；M >= mach_ref 的区域精确退化为 a。数组模块无关（CPU 与 GPU 后端共用）。
     """
-    a_safe = np.maximum(a, 1e-30)
-    beta2 = _precond_beta2(np.asarray(vel_mag) ** 2, a_safe ** 2, mach_ref, k)
-    return np.sqrt(beta2) * a_safe
+    xp = array_module(vel_mag, a)
+    a_safe = xp.maximum(a, 1e-30)
+    beta2 = _precond_beta2(xp.asarray(vel_mag) ** 2, a_safe ** 2, mach_ref, k)
+    return xp.sqrt(beta2) * a_safe
 
 
 # =============================================================================
@@ -162,10 +165,11 @@ def _precond_beta2(q2, a2, mach_ref: float, k: float):
     与 `preconditioned_acoustic_eigs` 的定义**刻意有一处区别**：那里用的是
     面法向速度 `un`（因为它算的是逐面通量的特征值），这里用速度模 |u|
     （因为时间导数项的预处理是单元/解点局部的、与任何面法向无关）。
-    Weiss-Smith 原文对伪时间预处理用的就是当地速度模。
+    Weiss-Smith 原文对伪时间预处理用的就是当地速度模。数组模块无关。
     """
-    m2 = q2 / np.maximum(a2, 1e-30)
-    return np.clip(np.maximum(m2, k * mach_ref ** 2), 1e-10, 1.0)
+    xp = array_module(q2, a2)
+    m2 = q2 / xp.maximum(a2, 1e-30)
+    return xp.clip(xp.maximum(m2, k * mach_ref ** 2), 1e-10, 1.0)
 
 
 @njit(cache=True, parallel=True)
@@ -231,6 +235,10 @@ def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,
     才既稳定又有收益（只改其中一个的后果见本模块末尾"背景"一节记录的
     2026-08-24 真实事故）。
 
+    数组模块无关（CPU 与 GPU 后端共用这一份）：numpy 数组走逐点 numba 核，其余数组模块（CuPy）走同一算式的
+    向量化表达式（`_apply_low_mach_precond_vectorized`）。2026-10-22（I-115）以前 GPU 有一份从守恒变量自己推导
+    原始变量的拷贝（已删除的 `core/gpu/gpu_preconditioning.py`），beta^2 与有效声速也各写一份。
+
     Args:
         residual: (n_cells, n_sps, n_vars>=5) 残差；只有前 5 个守恒变量
             分量被预处理，n_vars>5 时（如平均流与湍流紧耦合的未知量）
@@ -245,6 +253,9 @@ def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,
     Returns:
         预处理后的残差（形状与输入相同）
     """
+    xp = array_module(residual, Q)
+    if xp is not np:
+        return _apply_low_mach_precond_vectorized(xp, residual, Q, float(mach_ref), float(k), out)
     n_vars = residual.shape[2]
     R5 = np.ascontiguousarray(residual[:, :, :5])
     Q5 = np.ascontiguousarray(Q[:, :, :5])
@@ -314,3 +325,32 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
             f"低马赫预处理不用于时间格式 {scheme.name}（只用于稳态伪时间推进 SSP-RK2/RK3 与 NEWTON_KRYLOV；"
             f"物理时间精度不受影响，低马赫下内迭代/子迭代收敛较慢）")
     return req and applicable
+
+
+def _apply_low_mach_precond_vectorized(xp, residual, Q, mach_ref: float, k: float, out=None):
+    """`_apply_low_mach_precond_kernel` 的向量化表达式（逐点算式与运算顺序逐项相同，非物理点同样原样透传），
+    `out` 语义与 `apply_low_mach_preconditioner` 相同（None 返回新数组；可以就是 residual，就地写）。
+
+    就地写安全：`coef`、`u/v/w`、`H` 在任何写回之前都已物化成独立数组，第 i 个分量的新值只依赖 `r_i` 自己；
+    逐分量写回不需要先攒 5 份临时数组（那会多占 5 个全场数组的显存，正好抵消 out= 想省的那一份）。
+    """
+    gm1 = GAMMA - 1.0
+    rho, u, v, w, p = (Q[..., m] for m in range(5))
+    physical = (rho >= 1e-30) & (p > 0.0)
+    a2 = GAMMA * xp.where(physical, p, 1.0) / xp.where(physical, rho, 1.0)
+    q2 = u * u + v * v + w * w
+    beta2 = _precond_beta2(q2, a2, mach_ref, k)
+    r0, r1, r2, r3, r4 = (residual[..., m] for m in range(5))
+    dp = gm1 * (0.5 * q2 * r0 - u * r1 - v * r2 - w * r3 + r4)
+    coef = (1.0 - beta2) / a2 * dp
+    H = a2 / gm1 + 0.5 * q2
+    if out is None:
+        out = residual.copy()
+    elif out is not residual:
+        out[...] = residual
+    out[..., 0] = xp.where(physical, r0 - coef, r0)
+    out[..., 1] = xp.where(physical, r1 - coef * u, r1)
+    out[..., 2] = xp.where(physical, r2 - coef * v, r2)
+    out[..., 3] = xp.where(physical, r3 - coef * w, r3)
+    out[..., 4] = xp.where(physical, r4 - coef * H, r4)
+    return out

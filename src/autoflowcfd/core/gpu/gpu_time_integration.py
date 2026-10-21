@@ -60,7 +60,7 @@ def compute_local_cfl_step_gpu(
             det_jacs_sp 一起提供时才生效）。
         mach_ref: 不为 None 时，额外算一份**预处理后**的平均流 dt——
             把对流项与几何项里的声速换成有效声速 sqrt(beta^2)*a
-            （beta^2 按速度模取，见 gpu_preconditioning.py）。这一份
+            （beta^2 按速度模取，见 core/utils/preconditioning.py）。这一份
             **只有在调用方真的把 Gamma 作用到平均流残差上时才可以使用**
             （见上方"谱半径用物理声速"那段记录的 2026-08-25 事故：
             只改 CFL 不改方程必然失稳）。粘性限制与声速无关，原样复用。
@@ -161,9 +161,9 @@ def compute_local_cfl_step_gpu(
         return (dt, dt) if return_physical_too else dt
 
     # === 预处理后的平均流 dt（与 CPU 侧 cfl.py 的同名段落逐项对应）===
-    from .gpu_preconditioning import preconditioned_sound_speed_gpu
+    from autoflowcfd.core.utils.preconditioning import preconditioned_sound_speed
     vel_mag = cp.sqrt(cp.sum(vel ** 2, axis=1))
-    c_pre = preconditioned_sound_speed_gpu(vel_mag, a, float(mach_ref))
+    c_pre = preconditioned_sound_speed(vel_mag, a, float(mach_ref))
 
     spectral_p = cp.zeros(n_cells, dtype=cp.float64)
     un_o_p = cp.abs(cp.einsum('nd,nd->n', vel[io], n_int)) + c_pre[io]

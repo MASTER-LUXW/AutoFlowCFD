@@ -207,12 +207,12 @@ class _MultiGPUSteppingMixin:
             """
             if not self.low_mach_precond_enabled:
                 return res_flat
-            from autoflowcfd.core.gpu.gpu_preconditioning import (
-                apply_low_mach_preconditioner_gpu,
-            )
+            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+
             R3 = res_flat.reshape(n_local, n_sps, 5)
-            out = apply_low_mach_preconditioner_gpu(
-                R3, U_state_flat.reshape(n_local, n_sps, 5),
+            out = apply_low_mach_preconditioner(
+                R3, conserved_to_primitive_gpu(U_state_flat.reshape(n_local, n_sps, 5)),
                 self.freestream["mach_ref"], out=R3)
             return out.reshape(n_local * n_sps, 5)
 

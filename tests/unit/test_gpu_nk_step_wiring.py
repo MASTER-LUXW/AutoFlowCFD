@@ -54,11 +54,11 @@ def _laminar_channel():
 
 @pytest.fixture
 def patched(monkeypatch):
-    import autoflowcfd.core.gpu.gpu_preconditioning as gpre
+    import autoflowcfd.core.gpu.residual.gpu_flux as gflux
     import autoflowcfd.core.gpu.solver.gpu_solver as gsol
     import autoflowcfd.core.gpu.solver.gpu_solver_io as gio
 
-    patch_module_get_cupy(monkeypatch, [gsol, gio, gpre], NumpyAsCupy())
+    patch_module_get_cupy(monkeypatch, [gsol, gio, gflux], NumpyAsCupy())
 
 
 def _frozen_dt(cpu):

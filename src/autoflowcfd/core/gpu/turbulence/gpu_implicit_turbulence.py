@@ -134,9 +134,11 @@ class GpuCoupledBackend:
         res += s.compute_inviscid_residual_gpu(U)
         res *= -1
         if s.low_mach_precond_enabled:
-            from autoflowcfd.core.gpu.gpu_preconditioning import apply_low_mach_preconditioner_gpu
+            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
 
-            res = apply_low_mach_preconditioner_gpu(res, U, s.freestream["mach_ref"], out=res)
+            res = apply_low_mach_preconditioner(res, conserved_to_primitive_gpu(U[..., :5]),
+                                                s.freestream["mach_ref"], out=res)
         return res.reshape(self._n_rows, -1)[:, :5]
 
     def mean_assembler(self, mu_t):

@@ -287,8 +287,8 @@ class _DistributedStepMixin:
             步长不改方程就是 2026-08-24 那次失稳）。
             Gamma 需要的原始变量由 `apply_low_mach_preconditioner` 从
             试探态算出的 Q 提供——这里显式转换，不依赖任何调用顺序上的
-            隐式副作用（与单机 CPU 路径复用 `state.Q` 的做法不同，
-            理由同 GPU 侧，见 core/gpu/gpu_preconditioning.py 文档）。
+            隐式副作用（与单机 CPU 路径复用 `state.Q` 的做法不同：残差函数按参数接收试探态，
+            不保证求解器上的原始变量与之同步）。
             """
             res = residual_func_raw(U_flat_trial)
             if self.low_mach_precond_enabled:

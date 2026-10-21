@@ -25,7 +25,6 @@ import numpy as np
 import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed_implicit as mgi_mod
-import autoflowcfd.core.gpu.gpu_preconditioning as gpu_pre_mod
 import autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source as ts_mod
 import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
@@ -45,7 +44,7 @@ from tests.unit._numpy_as_cupy import NumpyAsCupy
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         mgi_mod, ts_mod, gpu_flux_mod, gpu_gradients_mod, gpu_volume_contract_mod, gst_mod,
-        gpu_implicit_turb_mod, gpu_turbulence_sst_mod, gpu_pre_mod], NumpyAsCupy())
+        gpu_implicit_turb_mod, gpu_turbulence_sst_mod], NumpyAsCupy())
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 

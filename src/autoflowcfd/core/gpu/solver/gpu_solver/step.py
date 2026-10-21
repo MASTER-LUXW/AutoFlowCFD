@@ -126,38 +126,32 @@ class _GPUSolverStepMixin:
             """供时间积分器推进用：启用预处理时返回 `Gamma R`，否则就是 R。
 
             Gamma 线性，作用在 R 上与作用在 dU/dtau 上等价；它**必须**与
-            上面按预处理波速取的 dt 成对出现（见
-            core/gpu/gpu_preconditioning.py 与 CPU 侧
-            core/utils/preconditioning.py 模块文档）。
-            Gamma 需要的原始变量由 `apply_low_mach_preconditioner_gpu`
-            从 U_trial 自己推导——GPU 侧不依赖 `self.Q_gpu` 是否与试探态
-            同步这条隐式契约（与 CPU 侧的刻意差异，见那份模块文档）。
+            上面按预处理波速取的 dt 成对出现（`core/utils/preconditioning.py` 模块文档，CPU 与 GPU 同一个函数）。
+            原始变量由试探态 U_trial 现算，不依赖 `self.Q_gpu` 与试探态同步。
             """
             res = mean_flow_residual_raw(U_flat_trial)
             if self.low_mach_precond_enabled:
-                from autoflowcfd.core.gpu.gpu_preconditioning import (
-                    apply_low_mach_preconditioner_gpu,
-                )
+                from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+                from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+
                 # `out=res` 就地写：`res` 是 `mean_flow_residual_raw` 刚
                 # 算出来的新数组，stage 内施加完 Gamma 后原始值不再需要，
                 # 省掉每个 RK stage 一份全场数组的显存（79 万单元 P2 约
                 # 1.2GiB/stage）。`residual0` 那一处不能这样做——那里必须
                 # 保留物理残差给残差范数与自适应 CFL 用。
-                res = apply_low_mach_preconditioner_gpu(
-                    res, U_flat_trial.reshape(n_cells, n_sps, self.n_vars),
-                    self.freestream["mach_ref"], out=res,
-                )
+                Q_trial = conserved_to_primitive_gpu(U_flat_trial.reshape(n_cells, n_sps, self.n_vars)[..., :5])
+                res = apply_low_mach_preconditioner(res, Q_trial, self.freestream["mach_ref"], out=res)
             return res.reshape(n_cells * n_sps, self.n_vars)
 
         # 初始残差：`residual0_raw` 供残差范数/自适应 CFL 使用（物理残差），
         # `residual0` 供积分器复用 Stage 0（必要时已施加 Gamma）。
         residual0_raw = mean_flow_residual_raw(U_flat)
         if self.low_mach_precond_enabled:
-            from autoflowcfd.core.gpu.gpu_preconditioning import (
-                apply_low_mach_preconditioner_gpu,
-            )
-            residual0 = apply_low_mach_preconditioner_gpu(
-                residual0_raw, self.U_gpu, self.freestream["mach_ref"],
+            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+
+            residual0 = apply_low_mach_preconditioner(
+                residual0_raw, conserved_to_primitive_gpu(self.U_gpu[..., :5]), self.freestream["mach_ref"],
             ).reshape(n_cells * n_sps, self.n_vars)
         else:
             residual0 = residual0_raw.reshape(n_cells * n_sps, self.n_vars)
