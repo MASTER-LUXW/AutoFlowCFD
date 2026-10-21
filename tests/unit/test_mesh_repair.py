@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from autoflowcfd.grid.validation.quality_metrics import compute_tetrahedron_volumes
+
 from autoflowcfd.grid.mesh_gen.repair.mesh_repair import smooth_bad_cells, compute_movable_node_mask
 from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
 from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
@@ -119,12 +121,12 @@ class TestSmoothBadCells:
         perturbed = nodes.copy()
         perturbed[iC] += np.array([0.9, 0.9, 0.0])  # aggressive, may itself invert a cell
 
-        current_volumes = validator._compute_tetrahedron_volumes(perturbed, cells)
+        current_volumes = compute_tetrahedron_volumes(perturbed, cells)
         already_bad = current_volumes <= 0
 
         new_nodes, _, _ = smooth_bad_cells(perturbed, cells, validator, max_passes=5)
 
-        final_volumes = validator._compute_tetrahedron_volumes(new_nodes, cells)
+        final_volumes = compute_tetrahedron_volumes(new_nodes, cells)
         newly_negative = (final_volumes <= 0) & ~already_bad
         assert not np.any(newly_negative)
 

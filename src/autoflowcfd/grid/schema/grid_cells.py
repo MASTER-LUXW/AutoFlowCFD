@@ -252,58 +252,14 @@ class TetrahedralCells:
 
     @staticmethod
     def compute_volumes(nodes: 'NodeArray', connectivity: np.ndarray) -> np.ndarray:
-        """计算四面体体积（使用绝对值确保体积为正）
+        """四面体的物理体积（无符号，单元属性存储用）：`|quality_metrics.compute_tetrahedron_volumes|`。
 
-        四面体体积公式（顶点 A,B,C,D）：
-            V = |det(B-A, C-A, D-A)| / 6
-
-        注意: 使用绝对值处理节点顺序不一致的情况，确保返回正值。
-        对于生产级网格，建议在网格生成阶段确保一致的定向。
-
-        Args:
-            nodes: 节点坐标
-            connectivity: 四面体连接关系, shape=(N_cells, 4)
-
-        Returns:
-            volumes: 单元体积 (始终为正), shape=(N_cells,), 单位m^3
+        有符号体积只有那一份定义（定向 / 反转检查用它）。2026-10-22（I-134）以前这里另写一遍行列式公式，
+        与有符号版本两套约定并存。
         """
-        # 向量化实现，高性能
-        # 一次性提取所有单元的节点索引
-        n0 = connectivity[:, 0]
-        n1 = connectivity[:, 1]
-        n2 = connectivity[:, 2]
-        n3 = connectivity[:, 3]
-
-        # 使用高级索引获取节点坐标
-        x = nodes.x
-        y = nodes.y
-        z = nodes.z
-
-        # 计算从顶点 0 到其他顶点的向量（向量化）
-        v1_x = x[n1] - x[n0]
-        v1_y = y[n1] - y[n0]
-        v1_z = z[n1] - z[n0]
-
-        v2_x = x[n2] - x[n0]
-        v2_y = y[n2] - y[n0]
-        v2_z = z[n2] - z[n0]
-
-        v3_x = x[n3] - x[n0]
-        v3_y = y[n3] - y[n0]
-        v3_z = z[n3] - z[n0]
-
-        # 叉乘: v2 × v3（向量化）
-        cross_x = v2_y * v3_z - v2_z * v3_y
-        cross_y = v2_z * v3_x - v2_x * v3_z
-        cross_z = v2_x * v3_y - v2_y * v3_x
-
-        # 点乘: v1 · (v2 × v3)（向量化）
-        det = v1_x * cross_x + v1_y * cross_y + v1_z * cross_z
-
-        # 体积 = |det| / 6
-        volumes = np.abs(det) / 6.0
-
-        return volumes
+        from ..validation.quality_metrics import compute_tetrahedron_volumes
+        pts = np.column_stack([nodes.x, nodes.y, nodes.z])
+        return np.abs(compute_tetrahedron_volumes(pts, connectivity))
 
 
 @dataclass

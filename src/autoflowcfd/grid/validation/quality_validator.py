@@ -34,7 +34,6 @@ from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
 
 from .quality_report import MeshQualityReport
-from . import quality_metrics as _qm
 from .quality_evaluation import evaluate_quality, generate_recommendations
 
 if TYPE_CHECKING:
@@ -252,12 +251,6 @@ class MeshQualityValidator:
         from .quality_validator_metrics import check_volumes
 
         check_volumes(report, nodes, cells, cell_type)
-
-    def _compute_tetrahedron_volumes(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """quality_metrics.compute_tetrahedron_volumes 的薄实例方法包装
-        ——保留给外部调用者（例如 grid/mesh_gen/repair/mesh_repair.py 的 Stage A），
-        它们直接访问此 validator 实例而不是自行导入度量函数。"""
-        return _qm.compute_tetrahedron_volumes(nodes, cells)
 
     def _check_aspect_ratios(
         self,

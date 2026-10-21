@@ -16,6 +16,8 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
+from autoflowcfd.grid.validation.quality_metrics import compute_tetrahedron_volumes
+
 if TYPE_CHECKING:
     from ...schema.grid_faces import FaceData
     from ...validation.quality_validator import MeshQualityValidator
@@ -207,7 +209,7 @@ def smooth_bad_cells(
             )
             break
 
-        current_volumes = validator._compute_tetrahedron_volumes(nodes, cells)
+        current_volumes = compute_tetrahedron_volumes(nodes, cells)
         target = _node_target_positions(nodes, cells, np.abs(current_volumes))
 
         # 安全判据是"永远不将当前有效单元变为负"，
@@ -225,7 +227,7 @@ def smooth_bad_cells(
             nodes_trial[candidate_mask] = (
                 nodes[candidate_mask] + relax * (target[candidate_mask] - nodes[candidate_mask])
             )
-            trial_volumes = validator._compute_tetrahedron_volumes(nodes_trial, cells)
+            trial_volumes = compute_tetrahedron_volumes(nodes_trial, cells)
             newly_negative = (trial_volumes <= 0) & ~already_bad
             if not np.any(newly_negative):
                 accepted = True

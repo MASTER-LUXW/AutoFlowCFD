@@ -372,17 +372,7 @@ class GridValidator:
         return compute_triangle_skewness_values(node_coords, connectivity)
 
     def _compute_jacobian_values(self) -> np.ndarray:
-        """计算所有单元的雅可比行列式值数组"""
-        connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
+        """计算所有单元的雅可比行列式值数组（与 `_check_jacobian` 同一函数）"""
+        from .validator_jacobian import triangle_jacobians
 
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-
-        v0 = cell_coords[:, 1] - cell_coords[:, 0]
-        v1 = cell_coords[:, 2] - cell_coords[:, 0]
-        cross = np.cross(v0, v1)
-
-        return np.linalg.norm(cross, axis=1)
+        return triangle_jacobians(self.grid_data.nodes.get_coordinates(), self.grid_data.cells.connectivity)

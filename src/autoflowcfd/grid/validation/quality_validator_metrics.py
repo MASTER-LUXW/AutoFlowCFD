@@ -1,7 +1,7 @@
 """MeshQualityValidator 的体积/长宽比/扭曲度单体积指标检查。
 
 从 quality_validator.py 中拆分出来（原文件超过 400 行的项目约定上限）：
-_check_volumes / _compute_tetrahedron_volumes / _check_aspect_ratios /
+_check_volumes / _check_aspect_ratios /
 _check_skewness / compute_cell_skewness 这一组方法都只是对
 quality_metrics.py 里已有的向量化单元几何指标函数做统计汇总，不访问
 MeshQualityValidator 实例的任何状态（原方法体内从未用到 self），逻辑上
@@ -68,14 +68,6 @@ def check_volumes(
             report.mean_volume = float(np.mean(positive_volumes))
             report.std_volume = float(np.std(positive_volumes))
             report.volume_ratio = report.max_volume / max(report.min_volume, 1e-12)
-
-
-def compute_tetrahedron_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """quality_metrics.compute_tetrahedron_volumes 的薄包装
-    ——保留给外部调用者（例如 grid/mesh_gen/repair/mesh_repair.py 的 Stage A），
-    它们直接访问 MeshQualityValidator._compute_tetrahedron_volumes
-    而不是自行导入度量函数。"""
-    return _qm.compute_tetrahedron_volumes(nodes, cells)
 
 
 def check_aspect_ratios(

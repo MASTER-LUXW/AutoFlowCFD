@@ -32,23 +32,8 @@ def check_jacobian(grid_data: GridData) -> Dict[str, float]:
     logger.debug("Computing Jacobian determinants...")
 
     connectivity = grid_data.cells.connectivity
-    nodes = grid_data.nodes
-
-    # 获取节点坐标
-    cell_coords = np.stack([
-        nodes.get_coordinates(connectivity[:, i])
-        for i in range(3)
-    ], axis=1)
-
-    # 计算从节点 0 到节点 1 和 2 的向量
-    v0 = cell_coords[:, 1] - cell_coords[:, 0]
-    v1 = cell_coords[:, 2] - cell_coords[:, 0]
-
-    # 计算叉积（得到法向量）
-    cross = np.cross(v0, v1)
-
-    # 雅可比行列式是叉积的模
-    jacobians = np.linalg.norm(cross, axis=1)
+    # 雅可比行列式（叉积的模）= 2 倍三角形面积，与 quality_metrics 同一个面积公式
+    jacobians = triangle_jacobians(grid_data.nodes.get_coordinates(), connectivity)
 
     # 单个三角形的绕向在没有外部参考系的情况下没有绝对符号，
     # 因此这里的 "jacobians < 0"（np.linalg.norm 永远不为负）
@@ -123,3 +108,10 @@ def _count_flipped_triangles(grid_data: GridData, connectivity: np.ndarray) -> i
     ])) if bad_first.size else np.array([], dtype=owner_cells.dtype)
 
     return int(flipped_cells.size)
+
+
+def triangle_jacobians(node_coords: np.ndarray, connectivity: np.ndarray) -> np.ndarray:
+    """三角形的雅可比行列式 |(p1-p0) x (p2-p0)| = 2 倍面积（`quality_metrics.compute_triangle_areas`）。"""
+    from .quality_metrics import compute_triangle_areas
+
+    return 2.0 * compute_triangle_areas(node_coords, connectivity)
