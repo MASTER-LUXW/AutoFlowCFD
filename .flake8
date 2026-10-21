@@ -8,4 +8,5 @@ per-file-ignores =
     tests/unit/test_distributed_mesh_loader.py: F401, F811
     tests/unit/test_distributed_mesh_loader_dual_time.py: F401, F811
     tests/unit/test_distributed_mesh_loader_sst.py: F401, F811
+    tests/unit/test_gpu_distributed_assembly.py: F811
     tests/unit/test_gpu_distributed_sa.py: F811
