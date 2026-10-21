@@ -1,25 +1,8 @@
 repos:
-  - repo: https://github.com/psf/black
-    rev: 23.7.0
-    hooks:
-      - id: black
-        language_version: python3.10
-        args: [--line-length=88]
-
-  - repo: https://github.com/pycqa/isort
-    rev: 5.12.0
-    hooks:
-      - id: isort
-        args: ["--profile", "black", "--line-length=88"]
-
   - repo: https://github.com/pycqa/flake8
     rev: 6.1.0
     hooks:
-      - id: flake8
-        additional_dependencies:
-          - flake8-docstrings
-          - flake8-bugbear
-        args: [--max-line-length=88, --extend-ignore=E203,W503]
+      - id: flake8   # 配置见 .flake8
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.0
@@ -27,10 +10,8 @@ repos:
       - id: mypy
         additional_dependencies:
           - types-PyYAML
-          - types-requests
           - numpy
-        args: [--ignore-missing-imports]
-        exclude: ^tests/
+        files: ^src/   # 配置见 pyproject.toml [tool.mypy]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0

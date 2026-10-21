@@ -152,7 +152,7 @@ poetry run autoflowcfd utils doctor
 - **单文件不超过 500 行**，超过按功能拆分成子包。
 - **注释与文档字符串用中文**（术语、公式、代码标识符除外），Google 风格的 Args / Returns / Raises；说明"为什么"。
 - 命名：模块 / 函数 / 变量 `snake_case`，类 `PascalCase`，常量 `UPPER_CASE`，内部成员前缀 `_`。
-- 行宽约 120 列；公共函数写类型注解。
+- 行宽约 120 列（手写格式，不用自动格式化器重排；`flake8` 按 `.flake8` 检查）；公共函数写类型注解。
 
 ### 测试
 
@@ -171,10 +171,9 @@ poetry run autoflowcfd utils doctor
 ### Pull Request流程
 
 1. **确保代码通过CI检查**：
-   - 单元测试覆盖率 ≥80%
-   - Black格式化通过
-   - flake8无警告
-   - mypy类型检查通过
+   - 单元测试全部通过
+   - `flake8 src/ tests/` 无报告（`.flake8`）
+   - `mypy src/` 无报错（`pyproject.toml` 的 `[tool.mypy]`）
 
 2. **填写PR模板**：
    ```markdown

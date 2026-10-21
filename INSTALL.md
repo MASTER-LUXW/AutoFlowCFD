@@ -12,7 +12,7 @@ pip install poetry
 git clone https://github.com/AutoFlowCFD/AutoFlowCFD.git
 cd AutoFlowCFD
 
-poetry install              # 核心依赖 + 开发工具（pytest、black、mypy……）
+poetry install              # 核心依赖 + 开发工具（pytest、flake8、mypy……）
 poetry install -E gpu       # 另装 GPU 后端：cupy-cuda12x
 poetry install -E mpi       # 另装分布式求解：mpi4py、pymetis（还需系统 MPI：OpenMPI / MPICH / MS-MPI）
 poetry install -E perf      # 另装 psutil（utils benchmark 的内存统计）

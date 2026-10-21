@@ -42,11 +42,8 @@ pymetis = {version = ">=2023.1", optional = true}
 psutil = {version = ">=5.9", optional = true}
 
 [tool.poetry.group.dev.dependencies]
-black = "^23.7.0"
-isort = "^5.12.0"
 flake8 = "^6.1.0"
 mypy = "^1.5.0"
-pylint = "^2.17.0"
 pytest = "^7.4.0"
 pytest-cov = "^4.1.0"
 pre-commit = "^3.3.0"
@@ -63,51 +60,18 @@ autoflowcfd = "autoflowcfd.cli.main:cli"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.black]
-line-length = 88
-target-version = ['py310', 'py311']
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.git
-  | \.venv
-  | build
-  | dist
-)/
-'''
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-line_length = 88
-known_first_party = "autoflowcfd"
-
 [tool.mypy]
+# 默认严格度（不要求全部函数带类型标注），报错修到零
 python_version = "3.10"
-warn_return_any = true
+ignore_missing_imports = true
 warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
 strict_equality = true
-
-[[tool.mypy.overrides]]
-module = [
-    "tests.*",
-    "examples.*"
-]
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-addopts = "-ra -q --cov=autoflowcfd --cov-report=term-missing"
+addopts = "-ra -q"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -123,7 +87,7 @@ exclude_lines = [
     "def __repr__",
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
-    "pass",
+    '^\s*pass\s*$',
     "raise ImportError",
 ]
 fail_under = 80

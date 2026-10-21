@@ -26,12 +26,6 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-root
 
-      - name: Run Black check
-        run: poetry run black --check src/ tests/
-
-      - name: Run isort check
-        run: poetry run isort --check-only --profile black src/ tests/
-
       - name: Run flake8
         run: poetry run flake8 src/ tests/
 
@@ -89,4 +83,4 @@ jobs:
       - name: Verify build
         run: |
           ls -lh dist/
-          poetry run python -c "import tarfile; tarfile.open('dist/autoflowcfd-0.1.0.tar.gz')"
+          poetry run python -c "import glob, tarfile; tarfile.open(glob.glob('dist/autoflowcfd-*.tar.gz')[0])"
