@@ -16,6 +16,7 @@ from ..extrusion.mesh_extrusion import extrude_layers
 from ..tetgen.mesh_prism_to_tet import convert_layers_to_prisms
 from ..utils.mesh_utils import compute_face_normals
 from ..utils.mesh_corner_split import split_sharp_corners
+from ..utils.mesh_domain_classify_geometry import find_point_inside_closed_shell
 from .mesh_background_merge_utils import _stop_with_partial_mesh
 from ..tetgen.mesh_tetgen_core import (
     build_seam_taper_scale, fill_core_volume,
@@ -200,7 +201,14 @@ def _build_merged_mesh_with_bl(
         # 参见本模块自身的 CORE_FILL_VOLUME_CAP_FRACTION 注释
         # （文件顶部）了解此值的调优历史。
         volume_cap_fraction = CORE_FILL_VOLUME_CAP_FRACTION
-        regions = [(core_plc_points.mean(axis=0), 1, target_edge_length ** 3 * volume_cap_fraction)]
+        # 区域种子点必须在流体域内（外壳内、所有内嵌实体外），否则 tetgen 判定它在域外、整个体积约束不生效。
+        # 2026-10-21（I-208）以前取 PLC 点均值：物面附近 BL 外表面的点远多于远场点，均值落在物体孔洞里
+        # （车身 / 立方体算例都是如此），max_cell_size 约束静默失效，只剩事后的超大四面体插点阵兜底
+        region_seed = find_point_inside_closed_shell(core_plc_points, core_plc_faces)
+        if region_seed is None:
+            raise ValueError("核心区 PLC（远场外壳 + BL 外表面）上找不到位于流体域内的点——PLC 不水密或自相交，"
+                             "tetgen 的最大单元尺寸约束无处施加")
+        regions = [(region_seed, 1, target_edge_length ** 3 * volume_cap_fraction)]
         background_points = generate_core_background_points(
             core_plc_points, core_plc_faces, target_edge_length
         )

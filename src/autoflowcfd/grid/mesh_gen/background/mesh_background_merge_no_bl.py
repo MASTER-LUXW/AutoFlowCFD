@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from ...schema.grid_boundaries import BoundaryMap
 
 from .mesh_background_merge_utils import _refine_large_boundary_faces, _stop_with_partial_mesh
+from ..utils.mesh_domain_classify_geometry import find_point_inside_closed_shell
 from ..tetgen.mesh_tetgen_core import (
     fill_core_volume, generate_core_background_points,
     fill_without_oversized_tetrahedra,
@@ -53,7 +54,6 @@ def _build_merged_mesh_no_bl(
     # 设置了 max_cell_size 时：先共形细分过大的边界面，再按区域限制体积（tetgen 也可能在边界上插点——
     # 外部面因此是面网格三角形的细分，边界组由最后的 map_generated_boundaries 按几何包含关系给出）
     if max_cell_size is not None:
-        center = surface_nodes.mean(axis=0)
         # max_cell_size 已经是米制，与 surface_nodes 一致
         target_edge_length = max_cell_size
 
@@ -63,7 +63,12 @@ def _build_merged_mesh_no_bl(
             surface_nodes, surface_faces, target_edge_length
         )
 
-        regions = [(center, 1, target_edge_length ** 3 * CORE_VOLUME_CAP_FRACTION)]
+        # 区域种子点必须在流体域内（同 BL 路径，I-208：此前取面网格点均值，常落在内嵌实体的孔洞里）
+        region_seed = find_point_inside_closed_shell(proc_nodes, proc_faces)
+        if region_seed is None:
+            raise ValueError("面网格上找不到位于流体域内的点——面网格不水密或自相交，tetgen 的最大单元尺寸约束"
+                             "无处施加")
+        regions = [(region_seed, 1, target_edge_length ** 3 * CORE_VOLUME_CAP_FRACTION)]
         background_points = generate_core_background_points(
             proc_nodes, proc_faces, target_edge_length
         )

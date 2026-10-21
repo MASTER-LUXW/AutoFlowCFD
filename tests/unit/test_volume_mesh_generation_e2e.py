@@ -44,3 +44,32 @@ def test_box_in_box_volume_mesh(tunnel_type):
 
     report = MeshQualityValidator().validate_volume_mesh(vm, check_overlap=False)
     assert report.negative_volumes == 0
+
+
+@pytest.mark.parametrize("body_type, module", [
+    ("WALL", "autoflowcfd.grid.mesh_gen.background.mesh_background_merge_with_bl"),
+])
+def test_max_cell_size_region_seed_lies_in_the_fluid(monkeypatch, body_type, module):
+    """tetgen 最大单元尺寸约束的区域种子点必须在流体域内（I-208）。此前取 PLC / 面网格点均值：物面点远多于远场点时
+    均值落在物体孔洞里，tetgen 判定种子点在域外（"region point lies in the exterior"），整个体积约束静默失效。"""
+    import importlib
+
+    mod = importlib.import_module(module)
+    seeds = []
+    original = mod.fill_core_volume
+
+    def recording_fill(*args, regions=None, **kwargs):
+        seeds.extend(np.asarray(r[0]) for r in regions or ())
+        return original(*args, regions=regions, **kwargs)
+
+    monkeypatch.setattr(mod, "fill_core_volume", recording_fill)
+    surface = box_in_box_surface(body_n=8, tunnel_n=4)             # 物面点远多于远场点
+    surface.boundaries.bc_types["body"] = body_type
+    surface.boundaries.bc_types["tunnel"] = "FARFIELD"
+    generate_volume_mesh_from_surface(
+        surface, {"bl_layers": 2, "first_layer_height": 0.02, "max_cell_size": 0.6, "min_cell_size": 0.05})
+
+    assert seeds
+    for seed in seeds:
+        assert np.abs(seed).max() > 0.5 + 0.05                      # 不在物体（含边界层）里
+        assert np.all(seed > [-3.0, -2.0, -2.0]) and np.all(seed < [5.0, 2.0, 2.0])

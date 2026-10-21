@@ -12,6 +12,8 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from .mesh_utils import compute_face_normals
+
 # _bbox_touch_fraction 判定"这批节点是否主要贴在包围盒某一面上"的多数阈值。
 _BBOX_TOUCH_MAJORITY = 0.9
 
@@ -144,8 +146,9 @@ def find_point_inside_closed_shell(
     而不是被重叠 BL 棱柱已经占据的空间中填充虚假四面体。
 
     先尝试壳体的顶点均值质心（对合理凸/星形实体有效），然后回退到
-    多个随机采样面的内侧点（沿该面自身法向向内偏移），用于质心可能
-    完全落在壳体外部的非凸形状。
+    多个随机采样面两侧的近面点（沿该面法向两侧各偏移半个典型边长；不依赖面的朝向，哪一侧在内部由下面的射线
+    奇偶判定），用于质心可能完全落在壳体外部的非凸形状。同一函数也给出多壳体 PLC（外壳 + 内嵌实体）的流体域
+    内点：奇偶为奇即在外壳内、所有内壳外。
 
     每个候选点在接受前需通过两种验证：不能太靠近壳体表面本身
     （顶点质心可能恰好命中的退化情况，例如正好落在凹边上——
@@ -171,9 +174,7 @@ def find_point_inside_closed_shell(
     v0, v1, v2 = nodes[faces[:, 0]], nodes[faces[:, 1]], nodes[faces[:, 2]]
 
     face_centroids = (v0 + v1 + v2) / 3.0
-    normals = np.cross(v1 - v0, v2 - v0)
-    norms = np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
-    normals = normals / norms
+    normals = compute_face_normals(nodes, faces)
     edge_len = float(np.median(np.linalg.norm(v1 - v0, axis=1)))
     if edge_len <= 0.0:
         return None
@@ -182,6 +183,7 @@ def find_point_inside_closed_shell(
     n_face_try = min(n_attempts, len(faces))
     for i in rng.choice(len(faces), size=n_face_try, replace=False):
         candidates.append(face_centroids[i] - normals[i] * edge_len * 0.5)
+        candidates.append(face_centroids[i] + normals[i] * edge_len * 0.5)
 
     min_clearance = edge_len * 0.05
     for cand in candidates:
