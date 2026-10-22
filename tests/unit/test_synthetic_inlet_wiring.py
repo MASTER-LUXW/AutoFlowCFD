@@ -89,9 +89,14 @@ def test_advance_follows_the_freestream_vector():
     "autoflowcfd.core.gpu.distributed.gpu_distributed.stepping",
 ])
 def test_every_backend_advances_the_inlets_each_physical_step(module):
+    """每个后端的单步要么交给共用的单步编排（`step_orchestration.advance_step` 每步推进 SEM），要么自己推进。"""
     import importlib
 
-    assert "advance_synthetic_inlets(" in module_source(importlib.import_module(module))
+    from autoflowcfd.core.time_integration import step_orchestration
+
+    src = module_source(importlib.import_module(module))
+    assert "advance_synthetic_inlets(" in src or "advance_step(" in src
+    assert "advance_synthetic_inlets(" in module_source(step_orchestration)
 
 
 @pytest.mark.parametrize("cls_path", [

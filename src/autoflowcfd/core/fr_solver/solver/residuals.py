@@ -12,6 +12,7 @@ from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_f
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 
 from .. import boundary as fr_solver_boundary
+from ..cfl import FROM_CURRENT_STATE
 from .. import turbulence as fr_solver_turbulence
 
 
@@ -188,15 +189,17 @@ class _SolverResidualMixin:
         return (fr_solver_turbulence.get_turbulent_viscosity_field(self)
                 if mu_t_turb is None else mu_t_turb)
 
-    def _get_cfl_viscosity_field(self) -> Optional[np.ndarray]:
-        """粘性步长限制用的附加动力粘度：湍流涡粘 + `rho * nu_av`（人工粘性）。
+    def _get_cfl_viscosity_field(self, nu_av=FROM_CURRENT_STATE) -> Optional[np.ndarray]:
+        """粘性步长限制用的附加动力粘度：湍流涡粘 + `rho * nu_av`（人工粘性）。`nu_av` 为本步冻结的人工扩散系数
+        （单步编排传入，None 表示未启用），不给时在当前状态上求值。
 
         TGV 教训（2026-08-29）：额外的扩散必须让步长控制看见，否则显式推进的
         粘性稳定条件被违反（P2 TGV 3 步发散）。人工扩散 `div(nu grad U)` 的谱半径
         与动力粘度 `rho*nu` 的粘性项同阶，所以按 `rho*nu` 计入。
         """
         mu_t = self._get_turbulent_viscosity_field()
-        nu_av = self.compute_artificial_diffusivity_field()
+        if nu_av is FROM_CURRENT_STATE:
+            nu_av = self.compute_artificial_diffusivity_field()
         if nu_av is None:
             return mu_t
         mu_av = self.state.U[..., 0] * nu_av

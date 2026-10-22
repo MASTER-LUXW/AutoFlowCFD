@@ -118,7 +118,7 @@ def test_gpu_nk_step_matches_cpu_nk_step(patched):
     dt_cell, dt_phys_cell = _frozen_dt(cpu)
     n_cells, n_sps = cpu.state.U.shape[:2]
     full = lambda a: np.broadcast_to(a[:, None], (n_cells, n_sps)).copy()  # noqa: E731
-    cpu._compute_local_time_step = lambda return_physical_too=False: (
+    cpu._compute_local_time_step = lambda return_physical_too=False, nu_av=None: (
         (full(dt_cell), full(dt_phys_cell)) if return_physical_too else full(dt_cell))
     gpu = _gpu_standin(cpu, dt_cell, dt_phys_cell)
 

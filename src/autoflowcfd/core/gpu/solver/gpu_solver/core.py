@@ -299,7 +299,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
 
         self.convergence_history = ConvergenceHistory()
-        self.iteration = 0
         # 湍流产生项渐变计数器（四个后端同一个初始化函数；checkpoint 恢复湍流场后把它推到终点，
         # 见 `cli/solve/checkpoint_io/restore.py`）
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp

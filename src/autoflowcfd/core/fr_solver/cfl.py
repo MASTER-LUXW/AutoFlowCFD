@@ -8,7 +8,12 @@ AutoFlowCFD V2.0 - FRSolver 局部时间步长计算
 import numpy as np
 
 
-def compute_local_time_step(solver, return_physical_too: bool = False):
+#: `nu_av` 的缺省值：人工扩散系数在当前状态上求值（诊断、测试直接调用时）；单步编排传本步冻结的那一份
+#: （`time_integration/step_orchestration.py`，可为 None 表示未启用）。
+FROM_CURRENT_STATE = object()
+
+
+def compute_local_time_step(solver, return_physical_too: bool = False, nu_av=FROM_CURRENT_STATE):
     """
     计算局部时间步长（基于CFL条件）。
 
@@ -93,7 +98,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     unit_normals = face_normals / np.maximum(np.linalg.norm(face_normals, axis=1, keepdims=True), 1e-30)
 
     # 有效粘度：分子粘度 + 湍流涡粘 + 人工粘性（rho*nu_av），见 `_get_cfl_viscosity_field` 文档
-    mu_t_field = solver._get_cfl_viscosity_field()  # None 或 (n_cells, n_sps)
+    mu_t_field = solver._get_cfl_viscosity_field(nu_av)  # None 或 (n_cells, n_sps)
     mu_eff = (np.full((n_cells, n_sps), solver.mu_molecular) if mu_t_field is None
               else solver.mu_molecular + mu_t_field)
     # 粘性长度尺度平方：**各向异性正确**的形式（2026-09-23 修复）。

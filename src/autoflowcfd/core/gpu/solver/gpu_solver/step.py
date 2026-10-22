@@ -1,262 +1,108 @@
-"""AutoFlowCFD V2.0 - 单机 GPU 的单步推进
+"""AutoFlowCFD V2.0 - 单机 GPU（`GPUFRSolver`）的单步推进：一步的流程由四个后端共用的
+`time_integration/step_orchestration.py::advance_step` 编排，这里只提供单 GPU 的原语（`GpuStepBackend`）。
 
-`GPUFRSolver` 的一组方法（mixin）。
-
-**只含方法，没有状态**：全部属性由 `GPUFRSolver` 的 `__init__` 建立，
-这里通过 `self` 访问。
+`GPUFRSolver` 的一组方法（mixin），只含方法，属性由 `GPUFRSolver.__init__` 建立。
 """
 
+from functools import partial
 from typing import Any
 
-from functools import partial
 import numpy as np
+
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
-from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
-    newton_step_ok,
-    step_mean_flow_newton,
-)
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.turbulence.registry import has_transport_equations
-from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
-from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
+from autoflowcfd.core.time_integration.step_orchestration import advance_step
+
+
+class GpuStepBackend:
+    """单 GPU 的单步原语（`step_orchestration.StepBackend`）；步长是逐单元的，铺到全部解点。"""
+
+    def __init__(self, solver):
+        self.solver = solver
+        self.xp = get_cupy()
+        self.n_cells = int(solver.mesh.n_cells)
+        self.n_sps = int(solver.mesh.n_sps_per_cell)
+        self.n_vars = int(solver.n_vars)
+        self.reductions = LocalReductions(self.xp)
+        self.cell_is_prism = np.arange(self.n_cells) < int(solver.mesh.n_prism_cells)
+        self.order = int(solver.order if solver.current_order is None else solver.current_order)
+        self.freestream = solver.freestream
+        self.ghost_provider = solver.boundary_ghost_provider
+        self.turbulence_model = solver.turb_model_gpu
+
+    def _rows(self, per_cell):
+        return self.xp.broadcast_to(per_cell[:, None], (self.n_cells, self.n_sps)).reshape(self.n_cells * self.n_sps)
+
+    def begin_step(self) -> None:
+        self.solver._update_primitives_gpu()
+
+    def artificial_diffusivity(self):
+        return self.solver.compute_artificial_diffusivity_field_gpu()
+
+    def local_time_steps(self, nu_av):
+        dt_local, dt_physical = self.solver._compute_local_time_step_gpu(return_physical_too=True, nu_av=nu_av)
+        return self._rows(dt_local), dt_physical[:, None], self.xp.asnumpy(dt_local)
+
+    def pseudo_time_step(self, nu_av):
+        return self._rows(self.solver._compute_local_time_step_gpu(nu_av=nu_av))
+
+    def turbulence(self, dt_turbulence, coupled: bool):
+        if coupled:
+            return self.solver._turbulent_mu_t_gpu()
+        return self.solver.compute_turbulence_source_gpu(dt_turbulence)
+
+    def state_rows(self):
+        return self.solver.U_gpu.reshape(self.n_cells * self.n_sps, self.n_vars)
+
+    def set_state_rows(self, rows) -> None:
+        self.solver.U_gpu = rows.reshape(self.n_cells, self.n_sps, self.n_vars)
+        self.solver._update_primitives_gpu()
+
+    def primitives(self, rows):
+        from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+
+        return conserved_to_primitive_gpu(rows.reshape(self.n_cells, self.n_sps, self.n_vars)[..., :5])
+
+    def residual_raw(self, rows, mu_t, nu_av):
+        U = rows.reshape(self.n_cells, self.n_sps, self.n_vars)
+        total = (self.solver.compute_inviscid_residual_gpu(U)
+                 + self.solver.compute_viscous_residual_gpu(U, mu_t_field=mu_t, nu_av=nu_av))
+        return (-total).reshape(self.n_cells * self.n_sps, self.n_vars)
+
+    def record_monitor_residual(self, raw) -> None:
+        return None
+
+    def coupled_backend(self, nu_av):
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
+
+        return GpuCoupledBackend(self.solver, nu_av)
+
+    def newton_options(self, mu_t, nu_av) -> dict:
+        from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors, gpu_coupling_graph
+
+        s, cp, ff = self.solver, self.xp, self.solver.flat_face_gpu
+        # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
+        assembler = None if unsupported_reason(order=self.order) else MeanFlowBlockAssembler(
+            mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
+            mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t, nu_av=nu_av,
+            n_sps=self.n_sps, wall_model=s.wall_model)
+        return dict(cell_colors=lambda: gpu_cell_colors(cp, ff, self.n_cells),
+                    coupling_graph=partial(gpu_coupling_graph, cp, ff, self.n_cells), block_assembler=assembler)
+
+    def positivity(self):
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        return get_positivity_limiter(self.solver, xp=self.xp)
+
+    def end_step(self, mu_t, coupled) -> None:
+        # SGS（WALE）涡粘在新状态上更新，供下一步的粘性残差使用（`gpu_solver_io.py::_apply_turbulence_corrections_gpu`）
+        self.solver._apply_turbulence_corrections_gpu()
 
 
 class _GPUSolverStepMixin:
     """单机 GPU 的单步推进（求解循环与 CPU 共用 `SolveLoopMixin`）"""
 
-    # 宿主类在 __init__ / 其它 mixin 中提供的属性（仅类型声明）
-    _apply_turbulence_corrections_gpu: Any
-    _cfl_controller: Any
-    _compute_local_time_step_gpu: Any
-    _turbulent_mu_t_gpu: Any
-    _update_primitives_gpu: Any
-    boundary_ghost_provider: Any
-    compute_artificial_diffusivity_field_gpu: Any
-    compute_turbulence_source_gpu: Any
-    current_order: Any
-    flat_face_gpu: Any
-    freestream: Any
-    iteration: Any
-    low_mach_precond_enabled: Any
-    mesh: Any
-    n_vars: Any
-    order: Any
-    time_integrator: Any
-    turb_model_gpu: Any
-    turb_model_name: Any
-    U_gpu: Any
-
-    def step(self, dt: float = 0.0) -> float:
-        """执行一个时间步。
-
-        完整流程（与 CPU 版 step() 对应）：
-        1. 更新原始变量
-        2. 湍流源项求值（算子分裂：湍流走独立显式更新）
-        3. 局部 CFL 步长
-        4. 平均流残差计算（含湍流涡粘耦合）
-        5. SSP-RK / 隐式（稳态 Newton-Krylov、双时间步的隐式内迭代）时间推进
-        6. 湍流场更新（k/ω 正性限制）
-
-        Args:
-            dt: 物理时间步长（稳态模式下被局部 CFL 步长覆盖，
-                DUAL_TIME 模式下是真正的物理时间步长）
-
-        Returns:
-            residual_norm: 残差范数
-        """
-        cp = get_cupy()
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-
-        self._update_primitives_gpu()
-        scheme = self.time_integrator.scheme
-        # 本步冻结的问题单元人工扩散系数（与 CPU step.py 同一算子分裂约定；
-        # 未启用时 None），同时进入粘性步长限制与全部粘性残差求值
-        nu_av = self.compute_artificial_diffusivity_field_gpu()
-
-        # 局部 CFL 步长。启用低马赫数预处理时 dt_local 是**预处理后**的
-        # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
-        # 一份；两者的分工与 CPU 侧 step.py 完全一致。
-        dual_time = scheme == TimeIntegrationScheme.DUAL_TIME
-        # 隐式步（稳态 Newton-Krylov，或双时间步的隐式内迭代）里带输运方程的湍流模型与平均流紧耦合
-        # 求解（time_integration/implicit/newton/coupled_step.py），这里只取当前状态的涡粘供残差监控；
-        # 其余情形湍流按算子分裂在当前状态下更新。步长先取（粘性 CFL 用上一步的涡粘，与 CPU step.py
-        # 同一时序）
-        coupled_nk = (scheme in (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
-                      and self.turb_model_gpu is not None and has_transport_equations(self.turb_model_name))
-        dt_local, dt_physical = self._compute_local_time_step_gpu(
-            return_physical_too=True, nu_av=nu_av)
-        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数）；时间精确子步按实际步长推进
-        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
-        from autoflowcfd.core.time_integration.time_accurate import sem_time_step
-        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, sem_time_step(self, dt))
-        if coupled_nk:
-            mu_t_field = self._turbulent_mu_t_gpu()
-        else:
-            mu_t_field = self.compute_turbulence_source_gpu(dt_physical[:, None])
-        dt_local_full = cp.broadcast_to(
-            dt_local[:, None], (n_cells, n_sps)
-        ).reshape(n_cells * n_sps)
-        # 累计伪时间（与 CPU step.py 同一个函数；n_cells 个数拷回主机）
-        from autoflowcfd.core.fr_solver.pseudotime_budget import accumulate_pseudo_time
-        # 双时间步每个单元都前进同一个物理时间步（与 CPU step.py 同一处理）
-        accumulate_pseudo_time(self, np.full(n_cells, float(dt)) if dual_time else cp.asnumpy(dt_local))
-
-        # 展平 U 用于时间积分器
-        U_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
-
-        # 构建平均流残差函数（含湍流涡粘耦合）
-        def mean_flow_residual_raw(U_flat_trial):
-            """未经预处理的原始残差 R（约定 dU/dt = -R）。
-
-            残差监控与自适应 CFL 都必须用这一份**物理**残差：Gamma 可逆、
-            两者同时趋零，但量级不同，用预处理值会让打印的残差、收敛判据
-            以及与历史算例的对比全部失去可比性（与 CPU 侧 step.py 里
-            同名函数一致）。
-            """
-            U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
-            inv_res = self.compute_inviscid_residual_gpu(U_trial)
-            visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field, nu_av=nu_av)
-            total = inv_res + visc_res
-            return -total
-
-        def mean_flow_residual(U_flat_trial):
-            """供时间积分器推进用：启用预处理时返回 `Gamma R`，否则就是 R。
-
-            Gamma 线性，作用在 R 上与作用在 dU/dtau 上等价；它**必须**与
-            上面按预处理波速取的 dt 成对出现（`core/utils/preconditioning.py` 模块文档，CPU 与 GPU 同一个函数）。
-            原始变量由试探态 U_trial 现算，不依赖 `self.Q_gpu` 与试探态同步。
-            """
-            res = mean_flow_residual_raw(U_flat_trial)
-            if self.low_mach_precond_enabled:
-                from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
-                from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
-
-                # `out=res` 就地写：`res` 是 `mean_flow_residual_raw` 刚
-                # 算出来的新数组，stage 内施加完 Gamma 后原始值不再需要，
-                # 省掉每个 RK stage 一份全场数组的显存（79 万单元 P2 约
-                # 1.2GiB/stage）。`residual0` 那一处不能这样做——那里必须
-                # 保留物理残差给残差范数与自适应 CFL 用。
-                Q_trial = conserved_to_primitive_gpu(U_flat_trial.reshape(n_cells, n_sps, self.n_vars)[..., :5])
-                res = apply_low_mach_preconditioner(res, Q_trial, self.freestream["mach_ref"], out=res)
-            return res.reshape(n_cells * n_sps, self.n_vars)
-
-        # 初始残差：`residual0_raw` 供残差范数/自适应 CFL 使用（物理残差），
-        # `residual0` 供积分器复用 Stage 0（必要时已施加 Gamma）。
-        residual0_raw = mean_flow_residual_raw(U_flat)
-        if self.low_mach_precond_enabled:
-            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
-            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
-
-            residual0 = apply_low_mach_preconditioner(
-                residual0_raw, conserved_to_primitive_gpu(self.U_gpu[..., :5]), self.freestream["mach_ref"],
-            ).reshape(n_cells * n_sps, self.n_vars)
-        else:
-            residual0 = residual0_raw.reshape(n_cells * n_sps, self.n_vars)
-
-        # 守恒的正性保持限制器：与 CPU 同一个（数组模块无关实现），按阶数缓存。
-        # 隐式步用它的点集做物理性限幅（`PositivityLimiter.density_pressure_limits`）。
-        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
-        positivity_func = get_positivity_limiter(self, xp=cp)
-
-        # 根据时间方案选择推进方式
-        nk_info = None
-        if scheme in (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME):
-            # 隐式步，与 CPU 共用同一个实现：带输运方程的湍流模型时平均流与湍流紧耦合
-            # （implicit/newton/coupled_step.py），否则只解平均流（implicit/newton/mean_flow_step.py），这里只提供
-            # GPU 的残差、归约（cupy）与面相邻关系。稳态一步一个 Newton 步；双时间步每个物理步做若干个
-            # 带 BDF 物理时间项的 Newton 步（implicit/newton/physical_time.py）。
-            from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors, gpu_coupling_graph
-            from autoflowcfd.core.fr_residual.jacobian.backend import (
-                MeanFlowBlockAssembler, unsupported_reason,
-            )
-            ff = self.flat_face_gpu
-            order_nk = int(self.order if getattr(self, "current_order", None) is None
-                           else self.current_order)
-
-            def newton_step(dtau_flat, physical_time=None, advance_ramp=True):
-                """一个 Newton 步，新状态写回 `U_gpu`（与湍流模型），返回诊断 info。"""
-                if coupled_nk:
-                    return step_coupled_newton(self, GpuCoupledBackend(self, nu_av), dtau_flat,
-                                               physical_time=physical_time, advance_ramp=advance_ramp)
-                # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
-                block_assembler = None if unsupported_reason(order=order_nk) else MeanFlowBlockAssembler(
-                    mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
-                    mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],
-                    low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, nu_av=nu_av, n_sps=n_sps,
-                    wall_model=self.wall_model)
-                u_next, info = step_mean_flow_newton(
-                    self, mean_flow_residual, self.U_gpu.reshape(n_cells * n_sps, self.n_vars), dtau_flat,
-                    _reference_scales(self.freestream, self.n_vars),
-                    red=LocalReductions(cp),
-                    cell_is_prism=np.arange(n_cells) < int(self.mesh.n_prism_cells),
-                    cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
-                    coupling_graph=partial(gpu_coupling_graph, cp, ff, n_cells),
-                    order=order_nk,
-                    positivity=positivity_func, physical_time=physical_time, block_assembler=block_assembler)
-                self.U_gpu = u_next.reshape(n_cells, n_sps, self.n_vars)
-                self._update_primitives_gpu()
-                return info
-
-            if dual_time:
-                from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
-                    advance_physical_step, previous_newton_state, store_newton_state,
-                )
-
-                def pseudo_time_step():
-                    return cp.broadcast_to(self._compute_local_time_step_gpu(nu_av=nu_av)[:, None],
-                                           (n_cells, n_sps)).reshape(n_cells * n_sps)
-
-                x_now = GpuCoupledBackend(self, nu_av).state() if coupled_nk else U_flat.copy()
-                advance_physical_step(
-                    self, x_now, previous_newton_state(self, cp, n_cells, n_sps),
-                    lambda term, first: newton_step(pseudo_time_step(), term, first), dt)
-                store_newton_state(self, x_now, n_cells, n_sps, self.n_vars)
-            else:
-                nk_info = newton_step(dt_local_full)
-            U_new_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
-
-        else:
-            # SSP-RK2/RK3 或前向 Euler
-            U_new_flat = self.time_integrator.step(
-                U_flat, mean_flow_residual, dt_local_full,
-                residual0=residual0,
-                positivity_func=positivity_func,
-            )
-
-        self.U_gpu = U_new_flat.reshape(n_cells, n_sps, self.n_vars)
-        self._update_primitives_gpu()
-
-        # SGS（WALE）涡粘系数更新（#7）：必须在状态更新之后调用，供
-        # 下一步的粘性残差消费，与 CPU 版 apply_turbulence_corrections
-        # 同一个操作分裂时序，见 gpu_solver_io.py::
-        # _apply_turbulence_corrections_gpu 文档。
-        self._apply_turbulence_corrections_gpu()
-
-        # 残差范数：**未预处理**的物理残差（见 mean_flow_residual_raw），全部后端同一个定义
-        from autoflowcfd.core.time_integration.residual_norm import explicit_turbulence_residual, monitor_residuals
-        from autoflowcfd.fr.native_padding import order_from_n_sps
-
-        red = LocalReductions(cp)
-        is_prism = np.arange(n_cells) < int(self.mesh.n_prism_cells)
-
-        residual_norm, self._residual_per_equation = monitor_residuals(
-            red, residual0_raw, is_prism, order_from_n_sps(n_sps), _reference_scales(self.freestream, self.n_vars))
-        self._residual_turbulence = explicit_turbulence_residual(
-            red, self.turb_model_gpu, is_prism, order_from_n_sps(n_sps))
-        self.iteration += 1
-
-        # 自适应 CFL：按物理残差更新（与 CPU 侧 step.py 同一时序——在残差
-        # 范数算出来之后、返回之前）
-        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/newton/physical_time.py）
-        if self._cfl_controller is not None and not dual_time:
-            if nk_info is not None:
-                # SER 看 Newton 所解系统的 ||Gamma R||，并区分物理暂态与步失败
-                # （adaptive_cfl/ser.py），与 CPU step.py 同一处理
-                self._cfl_controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info))
-            else:
-                self._cfl_controller.update(residual_norm)
-
-        return residual_norm
+    def step(self: Any, dt: float = 0.0) -> float:
+        """推进一步，返回残差范数（流程与 `dt` 的语义见 `step_orchestration.advance_step`）。"""
+        return advance_step(self, GpuStepBackend(self), dt)

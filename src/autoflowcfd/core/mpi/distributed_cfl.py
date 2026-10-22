@@ -70,6 +70,8 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.fr_solver.cfl import FROM_CURRENT_STATE
+
 
 class _DistributedFaceConnectivityView:
     """把分布式面几何包装成 `cfl.py` 需要的 face_connectivity 接口。
@@ -228,9 +230,10 @@ class DistributedCFLView:
         self._metric_flux_scale_cache = scale
         return scale
 
-    def _get_cfl_viscosity_field(self) -> Optional[np.ndarray]:
+    def _get_cfl_viscosity_field(self, nu_av=FROM_CURRENT_STATE) -> Optional[np.ndarray]:
         """粘性步长限制用的附加动力粘度（湍流涡粘 + 人工粘性 rho*nu，由调用方
-        合成在 `mu_t_local` 里），按紧凑索引空间给出；halo 段用 0 填充。
+        合成在 `mu_t_local` 里），按紧凑索引空间给出；halo 段用 0 填充。人工扩散系数已在 `mu_t_local` 里，
+        不能再单独传入（`nu_av` 只接受缺省值，签名与单机 `_get_cfl_viscosity_field` 一致）。
 
         为什么 halo 段填 0 是正确的（而不是"少做了一次 halo 交换"）：
         涡粘只通过 `dt_visc = 0.25*CFL*rho*V^(2/3)/mu_eff` 进入，而那是
@@ -239,6 +242,8 @@ class DistributedCFLView:
         都不影响任何被使用的结果。见模块文档"为什么在 local+halo 紧凑
         空间上算"。
         """
+        if nu_av is not FROM_CURRENT_STATE:
+            raise ValueError("分布式步长的人工扩散系数由 mu_t_local 给出，不能另行传入 nu_av")
         if self._mu_t_local is None:
             return None
         n_compact, n_sps = self.state.U.shape[:2]

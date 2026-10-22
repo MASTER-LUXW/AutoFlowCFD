@@ -71,7 +71,7 @@ def test_substeps_are_uniform_and_land_exactly_on_t_plus_dt():
     for h_ref in taken:
         stable = float(orig_dt().min())
         assert min(remaining, stable) == pytest.approx(h_ref, rel=1e-14)
-        b._compute_local_time_step = (lambda h: (lambda return_physical_too=False: (
+        b._compute_local_time_step = (lambda h: (lambda return_physical_too=False, nu_av=None: (
             (np.full_like(orig_dt(), h),) * 2 if return_physical_too else np.full_like(orig_dt(), h))))(h_ref)
         b.step(h_ref)
         b._compute_local_time_step = orig_dt

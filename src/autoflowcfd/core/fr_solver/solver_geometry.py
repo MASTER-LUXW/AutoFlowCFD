@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from .cfl import FROM_CURRENT_STATE
+
 
 class _SolverGeometryMixin:
     """FRSolver 几何辅助方法混入。
@@ -56,19 +58,20 @@ class _SolverGeometryMixin:
         self._metric_flux_scale_cache = metric_flux_scale
         return metric_flux_scale
 
-    def _compute_local_time_step(self, return_physical_too: bool = False):
+    def _compute_local_time_step(self, return_physical_too: bool = False, nu_av=FROM_CURRENT_STATE):
         """计算局部时间步长（基于CFL条件）。实现见
         cfl.py::compute_local_time_step（从本文件拆出，控制
         单文件行数），文档字符串也在那里。
 
         `return_physical_too=True` 时额外返回"用物理波速算出的"那一份
-        （低马赫数预处理启用时两者不同，湍流标量用后者，见 cfl.py 文档）。"""
+        （低马赫数预处理启用时两者不同，湍流标量用后者，见 cfl.py 文档）。`nu_av` 为本步冻结的人工扩散系数
+        （单步编排传入），不给时在当前状态上求值。"""
         from autoflowcfd.core.time_integration.time_accurate import uniform_time_step
 
         from .cfl import compute_local_time_step
 
-        return uniform_time_step(self, compute_local_time_step(self, return_physical_too=return_physical_too),
-                                 return_physical_too)
+        steps = compute_local_time_step(self, return_physical_too=return_physical_too, nu_av=nu_av)
+        return uniform_time_step(self, steps, return_physical_too)
 
     def _get_cell_volumes(self) -> np.ndarray:
         """
