@@ -12,6 +12,7 @@ from autoflowcfd.core.utils.array_module import to_host
 
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+from autoflowcfd.core.time_integration.implicit.newton.coupled_backend import SingleNodeCoupledBackend
 
 
 class GpuTurbulenceBackend:
@@ -74,7 +75,7 @@ class GpuTurbulenceBackend:
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
-class GpuCoupledBackend:
+class GpuCoupledBackend(SingleNodeCoupledBackend):
     """单机 GPU 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py` 模块文档
     "后端适配器"）。平均流残差以试探状态为参数；湍流求值读 `Q_gpu`，所以试探状态同样写进
     `U_gpu` 并更新原始变量。`nu_av`：本步冻结的人工扩散系数（未启用时 None）。"""
@@ -140,32 +141,6 @@ class GpuCoupledBackend:
             res = apply_low_mach_preconditioner(res, conserved_to_primitive_gpu(U[..., :5]),
                                                 s.freestream["mach_ref"], out=res)
         return res.reshape(self._n_rows, -1)[:, :5]
-
-    def mean_assembler(self, mu_t):
-        """平均流解析单元块（主机上装配，与 CPU 同一份实现，块由缓存上传）。"""
-        from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
-
-        s = self.solver
-        if unsupported_reason(order=self.order):
-            return None
-        return MeanFlowBlockAssembler(
-            mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
-            mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t,
-            nu_av=self._nu_av, n_sps=self.n_sps, wall_model=s.wall_model)
-
-    def cell_colors(self):
-        return self.turb.cell_colors()
-
-    def coarse_context(self):
-        return None
-
-    def install(self, x) -> None:
-        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘。"""
-        self.set_trial(x)
-        turb = self.turb
-        turb.positivity()
-        turb.prepare_inputs()
-        turb.rates(commit=True)
 
 
 def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data,

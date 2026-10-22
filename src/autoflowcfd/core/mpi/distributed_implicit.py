@@ -56,6 +56,7 @@ from autoflowcfd.core.mpi.distributed_turbulence import (
     set_view_fields,
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
+from autoflowcfd.core.time_integration.implicit.newton.coupled_backend import CoupledBackend
 from autoflowcfd.core.time_integration.implicit.blocks.coloring import (
     CouplingGraph, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
 )
@@ -264,7 +265,7 @@ class DistributedTurbulenceBackend:
             row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
 
 
-class DistributedCoupledBackend:
+class DistributedCoupledBackend(CoupledBackend):
     """`DistributedFRSolver`（CPU-MPI）的耦合 Newton 适配器（`time_integration/implicit/
     coupled_step.py` 模块文档"后端适配器"）。未知量是本 rank local 单元（原生排列）的
     `(U[:5], 湍流 Newton 未知量)`；平均流残差与湍流求值各自做 halo 交换（集体调用：Newton/GMRES/
@@ -339,17 +340,5 @@ class DistributedCoupledBackend:
             s, s.local_solver, order=self.order, mu_t_compact=mu_t, exchange=s.halo_exchange.exchange,
             perm=s.dist_flat_face.perm, n_sps=self.n_sps, nu_av_compact=self._nu_av)
 
-    def cell_colors(self):
-        return distributed_block_jacobi_colors(self.solver)
-
     def coarse_context(self):
         return self._coarse
-
-    def install(self, x) -> None:
-        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
-        `turb.mu_t_compact` 供下一步粘性步长）。"""
-        self.set_trial(x)
-        turb = self.turb
-        turb.positivity()
-        turb.prepare_inputs()
-        turb.rates(commit=True)

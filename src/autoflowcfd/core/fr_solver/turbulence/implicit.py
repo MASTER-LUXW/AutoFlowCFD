@@ -63,6 +63,7 @@ from functools import partial
 import numpy as np
 
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+from autoflowcfd.core.time_integration.implicit.newton.coupled_backend import SingleNodeCoupledBackend
 from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
 
 from .init import _update_production_ramp
@@ -144,7 +145,7 @@ class CpuTurbulenceBackend:
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
-class CpuCoupledBackend:
+class CpuCoupledBackend(SingleNodeCoupledBackend):
     """单机 CPU 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py` 模块文档
     "后端适配器"）。`nu_av`：本步冻结的人工扩散系数（未启用时 None）。"""
 
@@ -203,29 +204,3 @@ class CpuCoupledBackend:
 
             res = apply_low_mach_preconditioner(res, s.state.Q, s.freestream["mach_ref"], out=res)
         return res.reshape(self._n_rows, 5)
-
-    def mean_assembler(self, mu_t):
-        from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
-
-        s = self.solver
-        if unsupported_reason(order=self.order):
-            return None
-        return MeanFlowBlockAssembler(
-            mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
-            mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t,
-            nu_av=self._nu_av, n_sps=self.n_sps, wall_model=s.wall_model)
-
-    def cell_colors(self):
-        return self.turb.cell_colors()
-
-    def coarse_context(self):
-        return None
-
-    def install(self, x) -> None:
-        """写入 Newton 步的新状态，做湍流正性限幅，并在新的平均流与湍流场上刷新涡粘（供本步之后的
-        一切消费方使用）。"""
-        self.set_trial(x)
-        turb = self.turb
-        turb.positivity()
-        turb.prepare_inputs()
-        turb.rates(commit=True)

@@ -22,6 +22,7 @@ from autoflowcfd.core.mpi.distributed_implicit import (
     distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
+from autoflowcfd.core.time_integration.implicit.newton.coupled_backend import CoupledBackend
 
 
 class MultiGpuTurbulenceBackend:
@@ -130,7 +131,7 @@ class _MultiGpuTurbulenceCompactState:
         return s._permute_to_compact(s.gpu_halo.exchange(u_local))
 
 
-class MultiGpuCoupledBackend:
+class MultiGpuCoupledBackend(CoupledBackend):
     """`MultiGPUDistributedSolver` 的耦合 Newton 适配器（`time_integration/implicit/newton/coupled_step.py`
     模块文档"后端适配器"）。平均流残差与湍流视图都读 `U_gpu`（local、5 个变量），试探状态写进去；
     halo 交换是集体调用，各 rank 求值次数一致（全局归约决定）。`nu_av_compact`：本步冻结的人工
@@ -195,17 +196,5 @@ class MultiGpuCoupledBackend:
             s, s, order=self.order, mu_t_compact=mu_t, exchange=s.gpu_halo.exchange, perm=s._perm_gpu,
             n_sps=self.n_sps, nu_av_compact=self._nu_av)
 
-    def cell_colors(self):
-        return distributed_block_jacobi_colors(self.solver)
-
     def coarse_context(self):
         return self._coarse
-
-    def install(self, x) -> None:
-        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
-        `turb.mu_t_compact`）。"""
-        self.set_trial(x)
-        turb = self.turb
-        turb.positivity()
-        turb.prepare_inputs()
-        turb.rates(commit=True)
