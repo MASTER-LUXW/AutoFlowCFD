@@ -20,7 +20,6 @@ from .quality_report import MeshQualityReport
 
 if TYPE_CHECKING:
     from ..schema import FaceData
-    from .quality_validator import MeshQualityValidator
 
 
 def check_volumes(
@@ -138,7 +137,6 @@ def compute_cell_skewness(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
 
 
 def compute_face_diagnostics(
-    validator: 'MeshQualityValidator',
     nodes: np.ndarray,
     cells: np.ndarray,
     faces: 'Optional[FaceData]' = None,
@@ -149,8 +147,7 @@ def compute_face_diagnostics(
     背后的原始数组，供需要知道哪些面/单元涉及（而非仅聚合值）的调用者使用。
 
     Args:
-        validator: 所属的 MeshQualityValidator 实例（仅用于
-            其 `_extract_faces` 静态方法，当 `faces` 未预提供时）。
+        faces: 面连接关系；None 时按 `nodes` / `cells` 现场提取（`mesh_overlap_check.extract_faces`）。
         cells: 单一均匀宽度的 (n_cells, k) 连接关系数组，
             用于通过四面体公式推导 per-cell 质心/体积
             （nodes[cells].mean(axis=1)、compute_tetrahedron_
@@ -172,7 +169,9 @@ def compute_face_diagnostics(
         'volume_ratio': 两单元间 max(V)/min(V)
     """
     if faces is None:
-        faces = validator._extract_faces(nodes, cells)
+        from .mesh_overlap_check import extract_faces
+
+        faces = extract_faces(nodes, cells)
 
     conn = faces.connectivity  # (n_faces, 2)：[owner, neighbour]，边界面 neighbour=-1
     internal_mask = conn[:, 1] >= 0

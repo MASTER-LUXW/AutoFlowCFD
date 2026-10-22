@@ -8,9 +8,8 @@ MeshQualityValidator.validate_mixed 是该文件中最长的单个方法（原�
 以 validator 实例为第一个参数的模块级函数，quality_validator.py 里只保留
 一个转调用的薄包装方法，任何行为/数值逻辑均未改动。
 
-同时一并迁移了两个只被 validate_mixed 使用的模块级几何辅助函数
-（_compute_prism_centroids/_compute_tet_centroids），避免它们在原文件里
-变成无人问津的孤儿定义。
+同时一并迁移了只被 validate_mixed 使用的顶点平均质心辅助函数（_vertex_centroids；2026-10-22 I-216 以前
+棱柱与四面体各有一份逐字相同的函数）。
 """
 
 import numpy as np
@@ -26,15 +25,8 @@ if TYPE_CHECKING:
     from .quality_validator import MeshQualityValidator
 
 
-def _compute_tet_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """每个四面体的顶点平均质心，shape=(n_cells, 3)。"""
-    if len(cells) == 0:
-        return np.zeros((0, 3), dtype=np.float64)
-    return nodes[cells].mean(axis=1)
-
-
-def _compute_prism_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """每个三棱柱的顶点平均质心，shape=(n_cells, 3)。"""
+def _vertex_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """每个单元（四面体 / 三棱柱，按连接关系的列数）的顶点平均质心，shape=(n_cells, 3)。"""
     if len(cells) == 0:
         return np.zeros((0, 3), dtype=np.float64)
     return nodes[cells].mean(axis=1)
@@ -124,9 +116,9 @@ def validate_mixed_mesh(
     if faces is None:
         faces = volume_mesh.ensure_faces_exist()
     cell_centroids = np.vstack([
-        _compute_prism_centroids(nodes, prism_conn),
-        _compute_tet_centroids(nodes, tet_conn),
-    ]) if n_prism > 0 else _compute_tet_centroids(nodes, tet_conn.astype(np.int64))
+        _vertex_centroids(nodes, prism_conn),
+        _vertex_centroids(nodes, tet_conn),
+    ]) if n_prism > 0 else _vertex_centroids(nodes, tet_conn.astype(np.int64))
     cell_volumes = all_volumes  # 已按棱柱+四面体拼接，与全局编号顺序一致
 
     validator._check_orthogonality_and_adjacency(

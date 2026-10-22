@@ -125,14 +125,16 @@ class MeshQualityValidator:
             # 最多提取一次并共享给下面两个检查——
             # _check_orthogonality_and_adjacency 和
             # _check_overlap_and_proximity 否则会各自独立调用
-            # self._extract_faces（当调用者未预提供 `faces` 时），
+            # extract_faces（当调用者未预提供 `faces` 时），
             # 无意义地为整个网格连续做两次完整面提取
             # （已确认：在真实 150 万单元的网格上，一次 validate()
             # 调用中连续出现两次 "Extracting faces from N
             # tetrahedral cells..." 日志，因为两个子检查各自
             # 内部提取的 FaceData 没有缓存回此处供另一个复用）。
             if faces is None:
-                faces = self._extract_faces(nodes, cells)
+                from .mesh_overlap_check import extract_faces
+
+                faces = extract_faces(nodes, cells)
             self._check_orthogonality_and_adjacency(report, nodes, cells, faces)
             if check_overlap:
                 self._check_overlap_and_proximity(report, nodes, cells, faces)
@@ -225,17 +227,6 @@ class MeshQualityValidator:
             self, volume_mesh, faces=faces, log_summary=log_summary, check_overlap=check_overlap
         )
 
-    @staticmethod
-    def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
-        """当调用者尚未拥有面时推导面连接关系。
-        延迟导入（mesh_gen -> validation 在本包中是单向依赖；
-        此处仅在调用时反向导入，避免考虑导入顺序）。"""
-        from ..mesh_gen.extraction.face_extractor import FaceExtractor
-        from ..schema.grid_nodes import NodeArray
-
-        node_arr = NodeArray.from_array(nodes)
-        return FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
-
     def _check_volumes(
         self,
         report: MeshQualityReport,
@@ -313,7 +304,7 @@ class MeshQualityValidator:
         from .quality_validator_metrics import compute_face_diagnostics as _compute_face_diagnostics
 
         return _compute_face_diagnostics(
-            self, nodes, cells, faces=faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
+            nodes, cells, faces=faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
         )
 
     def _check_orthogonality_and_adjacency(

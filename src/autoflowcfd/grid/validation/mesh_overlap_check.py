@@ -36,9 +36,9 @@ if TYPE_CHECKING:
     from ..schema.grid_faces import FaceData
 
 
-def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
-    # 延迟导入：本包其余地方 mesh_gen -> validation 是单向依赖（见 quality_validator.py 里相同的
-    # _extract_faces），反方向只在调用时导入，不必考虑导入顺序。
+def extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
+    """调用方尚未拥有面时推导面连接关系（网格质量门的各项面检查共用这一份）。"""
+    # 延迟导入：本包其余地方 mesh_gen -> validation 是单向依赖，反方向只在调用时导入，不必考虑导入顺序。
     from ..mesh_gen.extraction.face_extractor import FaceExtractor
     from ..schema.grid_nodes import NodeArray
 
@@ -112,7 +112,7 @@ def check_face_overlap_and_proximity(
     start = time.perf_counter()
 
     if faces is None:
-        faces = _extract_faces(nodes, cells)
+        faces = extract_faces(nodes, cells)
 
     if faces.node_connectivity is None:
         raise ValueError(
