@@ -139,9 +139,11 @@ def _repair_mixed_mesh_post_stage_c(
                 f"attempting local cavity patch"
             )
             tet_keep_allones = np.ones(len(merged_cells), dtype=bool)
-            # 保持默认 n_buffer_rings=1：在 cube_demo 上调大到 2 / 4 都触发 ValueError（"Face connectivity
-            # references N cells, expected N+2"，两者数字相同），收尾去重与 _cavity_boundary_faces 的退化面过滤
-            # 修好后依然逐位复现，机制尚未查明——查明之前调大缓冲圈数在这里是已验证不安全的。
+            # 保持默认 n_buffer_rings=1。cube_demo 实测（2026-10-23 I-227，`grid generate-volume` 默认参数）：1 / 2 / 4
+            # 圈都能完成且把长细比 > 500 的棱柱全部修掉，但缓冲越大、拉进重铺的良好单元越多，局部 tetgen 生成的单元
+            # 反而更差——最终网格相邻体积比最大值 18.3 / 66.3 / 104.9、最大偏斜度 0.921 / 0.940 / 0.977。此前这里记录
+            # 的"调大到 2 / 4 触发 ValueError（Face connectivity references N cells, expected N+2）、机制未查明"已不复现：
+            # 那是局部 tetgen 的 Steiner 点与已有点数值重合造成的退化四面体，由函数末尾的收尾去重消除（见那里的说明）。
             merged_nodes, prism_cells, merged_cells, _ = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
                 ar_keep, tet_keep_allones,
