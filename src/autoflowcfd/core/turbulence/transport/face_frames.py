@@ -122,6 +122,14 @@ def face_mass_flux_kernel(
     物理点上 `m_neighbor = -m_owner`——公共通量单值（守恒）、上风选择两侧一致。
     混合拆分面的边界半区没有 owner 覆盖，取 neighbor 自身的迹（与 owner 坐标系在
     真边界面上用自身迹同一原则）。
+
+    这个取法随面的 owner / neighbor 取向而变，跳量 `[rho u]` 为 O(h^(p+1))，与离散误差同阶。2026-10-22（I-67）
+    把它与两侧迹的平均 `{rho u} . n`（同样单值、但与取向无关）做了 A/B：
+    - 湍流平板 P0 -> P1 -> P2（NK）：SA 两种取法都 105 步完成三个阶段，摩阻逐位相同；SST 两种取法停在同一平台。
+    - 槽道 SST P3（NK，`test_implicit_sst_nk.py`）：步数 54 / 55 相当；两侧平均的 k 负欠冲从峰值的 2.9% 增加到
+      5.2%，且位置从出口与壁面交界处移进壁面层内部。
+
+    两侧平均没有稳定的优势，保留 owner 侧的迹。
     """
     n_faces = owner_cell.shape[0]
     n_fp = boundary_extrap_native.shape[1]
