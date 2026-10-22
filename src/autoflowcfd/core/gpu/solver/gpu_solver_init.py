@@ -1,6 +1,6 @@
 """GPUFRSolver 初始化方法混入类。
 
-从 gpu_solver.py 拆出，控制单文件行数。包含面几何和壁面距离
+从 gpu_solver/ 拆出，控制单文件行数。包含面几何和壁面距离
 的 GPU 初始化方法。
 """
 
@@ -24,8 +24,8 @@ class _GPUSolverInitMixin:
         `gpu_distributed_init/geometry.py::_init_distributed_face_geometry` 在上
         一轮评审中被认定为"必须移除的假通过错误处理"的同一类问题（该
         文件文档明确记录了这个反面教材），第四次评审发现单 GPU 版本没
-        有同步修复（发现9）：`flat_face_gpu=None` 时，`gpu_inviscid.py`/
-        `gpu_viscous.py` 会在**每次**残差求值时重新构建+重新上传整套
+        有同步修复（发现9）：`flat_face_gpu=None` 时，`gpu_inviscid/`/
+        `gpu_viscous/` 会在**每次**残差求值时重新构建+重新上传整套
         GPU 面几何（约15个数组的 cp.asarray 上传），既隐藏了初始化失败
         的真实原因，又严重拖慢求解、违背"GPU 数据常驻，只在 I/O 时传输"
         的既定设计原则。修复：去掉吞掉一切异常的 try/except——面几何

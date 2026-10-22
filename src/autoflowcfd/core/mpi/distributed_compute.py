@@ -34,7 +34,7 @@ class DistributedMeshAdapter:
     `self.jacobians = local_mesh.jacobians` 直接原样转发——但
     `dist_fc`（`DistributedFlatFaceGeometry`）的 `owner_cell`/
     `neighbor_cell` 用的是 local+halo 压缩索引空间（且现在是"棱柱在前、
-    四面体在后"排列，见 distributed_flat_face.py 模块文档），既不是
+    四面体在后"排列，见 distributed_flat_face/ 模块文档），既不是
     `n_local_cells`（缺 halo 部分，界面项读 halo 邻居数据会越界/读错），
     也不是 `local_mesh.jacobians` 的原始单元编号（`local_mesh` 若是完整
     全局网格，其 jacobians 按*全局*单元编号索引，与压缩索引空间是两套
@@ -83,14 +83,14 @@ class DistributedMeshAdapter:
         # 多项式阶数：适配器的职责就是"在残差路径上看起来像 mesh"，
         # 所以凡是残差链路会读的 mesh 属性都要转发。2026-09-23 补上
         # 这一个 —— 粘性 IP 罚项常数按阶数解析
-        # （`flux_kernels.resolve_viscous_ip_constant`），`viscous_flux.py`
+        # （`flux_kernels.resolve_viscous_ip_constant`），`viscous_flux/`
         # 因此开始读 `mesh.order`，分布式路径当场 AttributeError。
         self.order = int(local_mesh.order)
         self.n_prism_cells = dist_fc.base_flat.n_prism
 
         n_sps = self.n_sps_per_cell
 
-        # "完全分布式加载"模式（2026-09-02，见 distributed_mesh_loader.py::
+        # "完全分布式加载"模式（2026-09-02，见 distributed_mesh_loader/::
         # PrecompactedMeshData 文档）：`local_mesh` 已经是 root rank 预先
         # 按 compact_global_ids 切好的紧凑数据，形状已经是
         # (n_compact, n_sps, ...)，不能也不需要再按 compact_global_ids
@@ -227,7 +227,7 @@ def distributed_compute_inviscid_residual(
     from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
 
     # 1. Halo 交换：获取 local + halo 的扩展状态（halo 交换协议原生排列，
-    # local 在前、halo 在后——见 partition.py/halo.py，本函数不改动这个
+    # local 在前、halo 在后——见 partition//halo.py，本函数不改动这个
     # 协议本身）
     U_extended = halo_exchange.exchange(U_local)
 
@@ -236,7 +236,7 @@ def distributed_compute_inviscid_residual(
     adapter = distributed_mesh_adapter(partition, dist_fc, local_mesh, ops)
 
     # 3. 把 halo 交换协议原生排列的 U_extended 重排到 adapter 实际使用的
-    # "棱柱在前"压缩索引空间（与 GPU 侧 gpu_distributed.py::
+    # "棱柱在前"压缩索引空间（与 GPU 侧 gpu_distributed/::
     # compute_inviscid_residual_gpu 的 perm/inv_perm 重排同一个道理，见
     # distributed_flat_face/types.py::DistributedFlatFaceGeometry.perm 文档）。
     U_compact = U_extended[dist_fc.perm]
@@ -274,7 +274,7 @@ def distributed_compute_viscous_residual(
     此前这里错误地按 `compute_viscous_residual_fr(U, grad_U, adapter, ops,
     config)` 的参数顺序调用，但该函数真实签名是
     `compute_viscous_residual_fr(U, mesh, ops, mu, Pr, mu_t_field=None,
-    Pr_t=0.9, boundary_ghost_provider=None)`（见 fr_residual/viscous_flux.py）
+    Pr_t=0.9, boundary_ghost_provider=None)`（见 fr_residual/viscous_flux/）
     ——等价于把 `grad_U`（一个数组）当 `mesh` 传、把 `adapter` 当 `ops`
     传、把 `ops` 当 `mu`（标量）传、把 `config` 当 `Pr`（标量）传，只要
     `config.physics.enable_viscous=True`（真实粘性算例的默认配置）就会

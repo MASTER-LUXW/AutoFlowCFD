@@ -4,9 +4,9 @@
 
 在此之前，自由来流方向在**全代码库被硬编码成 +x**：
 
-    core/fr_solver/boundary.py:87   Q_free = [rho_inf, vel_inf, 0.0, 0.0, p_inf]
-    core/fr_solver/solver.py:464    initialize_uniform(u=vel_inf, v=0.0, w=0.0, ...)
-    core/fr_solver/boundary.py      SEM 入口 flow_direction = [vel_inf, 0, 0]
+    core/fr_solver/boundary/:87   Q_free = [rho_inf, vel_inf, 0.0, 0.0, p_inf]
+    core/fr_solver/solver/:464    initialize_uniform(u=vel_inf, v=0.0, w=0.0, ...)
+    core/fr_solver/boundary/      SEM 入口 flow_direction = [vel_inf, 0, 0]
     postprocess/fr_coefficients.py  Cd = F[0], Cl = F[2], Cs = F[1]（直接取分量）
     cli/solve/aero_coefficients.py  参考面积按 n_x < 0 做迎风投影
 
@@ -129,11 +129,11 @@ def freestream_conservative_state(freestream: dict, n_vars: int = 5) -> np.ndarr
     "用自由来流填一个均匀守恒场"此前在 9 处各写一遍，**全部把速度写死
     成 `(vel_inf, 0, 0)`**：
 
-        core/utils/order_continuation.py                  单机 CPU 降到 P0 重建
+        core/utils/order_continuation/                  单机 CPU 降到 P0 重建
         core/mpi/distributed_order_continuation/rebuild.py      CPU MPI 阶数切换
         core/gpu/solver/gpu_solver/core.py                单机 GPU **初场**
         core/gpu/solver/gpu_solver_order_continuation.py   单机 GPU 阶数切换
-        core/gpu/distributed/gpu_distributed.py            多 GPU 传统模式**初场**
+        core/gpu/distributed/gpu_distributed/            多 GPU 传统模式**初场**
         core/gpu/distributed/gpu_distributed_order_continuation.py   多 GPU 阶数切换
         core/gpu/distributed/gpu_distributed_fully_distributed/build.py      多 GPU 完全分布式**初场**
         core/gpu/distributed/gpu_distributed_fully_distributed/redistribute.py  同上，阶数切换

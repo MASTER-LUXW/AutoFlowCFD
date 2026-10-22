@@ -136,7 +136,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 决定 omega 初值。外部气动推荐 2-10。
             sem_num_eddies: LES/DDES/IDDES 模式下 BD-02 合成湍流入口 (SEM) 的
                 涡核数量（默认 200，此前恒为硬编码常量，见
-                fr_solver/boundary.py 模块文档 2026-08-28 的修复说明）。
+                fr_solver/boundary/ 模块文档 2026-08-28 的修复说明）。
                 只在 turb_model_name 为 LES/DDES/IDDES 且未激活 WMLES 时生效。
             wall_treatment: RANS 湍流模型的近壁处理方式（resolved | auto，见
                 `core/turbulence/wall_model/treatment.py`）

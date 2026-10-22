@@ -88,7 +88,7 @@ def write_checkpoint(
     checkpoint 保存时 solver.current_order（用于让 resume 时重建的
     mesh/FRSolver 初始状态形状与保存的 U_sps 对得上，见上面 order 参数
     文档），但 FRSolver 的 order 构造参数同时也决定了 self.order——
-    Order Continuation 是否继续爬升的目标阶数判据（solver.py 里
+    Order Continuation 是否继续爬升的目标阶数判据（solver/ 里
     `self.order >= 2` 的门槛）。Order Continuation 跑到一半（例如 P0
     阶段中途）存的 checkpoint，current_order（0）和真正的目标阶数
     （CLI --order，例如 2）从这一刻起就不再相等——只存一个字段、

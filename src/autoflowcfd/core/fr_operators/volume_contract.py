@@ -128,7 +128,7 @@ def contravariant_flux_from_metric(det_jacs: np.ndarray, inv_jacs: np.ndarray,
     最大误差 0.0；生产路径的平均流无粘/粘性通量都是 V=5）。V==1 时
     `np.matmul` 退化成矩阵-向量（gemv）路径、累加方式与 gemm 不同，只能到
     机器精度（实测 9.3e-17 相对误差，1 ULP）——生产路径里 V=1 只出现在
-    标量对流的共享逆变质量通量（`core/turbulence/transport.py::
+    标量对流的共享逆变质量通量（`core/turbulence/transport/::
     precompute_scalar_convection_geometry`）。等价性回归测试见
     tests/unit/test_perf_fusion_kernels.py。
     """
@@ -304,8 +304,8 @@ def get_overintegration_context(mesh, ops):
     退回 coarse 路径）。
 
     三个消费方共用同一份：`fr_residual/inviscid.py`（无粘体积项，本项目
-    唯一一直开着的）、`core/turbulence/transport.py`（k/omega 对流与
-    扩散体积项）、`fr_residual/viscous_flux.py`（粘性体积项）。
+    唯一一直开着的）、`core/turbulence/transport/`（k/omega 对流与
+    扩散体积项）、`fr_residual/viscous_flux/`（粘性体积项）。
 
     缺失的唯一正常情形是 `order == 0`：P0 是分片常数场、多项式导数恒为
     零，没有可去混叠的内容，`jacobians_fine` 与 overint 算子都不构造。
@@ -328,7 +328,7 @@ def get_overintegration_context(mesh, ops):
     （P1: 10 vs 27，P2: 20 vs 64），填充槽位恒为零、对结果零贡献，却让
     整条过积分链在空点上白算——其中 `D_fine` 的收缩是 O(n_fine^2)，P2 上
     是 10.2 倍的无效 FLOPs。实测去掉细轴填充后 P1 加速 3.04x、P2 加速
-    4.63x，最大相对差 1.4e-16 / 0.0（见 `fr/operators.py` 那段说明）。
+    4.63x，最大相对差 1.4e-16 / 0.0（见 `fr/operators/` 那段说明）。
 
     **共享键被刻意移除**（不做向后兼容别名）：漏改的消费点会直接
     `KeyError`，而不是静默用棱柱的 `n_fine` 去切四面体段的度量——后者

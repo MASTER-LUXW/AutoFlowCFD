@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `FRSolver.__init__` 的装配阶段（mixin，只含方法）。
 
-从 `core/fr_solver/solver.py` 拆出（2026-09-25）：原 `__init__` 543 行，按
+从 `core/fr_solver/solver/` 拆出（2026-09-25）：原 `__init__` 543 行，按
 "选项 -> 初场 -> 算子 -> 物理与边界 -> 湍流与时间积分 -> 运行期状态"的
 依赖顺序切成具名阶段，**顺序本身是契约**（各阶段注释里记录的几处真实
 缺陷都出在顺序上，例如 WMLES 模型必须先于边界幽灵态构造）。
@@ -115,7 +115,7 @@ class _SolverSetupMixin:
         # turb_model_name 的顺序要求同理，2026-08-28 补充）：
         # build_boundary_ghost_provider 现在会读 solver._turbulence_intensity/
         # _sem_num_eddies 来驱动 BD-02 SEM 入口的目标雷诺应力/涡核数量
-        # （见 fr_solver/boundary.py 模块文档），若这几个属性此时还没设置，
+        # （见 fr_solver/boundary/ 模块文档），若这几个属性此时还没设置，
         # getattr 的兜底默认值会悄悄生效、用户传入的 --turbulence-intensity/
         # --sem-num-eddies 就会被忽略——必须在 _build_boundary_ghost_provider
         # 调用之前赋值。
@@ -125,7 +125,7 @@ class _SolverSetupMixin:
         # 分子粘度同理：SEM 入口的涡核尺度由来流 k、omega 定（omega 用到运动粘度）
         self.mu_molecular = mu_molecular
         # B-9：保存 bc_overrides 供 Order Continuation 切阶后重建边界幽灵态
-        # provider（SEM 入口幽灵态持有构造阶数的 FP 坐标，见 order_continuation.py）。
+        # provider（SEM 入口幽灵态持有构造阶数的 FP 坐标，见 order_continuation/）。
         self.bc_overrides = bc_overrides or {}
         self.boundary_ghost_provider = self._build_boundary_ghost_provider(self.bc_overrides)
 

@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - AdaptiveCFLController 主类：构造、重置与状态查询
 
-从 `src/autoflowcfd/core/time_integration/adaptive_cfl.py` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
+从 `src/autoflowcfd/core/time_integration/adaptive_cfl/` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
 这里只留构造与对外接口。
 """
 

@@ -5,7 +5,7 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器（主类与装配顺序）
 
 设计：
 - 继承 DistributedFRSolver 的 MPI 基础设施（分区、halo 交换、全局归约）
-- 残差计算使用 GPU 版本（gpu_inviscid.py / gpu_viscous.py）
+- 残差计算使用 GPU 版本（gpu_inviscid/ / gpu_viscous/）
 - 数据常驻各 rank 的 GPU 显存
 - GPU 直接 Halo 交换（gpu_halo_exchange.py）：
   - CUDA-aware MPI：零拷贝 GPU↔GPU

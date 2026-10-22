@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 多 GPU 分布式的几何/壁距/滤波初始化（其余职责见同目录 mixin）
 
-从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_init.py` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
+从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_init/` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
 这里只留构造与对外接口。
 """
 
@@ -45,7 +45,7 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         mesh；该函数内部本就会自己调用 get_flat_face_geometry(mesh,
         ops)，不需要调用方先算一遍）——必然 TypeError，且被外层宽
         `except Exception` 吞掉，`self.flat_face_gpu` 静默设为 None。
-        下游 gpu_inviscid.py 在 flat_face_gpu 为 None 时会用**未分区的
+        下游 gpu_inviscid/ 在 flat_face_gpu 为 None 时会用**未分区的
         全局网格**重新构建一份非分布式面几何，等于让多 GPU 求解器
         悄悄退化成"每个 rank 各算各的全局残差、不做 halo 耦合"——
         不是崩溃，是产出物理上错误的结果，比崩溃更隐蔽（V2.0 专家组

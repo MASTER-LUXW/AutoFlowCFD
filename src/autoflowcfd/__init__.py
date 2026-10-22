@@ -40,8 +40,9 @@ AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
 #   LAPACK 求逆得到）与 FR 算子（Vandermonde 求解）的结果会随 BLAS/
 #   LAPACK 线程数不同而在最后一位上变化，而离散 GCL / 自由流场保持性
 #   依赖这些度量量之间**近乎精确的抵消**。真实复现（2026-09-13）：把
-#   这里直接改成 1 之后，`tests/unit/test_native_tet_inviscid_residual_
-#   wiring.py::test_native_mesh_free_stream_preservation` 的棱柱 P2 判据
+#   这里直接改成 1 之后，
+#   `tests/unit/test_native_tet_inviscid_residual_wiring.py::test_native_mesh_free_stream_preservation`
+#   的棱柱 P2 判据
 #   从 8.07e-7 变成 3.35e-6（容差 1e-6，测试真实失败）；逐项回退证明与
 #   同批新增的 numba 融合核无关（全部回退后仍是 3.35e-6），单独把 BLAS
 #   线程数改回 16 就恢复到 8.0e-7。改为"构造阶段保持多线程、构造完成后

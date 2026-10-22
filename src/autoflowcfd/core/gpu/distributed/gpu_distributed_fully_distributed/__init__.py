@@ -2,7 +2,7 @@
 AutoFlowCFD V2.0 - MultiGPUDistributedSolver "完全分布式加载"构造入口（只有 root 持有完整全局网格）。
 
 镜像 CPU `DistributedFRSolver.from_fully_distributed_package`（见
-`core/mpi/distributed_mesh_loader.py`/`core/mpi/distributed_solver.py`
+`core/mpi/distributed_mesh_loader/`/`core/mpi/distributed_solver/`
 模块文档）同一套设计：root rank 预先用完整全局网格算好每个 rank 的
 紧凑（local+halo 压缩索引空间）数据包（`build_fully_distributed_rank_
 package`/`distributed_mesh_load_v2`，两者本身与后端无关，CPU/GPU 共用
@@ -20,7 +20,7 @@ package`/`distributed_mesh_load_v2`，两者本身与后端无关，CPU/GPU 共�
 
 Order Continuation 支持：`redistribute_multi_gpu_fully_distributed_for_
 new_order`（本模块）与 CPU 版 `redistribute_fully_distributed_for_new_
-order`（`distributed_mesh_loader.py`）同一套协议——root 用持续持有的
+order`（`distributed_mesh_loader/`）同一套协议——root 用持续持有的
 `solver._root_context`（`distributed_mesh_load_v2` 返回的第二个值）
 重新计算 + 重新分发新阶数的紧凑包，本 rank 用它替换全部 compact 相关
 属性（不重新构造 solver 实例本身）。由

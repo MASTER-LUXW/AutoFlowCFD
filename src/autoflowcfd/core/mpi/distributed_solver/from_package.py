@@ -127,7 +127,7 @@ class _DistributedFromPackageMixin:
         # 没有数据也没有必要）：`step()` 只读它的 `.config.physics.
         # enable_viscous`/`.mu_molecular`/`.boundary_ghost_provider`/
         # `.freestream["mach_ref"]` 这 4 个属性（已逐行核实
-        # distributed_solver.py 全文只有这 4 处 `self.local_solver.`
+        # distributed_solver/ 全文只有这 4 处 `self.local_solver.`
         # 访问），不需要真正的 FRSolver 实例。
         self._local_solver = types.SimpleNamespace(
             config=types.SimpleNamespace(
@@ -158,14 +158,14 @@ class _DistributedFromPackageMixin:
 
             # 真实 bug 修复（2026-09-02，实现分布式湍流模型时排查发现，
             # 与湍流本身无关——任何使用真实 WALL/INLET/OUTLET/FARFIELD/
-            # SYMMETRY 区分的分布式算例都会中招，与 gpu_distributed.py
+            # SYMMETRY 区分的分布式算例都会中招，与 gpu_distributed/
             # 同一处修复同一个根因）：`FRSolver(self.mesh, ...)` 用
             # `self.mesh`（完整全局网格，"传统模式"下如此）构造的
             # `boundary_ghost_provider.group_code` 是**全局**面编号索引，
             # 但 `distributed_compute_inviscid_residual`/`_viscous_residual`
             # 最终调用 `ghost_provider(f, ...)` 时 `f` 是本 rank 的
             # local+halo**压缩索引空间**面编号——两套编号不是同一个索引
-            # 空间的子区间（见 `distributed_flat_face.py::partition.
+            # 空间的子区间（见 `distributed_flat_face/::partition.
             # local_faces` 文档）。真实合成网格验证：2-rank 分区，8/12
             # （67%）压缩面会被分配到错误的边界组编码。修复：把
             # `group_code` 重映射到压缩索引空间。

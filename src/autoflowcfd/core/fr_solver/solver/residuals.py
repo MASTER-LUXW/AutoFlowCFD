@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `FRSolver` 的残差、湍流与边界委托方法（mixin，只含方法）。
 
-从 `core/fr_solver/solver.py` 拆出（2026-09-25）。
+从 `core/fr_solver/solver/` 拆出（2026-09-25）。
 """
 
 from typing import Any, Dict, Optional

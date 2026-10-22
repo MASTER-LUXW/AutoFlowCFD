@@ -176,7 +176,7 @@ def compute_inviscid_residual_fr(
             （见 kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
             保留旧硬编码值以免所有非求解器主循环调用点（CLI 工具/MPI
             冒烟测试/测试文件）都被迫改动；求解器真正的残差求值路径
-            （fr_solver/solver.py、mpi/distributed_compute.py）必须显式
+            （fr_solver/solver/、mpi/distributed_compute.py）必须显式
             传入 `solver.freestream["mach_ref"]`（真实自由来流马赫数），
             不能依赖这个默认值——CFL 步长估计（cfl.py）用的就是这同一个
             真实值，两者不同步正是 2026-08-14 那次失稳的根因，见 cfl.py

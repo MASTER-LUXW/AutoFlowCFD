@@ -2,7 +2,7 @@
 AutoFlowCFD V2.0 - 多 GPU 分布式 Order Continuation（2026-09-02）
 
 `MultiGPUDistributedSolver`（"传统模式"：每个 rank 持有完整全局 `mesh`）的阶数切换重建——与 CPU `DistributedFRSolver`
-（`core/mpi/distributed_order_continuation.py`）同一套设计，唯一区别
+（`core/mpi/distributed_order_continuation/`）同一套设计，唯一区别
 是需要在 CPU（numpy）上做插值/重置运算后再上传 GPU（CuPy 数组不支持
 `np.einsum`，且插值矩阵构造本身是一次性的小矩阵运算，没有必要为它
 单独写一个 CuPy 版本）。
@@ -181,7 +181,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         solver._init_wall_distance_distributed()
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效——与 CPU 版
-    # distributed_order_continuation.py 同一处处理，理由同该文档。
+    # distributed_order_continuation/ 同一处处理，理由同该文档。
     reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state

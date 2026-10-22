@@ -7,7 +7,7 @@ AutoFlowCFD V2.0 - GPU 版粘性残差计算
 - BR1 界面耦合（界面原始变量取平均，梯度取平均+镜像，边界面 Interior
   Penalty 罚项）——2026-08-23 之前这里完全没有实现，本模块自己的文档
   却一直写着"包含"，`compute_viscous_residual_fr_gpu` 实际上只算了
-  体积散度项；`GPUFRSolver`（gpu_solver.py）不是死代码，`solve steady
+  体积散度项；`GPUFRSolver`（gpu_solver/）不是死代码，`solve steady
   --backend gpu` 真实会走到这里，任何跟壁面/边界层相关的 GPU 粘性流动
   通量都缺一整项。修复对照 CPU 端 viscous_flux_kernel.py 的
   `compute_viscous_interface_correction_kernel` 逐字移植数学公式，

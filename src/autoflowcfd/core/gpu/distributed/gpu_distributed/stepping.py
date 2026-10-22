@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `MultiGPUDistributedSolver` 的单步推进（mixin，只含方法）。
 
-从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。求解循环与其余后端共用
+从 `core/gpu/distributed/gpu_distributed/` 拆出（2026-09-25）。求解循环与其余后端共用
 `fr_solver/solver/solve_loop.py::SolveLoopMixin`（2026-10-05 起）。
 """
 
@@ -49,7 +49,7 @@ class _MultiGPUSteppingMixin:
         package` 共用同一套 `build_fully_distributed_rank_package`/
         `distributed_mesh_load_v2`（package 构造逻辑与后端无关）。
 
-        实现拆到独立模块 `gpu_distributed_fully_distributed.py`（控制
+        实现拆到独立模块 `gpu_distributed_fully_distributed/`（控制
         单文件行数，与 `_interpolate_to_new_order`/
         `gpu_distributed_order_continuation.py` 同一个拆分动机），见该
         模块文档。全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、
@@ -64,7 +64,7 @@ class _MultiGPUSteppingMixin:
             rank: 当前 rank（None 时从 MPI 获取）
             root_context: 仅 root rank 需要非 None——`distributed_mesh_
                 load_v2` 返回的第二个值，供 Order Continuation 使用，
-                见 `gpu_distributed_fully_distributed.py` 模块文档。
+                见 `gpu_distributed_fully_distributed/` 模块文档。
 
         Returns:
             MultiGPUDistributedSolver 实例

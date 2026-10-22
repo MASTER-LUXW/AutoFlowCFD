@@ -50,7 +50,7 @@ def distributed_mesh_load_v2(
     完整全局网格。
 
     Order Continuation 支持（2026-09-02 续接，见 core/mpi/
-    distributed_order_continuation.py 模块文档"完全分布式加载"一节）：
+    distributed_order_continuation/ 模块文档"完全分布式加载"一节）：
     返回值从单一的 `my_package` 改为 `(my_package, root_context)` 二元
     组——`root_context` 只有 root rank 非 None（其余 rank 恒为
     None，它们从未持有、也不需要持有完整全局网格），持有本函数内部
@@ -196,7 +196,7 @@ def _distribute_packages(root_context, order: int, n_ranks: int, tags) -> dict:
 
 def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     """"完全分布式加载"模式的阶数切换（2026-09-02，见 core/mpi/
-    distributed_order_continuation.py 模块文档"完全分布式加载"一节）。
+    distributed_order_continuation/ 模块文档"完全分布式加载"一节）。
 
     与"传统模式"（`cpu_traditional_interpolate_to_new_order`）的关键
     区别：本 rank 从未持有完整全局网格，`PrecompactedMeshData`/

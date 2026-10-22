@@ -1,9 +1,9 @@
 """
-AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 体积项 (从 gpu_inviscid.py 拆出，
+AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 体积项 (从 gpu_inviscid/ 拆出，
 控制单文件行数)。
 
 体积项与界面项在物理上是两个独立阶段（体积项是纯 CuPy 向量化的张量收缩，
-不涉及面几何/AUSM+up），拆分之后 gpu_inviscid.py 只保留界面校正相关逻辑。
+不涉及面几何/AUSM+up），拆分之后 gpu_inviscid/ 只保留界面校正相关逻辑。
 """
 
 import numpy as np

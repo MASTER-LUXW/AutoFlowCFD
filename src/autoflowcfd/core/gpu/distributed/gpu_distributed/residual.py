@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `MultiGPUDistributedSolver` 的 halo 交换与残差组装（mixin，只含方法）。
 
-从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。
+从 `core/gpu/distributed/gpu_distributed/` 拆出（2026-09-25）。
 """
 
 from typing import Any
@@ -52,7 +52,7 @@ class _MultiGPUResidualMixin:
         halo 交换产出的 `U_extended_gpu` 是"local在前、halo在后"的原生
         排列，但 `self.mesh_data`/`self.flat_face_gpu` 是按"棱柱在前、
         四面体在后"的压缩索引空间构造的（体积项切片需要，见
-        distributed_flat_face.py 模块文档）——两者不一致，必须先用
+        distributed_flat_face/ 模块文档）——两者不一致，必须先用
         `self._perm_gpu` 把 `U_extended_gpu` 重排到压缩索引空间，残差
         算完后再用 `self._inv_perm_gpu` 换回原生排列，才能在最后
         `[:n_local]` 切片时取到与 `self.U_gpu`（原生排列）对齐的本 rank

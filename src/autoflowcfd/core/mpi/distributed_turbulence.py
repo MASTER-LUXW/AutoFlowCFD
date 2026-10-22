@@ -2,7 +2,7 @@
 
 真正接入分布式状态与残差计算（2026-09-02）——此前 `DistributedFRSolver`/
 `MultiGPUDistributedSolver` 都在构造时对非 'none' 湍流模型 fail-fast
-拒绝（见 distributed_solver.py/gpu_distributed.py 构造器文档），本模块
+拒绝（见 distributed_solver//gpu_distributed.py 构造器文档），本模块
 是真正的实现。
 
 范围更新（2026-09-02 续，"过时信息源"教训——见

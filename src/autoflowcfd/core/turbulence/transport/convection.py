@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 湍流标量的**对流**残差（含去混叠体积项）。
 
-从 `core/turbulence/transport.py` 拆出（2026-09-24）；界面项 2026-09-26 改为两侧各自坐标系（见 `face_frames.py`）。
+从 `core/turbulence/transport/` 拆出（2026-09-24）；界面项 2026-09-26 改为两侧各自坐标系（见 `face_frames.py`）。
 
 残差约定：`-rho U . grad(phi)` 的 FR 离散（体积项 + 界面上风校正），返回
 `rho dphi/dt` 的对流部分，见包 `__init__.py` 的"符号约定"一节。

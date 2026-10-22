@@ -24,7 +24,7 @@
 
 本模块**不重新实现** CFL 公式，而是构造一个"solver 视图"
 （`DistributedCFLView`），把分布式紧凑索引空间（local+halo，"棱柱在前"
-排列，见 `distributed_flat_face.py`）包装成 `cfl.py::
+排列，见 `distributed_flat_face/`）包装成 `cfl.py::
 compute_local_time_step` 期望的那 11 个属性，然后调用**同一个函数**。
 这样做的理由与 `DistributedMeshAdapter` 把分布式数据包装成
 `HighOrderMesh` 接口、让残差函数原样复用是同一个：公式一致性由构造
@@ -38,7 +38,7 @@ compute_local_time_step` 期望的那 11 个属性，然后调用**同一个函�
 - **它所有面的谱半径之和**，而这需要邻居单元的速度与声速——包括位于
   halo 的邻居。halo 交换产出的扩展状态正好提供这些。
 `partition.local_faces` 包含"任一侧为 local"的全部面（见
-`partition.py` 的 `halo_owner_mask` 修复），所以在紧凑空间上算完之后，
+`partition/` 的 `halo_owner_mask` 修复），所以在紧凑空间上算完之后，
 落在 local 单元上的谱半径求和是**完整**的。落在 halo 单元上的那些 dt
 值是不完整的（它们的部分面归别的 rank），但一律被丢弃。
 

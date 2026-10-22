@@ -1,7 +1,7 @@
 """
 AutoFlowCFD V2.0 - GPU 版湍流标量（k/omega）输运残差 (#7 第四次评审第四轮)
 
-与 core/turbulence/transport.py + transport_kernel.py 对应的 CuPy 版本，
+与 core/turbulence/transport/ + transport_kernel.py 对应的 CuPy 版本，
 补齐 GPU SST/DDES/IDDES 长期缺失的输运项（此前 GPUTurbulenceSST 只有
 逐点源项 ODE，`update_fields` 的 `transport_k`/`transport_omega`
 参数从未被调用方传入，见 gpu_turbulence_sst.py 模块文档）。

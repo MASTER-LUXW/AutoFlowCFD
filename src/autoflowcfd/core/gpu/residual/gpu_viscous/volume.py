@@ -155,7 +155,7 @@ def compute_viscous_residual_fr_gpu(
     grad_T = grad_T[..., 0, :]  # (n_cells, n_sps, 3)
 
     # 2. 体积项：粘性物理通量 + 散度
-    # mu_t_field 是调用方按 CPU 版约定（core/fr_residual/viscous_flux.py）
+    # mu_t_field 是调用方按 CPU 版约定（core/fr_residual/viscous_flux/）
     # 传入的动力涡粘度 mu_t = rho * nu_t，与分子粘度 mu 量纲一致。
     # 真实 bug 修复（2026-08-23）：这里此前把 mu_t_field 先并入 mu_eff=
     # mu+mu_t_field 再传给 viscous_physical_flux_gpu(mu=mu_eff, mu_t=0.0)
@@ -164,7 +164,7 @@ def compute_viscous_residual_fr_gpu(
     # mu_t 被错误地传成 0.0 意味着热传导整体（含湍流部分）都用了层流
     # Pr=0.72 而不是湍流 Pr_t=0.9，应力张量本身（只依赖 mu+mu_t 之和）
     # 不受影响，但湍流热通量系统性偏大（Pr/Pr_t≈0.8 倍）。CPU 端
-    # viscous_physical_flux_point（flux_kernels.py）一直是 mu、mu_t 分开
+    # viscous_physical_flux_point（flux_kernels/）一直是 mu、mu_t 分开
     # 传参，这里改成一致：不再构造 mu_eff，直接把 mu（标量分子粘度）和
     # mu_t_field（湍流涡粘度数组，层流为 0）分别传入。
     mu_t_arg = 0.0 if mu_t_field is None else mu_t_field

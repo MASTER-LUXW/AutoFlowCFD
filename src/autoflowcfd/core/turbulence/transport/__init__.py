@@ -23,7 +23,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
     与平均流残差的 RHS 约定一致（step.py: dU/dt = inv_res + visc_res）:
     - 对流残差 = -div(rho*U*phi)/det(J)（含界面上风校正）
     - 扩散残差 = +div(Gamma*grad(phi))/det(J)（含 IIPG 内罚界面项）——
-      与 viscous_flux.py 的"粘性项是 +div(G)"完全同一约定。此前这里误写为
+      与 viscous_flux/ 的"粘性项是 +div(G)"完全同一约定。此前这里误写为
       -div(Gamma*grad(phi))（反扩散），指数放大 2Δx 棋盘模态，把 k/omega 场
       两极分化到正性限制器的上下界（真实复现：cube_demo 全新计算 100 步内
       54% 单元贴下界 1e-12、38% 贴上界，之后冻结、残差停滞），2026-08-25 修复。

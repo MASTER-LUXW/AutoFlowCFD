@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - DistributedFRSolver 主类：传统模式构造
 
-从 `src/autoflowcfd/core/mpi/distributed_solver.py` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
+从 `src/autoflowcfd/core/mpi/distributed_solver/` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
 这里只留构造与对外接口。
 """
 

@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - GPUFRSolver 主类：构造与阶数切换
 
-从 `src/autoflowcfd/core/gpu/solver/gpu_solver.py` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
+从 `src/autoflowcfd/core/gpu/solver/gpu_solver/` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
 这里只留构造与对外接口。
 """
 
@@ -101,7 +101,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 （`core/time_integration/time_accurate.py::configure_time_stepping`；此前单 GPU 不接受
                 `adaptive_cfl`，固定 CFL 请求无从表达）。
             boundary_ghost_provider: 边界幽灵态提供者。None 时按
-                CPU 版 FRSolver 同一套逻辑（fr_solver/boundary.py::
+                CPU 版 FRSolver 同一套逻辑（fr_solver/boundary/::
                 build_boundary_ghost_provider）自行构建——真实 bug
                 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里
                 恒为调用方传入的 None（CLI 从未构建过真实的），
@@ -110,7 +110,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 （镜像内部值）代替，等价于全部边界对残差不可见。
             bc_overrides: 按边界组名称覆盖 BC 类型/参数，透传给
                 build_boundary_ghost_provider（与 CPU 版 FRSolver
-                同名参数语义一致，见 fr_solver/solver.py 文档）
+                同名参数语义一致，见 fr_solver/solver/ 文档）
             artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元
                 人工粘性（熵残差判据 + 守恒变量拉普拉斯），与 CPU 版 FRSolver
                 同名参数、同一实现（`core/fr_operators/artificial_viscosity/
@@ -126,7 +126,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
         NONE/SST/SA/DDES/IDDES/WMLES/LES 均已实现（SST 为 core/gpu/turbulence/gpu_turbulence_sst.py；
         DES 长度尺度、WALE、WMLES 壁面模型是数组模块无关的同一份实现 core/turbulence/des/、sgs.py、
-        wmles/，以 xp=cupy 调用）。k/omega 输运（gpu_scalar_transport.py）与 CPU 侧同样只有 isfinite
+        wmles/，以 xp=cupy 调用）。k/omega 输运（gpu_scalar_transport/）与 CPU 侧同样只有 isfinite
         归零这一道防线，两侧对称。
         GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
         无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
@@ -191,7 +191,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 必须在下面 _build_boundary_ghost_provider 之前构造：
         # build_boundary_ghost_provider 用 getattr(solver,"wall_model",
         # None) 判断 WALL 边界是否要切换成真滑移 ghost 态（is_no_slip=
-        # False），见 fr_solver/boundary.py 文档。
+        # False），见 fr_solver/boundary/ 文档。
         self.wall_treatment = validate_wall_treatment(wall_treatment)
         self.wall_model = build_wall_model(turb_model_upper, self.wall_treatment)
         self.bc_overrides = bc_overrides or {}
@@ -275,7 +275,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
 
         # WALL 边界面拓扑掩码（#7，k/omega 输运 Dirichlet BC 用）：纯几何/
         # 边界分组查询，只依赖 mesh + boundary_ghost_provider，与流场状态
-        # 无关，一次性算好缓存，不是每步重算（见 gpu_scalar_transport.py::
+        # 无关，一次性算好缓存，不是每步重算（见 gpu_scalar_transport/::
         # compute_turbulence_face_masks_gpu 文档；同时缓存 k/omega 来流条件用的开放边界掩码）。只有 SST/DDES/IDDES 才
         # 会真正用到（k/omega 输运的 Dirichlet 面）。
         self._wall_mask_gpu = None

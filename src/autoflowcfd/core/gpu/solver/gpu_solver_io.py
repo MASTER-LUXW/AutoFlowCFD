@@ -1,6 +1,6 @@
 """GPUFRSolver I/O 和湍流源项混入类。
 
-从 gpu_solver.py 拆出，控制单文件行数。包含资源释放和湍流源项计算（主机<->设备的状态读写见
+从 gpu_solver/ 拆出，控制单文件行数。包含资源释放和湍流源项计算（主机<->设备的状态读写见
 `host_view.py`）。
 """
 
@@ -44,7 +44,7 @@ class _GPUSolverIOMixin:
         2. 计算 k/ω 的真实物理梯度（GPU）
         3. 使用预计算的壁面距离
         4. 计算 SST 源项（DDES/IDDES 的破坏项长度尺度在同一次求值里算出）
-        5. k/ω 完整输运（对流+扩散，#7 新增，见 gpu_scalar_transport.py）
+        5. k/ω 完整输运（对流+扩散，#7 新增，见 gpu_scalar_transport/）
         6. 更新 k/ω 场（含正性限制器）
 
         纯 WMLES/LES（无 SST 输运，`turb_model_gpu is None`）：mu_t 只
@@ -93,12 +93,12 @@ class _GPUSolverIOMixin:
         d_wall = self.wall_distance_gpu
         if d_wall is None:
             # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前静默
-            # 回退到硬编码常量 0.01m，与 CPU 版 fr_solver/turbulence.py
+            # 回退到硬编码常量 0.01m，与 CPU 版 fr_solver/turbulence/
             # 的既定原则矛盾（"Industrial-grade calculation requires
             # accurate wall distance, not simplified estimates"）。这个
             # 分支只在 SST 已激活（本方法只被 SST 生产路径调用）却没有
             # 壁面距离场时触发——正常初始化流程下 _init_wall_distance_gpu
-            # 已在构造期设置好 wall_distance_gpu（见 gpu_solver.py 调用
+            # 已在构造期设置好 wall_distance_gpu（见 gpu_solver/ 调用
             # 点），走到这里说明初始化被跳过或状态被破坏，直接失败而
             # 不是悄悄用一个和网格尺度无关的假常量继续算。
             raise RuntimeError(

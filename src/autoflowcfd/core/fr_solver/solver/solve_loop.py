@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 求解循环（mixin，只含方法）。
 
-从 `core/fr_solver/solver.py` 拆出（2026-09-25）。`SolveLoopMixin` 与后端无关，四个后端共用：CPU `FRSolver`、
+从 `core/fr_solver/solver/` 拆出（2026-09-25）。`SolveLoopMixin` 与后端无关，四个后端共用：CPU `FRSolver`、
 单 GPU `GPUFRSolver`（2026-10-04 起）、CPU MPI `DistributedFRSolver` 与多 GPU `MultiGPUDistributedSolver`
 （2026-10-05 起）。此前单 GPU、CPU 分布式、多 GPU 各有一份循环：单 GPU 与多 GPU 返回字典，两个分布式循环
 的定阶收敛判据是绝对的 `res < tol`（单机与全部 Order Continuation 路径是相对下降 1/tol 倍，同一个 `tol`
@@ -256,7 +256,7 @@ class SolveLoopMixin:
 
         # Order Continuation: 从低阶开始逐步提升精度
         if uses_order_continuation(self):
-            # Order Continuation 路径在 `core/utils/order_continuation.py`
+            # Order Continuation 路径在 `core/utils/order_continuation/`
             # 里自己套 `blas_threads_limited`（求解循环在那边）。
             result = self._solve_with_order_continuation(
                 max_iter, dt, tol, checkpoint_callback,
@@ -312,7 +312,7 @@ class SolveLoopMixin:
                 # N"）、Time 标签（"Time/step"而非"Time"）都与
                 # order_continuation/run.py::run_order_continuation（目标阶数>=2
                 # 时走的分阶段路径）不一致——两条路径各自独立发展、从未同步
-                # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
+                # 过格式。这里改成逐字段对齐 order_continuation/ 的格式
                 # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
                 # 气动力系数打印。
                 if report:

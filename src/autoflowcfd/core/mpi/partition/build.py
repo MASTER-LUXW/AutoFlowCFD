@@ -137,7 +137,7 @@ def build_distributed_partition(
     # 扩展 halo 层时会顺带把这个数组补全，但没有触发扩展的 rank（例如
     # 分区恰好不需要额外交叉引用依赖）永远不会补上这一步，导致同一个
     # partition 对象在"是否触发过扩展"上出现不一致的 global_to_local
-    # 语义（历史上 distributed_flat_face.py 通过自建一份独立的扩展映射
+    # 语义（历史上 distributed_flat_face/ 通过自建一份独立的扩展映射
     # 绕开了这个问题，没有直接依赖这个字段，因此这个缺口本身不影响当前
     # 唯一的真实消费点，但作为 partition 对象自身字段的语义完整性缺陷，
     # 留着会是未来新增消费者的地雷）。这里在基础构造阶段就直接补齐，

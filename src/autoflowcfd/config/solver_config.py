@@ -95,7 +95,7 @@ class SolverConfig:
             数机械均分，目标阶数与非最终阶段拿到同一份额，与目标阶数
             本身是否已经收敛毫无关系。传具体值后非最终阶段各自最多跑
             这么多步，**目标阶数改为吃掉这次求解剩余的全部步数**，不再
-            随阶段数被稀释——见 `core/utils/order_continuation.py::
+            随阶段数被稀释——见 `core/utils/order_continuation/::
             run_order_continuation` 同名参数文档（2026-09-01，用户直接
             指出"不想机械地按 max_iter // len(orders) 判断"）。CLI
             `--phase-max-iter` 选项、或本 YAML 配置的 `phase_max_iter`
@@ -166,7 +166,7 @@ class SolverConfig:
         #
         # 而且它是**冗余**的：真正写输出的两处都自己建目录
         # （`cli/solve/checkpoint_io/write.py::save_results` 与
-        # `cli/solve/steady.py` 的保存分支都有
+        # `cli/solve/steady/` 的保存分支都有
         # `os.makedirs(output_dir, exist_ok=True)`）。要显式预建请调用
         # 下面的 `ensure_output_dir()`。
 

@@ -48,7 +48,7 @@ def compute_inviscid_residual_fr_gpu(
         device_id: GPU 设备 ID
         mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数（见
             kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
-            保留旧硬编码值，真正的求解器路径（gpu_solver.py）必须显式
+            保留旧硬编码值，真正的求解器路径（gpu_solver/）必须显式
             传入 `solver.freestream["mach_ref"]`，不能依赖这个默认值。
 
     Returns:
@@ -75,7 +75,7 @@ def compute_inviscid_residual_fr_gpu(
     # 切分棱柱/四面体。`mesh_data`/`ops_data` 由调用方显式传入时，
     # 优先从其中读取（array_manager.py::upload_mesh_data 自己就会写
     # `mesh_data['n_cells']`/`['n_prism']`，分布式调用方构造压缩版
-    # mesh_data 时同样要写这两个 key，见 gpu_distributed.py 的构造处）；
+    # mesh_data 时同样要写这两个 key，见 gpu_distributed/ 的构造处）；
     # 未显式传入时（单机 GPUFRSolver 路径）保持原有行为，直接读 mesh。
     if mesh_data is not None and 'n_cells' in mesh_data:
         n_cells = mesh_data['n_cells']

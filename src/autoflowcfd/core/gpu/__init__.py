@@ -7,16 +7,16 @@ AutoFlowCFD V2.0 - GPU 加速计算模块（CuPy 统一框架）
 平铺在 core/gpu/ 下，与 CPU 侧按关注点分文件夹——fr_solver/、
 fr_residual/、turbulence/、mpi/——不对称，随文件数增长愈发难以导航，
 现按同一分类方式重新组织，一一对应）：
-- solver/: 对应 CPU fr_solver/ —— gpu_solver.py（GPUFRSolver 主体）、
+- solver/: 对应 CPU fr_solver/ —— gpu_solver/（GPUFRSolver 主体）、
   gpu_solver_init.py、gpu_solver_io.py
-- residual/: 对应 CPU fr_residual/ + fr_operators/ 数值核 —— gpu_inviscid.py、
-  gpu_viscous.py、gpu_inviscid_volume.py、gpu_p0_inviscid.py（CUDA
+- residual/: 对应 CPU fr_residual/ + fr_operators/ 数值核 —— gpu_inviscid/、
+  gpu_viscous/、gpu_inviscid_volume.py、gpu_p0_inviscid.py（CUDA
   RawKernel）、gpu_volume_contract.py（张量收缩）、gpu_flux.py（欧拉/
   粘性物理通量）、gpu_gradients.py（物理梯度）
 - turbulence/: 对应 CPU turbulence/ —— gpu_turbulence_sst.py（SST k-ω
   源项）及后续新增的 GPU 湍流模型
-- distributed/: 对应 CPU mpi/ 的 GPU 端 —— gpu_distributed.py（多 GPU +
-  MPI 分布式求解器）、gpu_distributed_init.py、gpu_halo_exchange.py
+- distributed/: 对应 CPU mpi/ 的 GPU 端 —— gpu_distributed/（多 GPU +
+  MPI 分布式求解器）、gpu_distributed_init/、gpu_halo_exchange.py
   （CUDA-aware MPI / staging buffer 直接 Halo 交换）
 
 顶层保留（CPU 侧无直接对应的基础设施）：

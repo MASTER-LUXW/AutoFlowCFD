@@ -1,9 +1,9 @@
 """AutoFlowCFD V2.0 - 湍流标量的**扩散**残差（含去混叠体积项）。
 
-从 `core/turbulence/transport.py` 拆出（2026-09-24）；界面项 2026-09-26 改为 IIPG 内罚、两侧各自坐标系。
+从 `core/turbulence/transport/` 拆出（2026-09-24）；界面项 2026-09-26 改为 IIPG 内罚、两侧各自坐标系。
 
 残差约定：`+div(Gamma*grad(phi))/det(J)`（含 IIPG 内罚界面项），与
-`viscous_flux.py` 的"粘性项是 +div(G)"完全同一约定 —— 这个符号曾经写错成
+`viscous_flux/` 的"粘性项是 +div(G)"完全同一约定 —— 这个符号曾经写错成
 反扩散、把 k/omega 场两极分化到正性限制器的上下界，见包 `__init__.py`
 "符号约定"一节记录的那次修复。
 """
@@ -221,7 +221,7 @@ def compute_scalar_diffusion_residual(
         del G_tilde
 
     # 扩散对 dphi/dt 的贡献是 +div(G)/det(J)（见本函数文档符号约定，
-    # 与 viscous_flux.py::"residual = div_comp / det_jacs"同一约定）。
+    # 与 viscous_flux/::"residual = div_comp / det_jacs"同一约定）。
     # 退化单元溢出保护：理由/验证方式同 compute_scalar_convection_
     # residual 里对应的 errstate（见该函数文档），同一类已知、已在
     # compute_turbulence_transport_residual 末尾被下游清零处理的溢出。

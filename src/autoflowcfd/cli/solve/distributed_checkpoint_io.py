@@ -124,7 +124,7 @@ def rebuild_distributed_solver_from_checkpoint(
     # 恢复的真实解重置回 P0 均匀流场、从 `solver.current_order`（而不是
     # 0）继续爬坡。multi_gpu 分支（"传统模式"与"完全分布式加载"均已于
     # 2026-09-02 接入，见 gpu_distributed_order_continuation.py/
-    # gpu_distributed_fully_distributed.py 模块文档）同样支持 Order
+    # gpu_distributed_fully_distributed/ 模块文档）同样支持 Order
     # Continuation，这两个属性对它同样生效，不是无害占位。
     solver.order = target_order
     # 收敛历史接着 checkpoint 往下记（各 rank 都读了同一份 checkpoint，历史一致）

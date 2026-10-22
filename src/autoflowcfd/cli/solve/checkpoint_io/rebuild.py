@@ -266,7 +266,7 @@ def rebuild_from_checkpoint(
         cfl_max=cfl_max,
         # cfl_min 必须能透传（2026-09-15）：控制器默认下限 0.05 高于真 P1
         # 在 79 万单元 cube_demo 上实测稳定的 0.03，resume 低 CFL 工况时
-        # 不传它会被钳回 0.05（见 adaptive_cfl.py 模块文档第 11 条）。
+        # 不传它会被钳回 0.05（见 adaptive_cfl/ 模块文档第 11 条）。
         cfl_min=cfl_min,
     )
     # 构造函数用同一个 order 参数同时设置 self.current_order

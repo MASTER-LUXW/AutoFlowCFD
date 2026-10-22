@@ -72,7 +72,7 @@ def build_native_prism_overintegration_operators(
         约定，`fr_residual/inviscid.py` 的过积分分支按同一套
         `contract_shared_operator_1axis/2axis` 消费，不需要改那段通用
         代码。这里的 `n_coarse`/`n_fine` 是**原生真实**节点数，粗轴填充
-        到全局张量积宽度在 `fr/operators.py` 里用
+        到全局张量积宽度在 `fr/operators/` 里用
         `native_padding.pad_native_matrix_to_global` 完成（与四面体同
         一条路径）。
     """

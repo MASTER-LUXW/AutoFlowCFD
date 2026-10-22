@@ -184,7 +184,7 @@ def _compute_viscous_interface_correction_gpu(
     复用 `_extrap_side`（src0/src1 跨单元交叉引用机制，专门给"对侧"
     数据用）——完整推导见 `_self_extrap_side` 文档。新增 `n_prism`
     形参就是给这个自身外插用的（`compact_cell_type` 不存在时的分类
-    阈值，与 `gpu_inviscid.py` 同一约定）。
+    阈值，与 `gpu_inviscid/` 同一约定）。
     """
     cp = get_cupy()
     correction = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)

@@ -33,7 +33,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         Pr: 分子普朗特数
         mu_t_field: 湍流涡粘度场，形状 (n_cells, n_sps) 或 None（层流/未激活
             湍流模型时视为全零）。这是 T-01/T-04/T-06 湍流-平均流耦合的
-            接入点——调用方（core/fr_solver.py）负责把 SST/DDES/WALE 算出
+            接入点——调用方（core/fr_solver/）负责把 SST/DDES/WALE 算出
             的 nu_t 乘以密度后传入，见该模块修复说明。
         Pr_t: 湍流普朗特数
         boundary_ghost_provider: 边界面幽灵态提供者，与无粘残差

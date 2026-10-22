@@ -121,7 +121,7 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRAND
 
     真实 bug 修复（问题清单 #5 排查附带发现，2026-09-02，用真实含多源/
     混合拆分面的合成网格 + numpy-as-cupy 替身 + 完整 `GPUFRSolver.
-    step()` 首次真正调用到体积项分支才暴露——之前只有 `gpu_viscous.py`
+    step()` 首次真正调用到体积项分支才暴露——之前只有 `gpu_viscous/`
     的两处界面校正调用点被验证过，那两处调用前都会先 `.reshape(n*n_fp,
     5)`/`.reshape(n*n_fp,3,3)` 显式压平成真正的 2D/3D 输入，恰好绕开了
     这个问题）：`Q`/`grad_T` 用 `[..., k]`（省略号，天然支持任意数量的

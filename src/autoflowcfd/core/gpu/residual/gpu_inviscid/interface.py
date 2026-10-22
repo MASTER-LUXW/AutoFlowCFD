@@ -14,7 +14,7 @@ def _extrap_q_to_fp(cp, mat, src_cell, Q_gpu):
 def _add_q_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, Q_gpu):
     """叠加稀疏第二来源（分裂面场景），Q 专用版本，见
     gpu_viscous/extrap.py::_add_src1_to_fp 同名通用版本的文档（这里内联一份
-    Q-only 版本，避免 gpu_inviscid.py<->gpu_viscous.py 产生循环 import：
+    Q-only 版本，避免 gpu_inviscid/<->gpu_viscous/ 产生循环 import：
     两者都从 gpu_inviscid_volume.py 导入 prepare_mesh_data/prepare_ops_data，
     不再互相 import）。"""
     has1 = src1_idx >= 0
@@ -82,7 +82,7 @@ def _lift_native_contrib(cp, face_op, lift_native, ref_area_weight, jump):
     K 里，`fr/face_flux_trace.py`），
     已经是参考空间的法向通量，再乘物理面积权重会多乘一个 `|adj_row|
     ~ h^2`，界面项从 `~1/h` 变成 `~h`。
-    （注意 `gpu_scalar_transport.py` 里同一位置**用物理面积权重是对的**
+    （注意 `gpu_scalar_transport/` 里同一位置**用物理面积权重是对的**
     —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
 
     Args:

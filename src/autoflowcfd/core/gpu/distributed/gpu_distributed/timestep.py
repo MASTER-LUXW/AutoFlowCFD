@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - `MultiGPUDistributedSolver` 的逐单元局部 CFL 步长（mixin，只含方法）。
 
-从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。
+从 `core/gpu/distributed/gpu_distributed/` 拆出（2026-09-25）。
 """
 
 from typing import Any

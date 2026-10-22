@@ -11,7 +11,7 @@
 示例:
     $ autoflowcfd solve steady model_volume.pkl --backend cpu --order 2 --turbulence-model sst
 
-steady/transient 命令本体在同目录的 `steady.py`/`transient.py`，本文件只保留
+steady/transient 命令本体在同目录的 `steady/`/`transient.py`，本文件只保留
 命令组定义 + resume/status。
 """
 

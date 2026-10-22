@@ -5,8 +5,8 @@ CPU 端对应 `core/fr_operators/volume_contract.py::
 get_overintegration_context`，这里是同一份算子/细点度量在 GPU 上的取法。
 拆成独立模块的理由：GPU 侧现在有三个消费方——无粘体积项
 （`residual/gpu_inviscid_volume.py`，一直开着）、k/omega 输运
-（`turbulence/gpu_scalar_transport.py`）、粘性体积项
-（`residual/gpu_viscous.py`，2026-09-15 补齐），让后两者从"湍流"模块
+（`turbulence/gpu_scalar_transport/`）、粘性体积项
+（`residual/gpu_viscous/`，2026-09-15 补齐），让后两者从"湍流"模块
 互相 import 会造成不该有的方向依赖。
 """
 

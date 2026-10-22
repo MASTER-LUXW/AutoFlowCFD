@@ -36,7 +36,7 @@ def _interp_state_and_turbulence_local(solver, old_order: int,
         # 输运场在未知量空间延拓（`TransportedTurbulence.mapped_fields`）
         turb_model.set_transported_fields(turb_model.mapped_fields(
             _lift, np, fields=[f[:n_local] for f in turb_model.transported_fields()]))
-        # nu_t：同 order_continuation.py 文档说明，只有形状匹配旧阶数时
+        # nu_t：同 order_continuation/ 文档说明，只有形状匹配旧阶数时
         # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
         if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:
             turb_model.nu_t = _lift(turb_model.nu_t[:n_local])

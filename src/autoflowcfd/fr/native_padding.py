@@ -224,13 +224,13 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
     算进去，而那些槽位冻结在初值、会随推进变馊（见
     `native_tet_n_real_sps`）。审计中确认受影响的真实调用点：
 
-    - `core/mpi/distributed_checkpoint.py`：写进检查点/后处理的**单元
+    - `core/mpi/distributed_checkpoint/`：写进检查点/后处理的**单元
       平均**被污染（填充占一半槽位、实测偏差 3.4%）；
-    - `core/fr_operators/artificial_viscosity.py`：`rho_local`/`vel_local`
+    - `core/fr_operators/artificial_viscosity/`：`rho_local`/`vel_local`
       （人工粘性上限的尺度因子）；
-    - `core/turbulence/transport.py` 与 GPU 对应处：`rho_owner`
+    - `core/turbulence/transport/` 与 GPU 对应处：`rho_owner`
       （omega 壁面目标值里的 nu = mu/rho）；
-    - `core/gpu/solver/gpu_solver.py` 与多 GPU 对应处：局部 dt 的
+    - `core/gpu/solver/gpu_solver/` 与多 GPU 对应处：局部 dt 的
       `min(axis=1)`（会被填充槽位的馊状态过度限制）。
 
     注意 `mean` 与 `min/max` 的差别：把填充同步成 SP#0 的副本能让

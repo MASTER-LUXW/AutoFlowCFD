@@ -2,7 +2,7 @@
 AutoFlowCFD - 边界面组标签打标 (从 face_connectivity.py 拆出，控制单文件行数)
 
 本模块提供三个把 FRFaceConnectivity 的边界面按所属边界组
-（WALL/INLET/OUTLET/...）打标签的函数，供 fr_solver/boundary.py 的 BC
+（WALL/INLET/OUTLET/...）打标签的函数，供 fr_solver/boundary/ 的 BC
 幽灵态构建等调用点统一复用（WMLES 与气动力积分经幽灵态提供者的组编码取壁面）。
 """
 

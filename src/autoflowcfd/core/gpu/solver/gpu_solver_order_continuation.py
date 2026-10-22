@@ -1,7 +1,7 @@
 """
 AutoFlowCFD V2.0 - 单 GPU（`GPUFRSolver`）Order Continuation（2026-09-02）
 
-补齐三条分布式路径（`core/mpi/distributed_order_continuation.py`/
+补齐三条分布式路径（`core/mpi/distributed_order_continuation/`/
 `core/gpu/distributed/gpu_distributed_order_continuation.py`）之外
 最后一个仍然完全没有 Order Continuation 机制的后端——`GPUFRSolver`
 是单机（非分布式）GPU 求解器，没有 partition/halo/dist_flat_face 这层
@@ -13,7 +13,7 @@ AutoFlowCFD V2.0 - 单 GPU（`GPUFRSolver`）Order Continuation（2026-09-02）
 
 P0（`mesh.n_points_1d==1`）在单 GPU 路径上不是问题——`compute_
 inviscid_residual_gpu` 本身就有 `self.mesh.n_points_1d == 1` 的专用
-分支（见 `gpu_solver.py` 该方法文档），直接读取 `self.mesh`（完整真实
+分支（见 `gpu_solver/` 该方法文档），直接读取 `self.mesh`（完整真实
 网格，从不是 compact/分布式视图），与 CPU 分布式"传统模式"当年发现的
 P0 架构缺口完全不适用于这里。
 """

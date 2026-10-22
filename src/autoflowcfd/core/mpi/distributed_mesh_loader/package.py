@@ -241,7 +241,7 @@ def build_fully_distributed_rank_package(
     # 用完整全局网格+完整边界组信息构建，见调用方 distributed_mesh_
     # load_v2 文档），这里只需要把它的 `group_code`（(n_faces_global,)
     # 数组）重新切成本 rank 的 `partition.local_faces`（全局面编号）——
-    # 与 `distributed_solver/from_package.py::local_solver`/`gpu_distributed.py` 里
+    # 与 `distributed_solver/from_package.py::local_solver`/`gpu_distributed/` 里
     # 已经验证过的同一个"group_code 重映射"修复完全同一个模式，唯一
     # 区别是这里在 root 侧、构造时就切好，而不是非 root rank 自己收到
     # 完整 provider 后再切（那样仍然需要先有完整 provider 才能切，

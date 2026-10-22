@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - boundary 的共享常量。
 
-从 `src/autoflowcfd/core/fr_solver/boundary.py` 拆出(2026-09-24)。**唯一事实来源** -- 子模块一律从这里导入,
+从 `src/autoflowcfd/core/fr_solver/boundary/` 拆出(2026-09-24)。**唯一事实来源** -- 子模块一律从这里导入,
 绝不各自复制一份(那是本项目明令禁止的"同一语义两个事实来源")。
 """
 

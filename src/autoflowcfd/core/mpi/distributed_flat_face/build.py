@@ -73,7 +73,7 @@ def build_distributed_flat_face(
     # 但本项目全局单元编号有一条贯穿全代码库的硬约定：棱柱恒占据
     # [0,n_prism)，四面体恒占据 [n_prism,n_cells)——GPU/CPU 残差 kernel
     # 的体积项（gpu_inviscid_volume.py::compute_volume_term_gpu、
-    # gpu_viscous.py 的 div_G、gpu_gradients.py 的 compute_physical_
+    # gpu_viscous/ 的 div_G、gpu_gradients.py 的 compute_physical_
     # gradient_gpu 等）全都靠对这个扩展索引数组做`array[:n_prism]`/
     # `array[n_prism:]`**切片**（不是逐元素查表）来分别喂给棱柱/四面体
     # 专用算子——"先本地后halo"这个排列不满足"棱柱都在前、四面体都在后"，
@@ -102,7 +102,7 @@ def build_distributed_flat_face(
 
     # perm[k] = k 号"棱柱在前"位置对应的 native_global_ids 下标；
     # inv_perm 是其逆置换（native 位置 -> 棱柱在前位置），供
-    # gpu_distributed.py 在调用残差函数前后对 U_extended_gpu/残差数组
+    # gpu_distributed/ 在调用残差函数前后对 U_extended_gpu/残差数组
     # 做重排/逆重排使用。
     perm = np.concatenate([np.flatnonzero(is_prism_native), np.flatnonzero(~is_prism_native)])
     inv_perm = np.empty_like(perm)
@@ -116,7 +116,7 @@ def build_distributed_flat_face(
     # 第四次评审修复（发现3）：owner_src0_cell/neighbor_src0_cell/
     # owner_src1_cell/neighbor_src1_cell 此前只按 local_face_indices 对
     # *面轴* 做了切片，cell 值本身仍是未重映射的全局单元索引——CPU
-    # inviscid_kernel.py 的 `Q[c0, s, v]`/GPU gpu_inviscid.py 都直接把它
+    # inviscid_kernel.py 的 `Q[c0, s, v]`/GPU gpu_inviscid/ 都直接把它
     # 当索引用，而此时 Q/Q_gpu 只有 n_local+n_halo 大小，会 IndexError
     # 崩溃，或更危险地"恰好"落在数组范围内、悄悄读到不相关 cell 的数据。
     cell_g2l_extended = np.full(len(partition.global_to_local), -1, dtype=np.int64)
@@ -155,7 +155,7 @@ def build_distributed_flat_face(
                     f"{len(bad_global)} 个既非 local 也非 halo 的单元（全局索引"
                     f"示例 {bad_global[:5].tolist()}）——halo 层构建没有把这些 "
                     f"face-flux-point 交叉插值实际依赖的单元纳入，必须先扩展 "
-                    f"halo 层（core/mpi/partition.py），不能在这里静默丢弃或"
+                    f"halo 层（core/mpi/partition/），不能在这里静默丢弃或"
                     f"用错误索引兜底。"
                 )
             out[valid] = mapped
@@ -342,7 +342,7 @@ def build_distributed_flat_face(
     # compact_cell_type：扩展索引空间（现已是"棱柱在前"排列，见上方
     # cell_g2l_extended 构造处）逐位置的真实棱柱/四面体类型，冗余于
     # `oc < n_prism_compact` 这个现在已经正确的单一阈值判据——两者
-    # 应恒一致，保留这个查表数组是为了让 gpu_inviscid.py 等消费方在
+    # 应恒一致，保留这个查表数组是为了让 gpu_inviscid/ 等消费方在
     # "逐元素查表"和"切片"两种消费方式下都有一个显式、独立于位置排列
     # 假设的真值来源（一旦未来这里的排列约定又被改动，这个数组仍能
     # 从全局单元编号直接算出正确答案，不依赖调用方对排列约定的假设）。

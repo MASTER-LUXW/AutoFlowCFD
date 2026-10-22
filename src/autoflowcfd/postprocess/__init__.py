@@ -7,7 +7,7 @@ Key Components:
     - coefficients: 气动系数/气动力数据类（AerodynamicCoefficients/AerodynamicForces）
     - VTKExporter: 供 ParaView 使用的场数据导出（单元中心平均值）
     - export_highorder_vtk: VTK 高阶 Lagrange 单元导出（#5，真实分段
-      多项式，非单元中心平均值，见 vtk_export_highorder.py 模块文档）
+      多项式，非单元中心平均值，见 vtk_export_highorder/ 模块文档）
     - ConvergenceAnalyzer: 残差与系数历史
     - TransientStatistics: 时间平均场、RMS、PSD
 

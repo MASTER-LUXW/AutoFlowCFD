@@ -1,5 +1,5 @@
 """
-AutoFlowCFD V2.0 - FRSolver 边界条件配置构建 (从 fr_solver.py 拆分)
+AutoFlowCFD V2.0 - FRSolver 边界条件配置构建 (从 fr_solver/ 拆分)
 
 把网格边界组信息与用户/默认 BC 参数接到 boundary/fr_ghost_state.py 的
 BoundaryGhostStateProvider 接口上，供 core/fr_residual/inviscid.py 使用。

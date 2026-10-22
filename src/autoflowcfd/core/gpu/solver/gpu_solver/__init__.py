@@ -1,13 +1,13 @@
 """
 AutoFlowCFD V2.0 - GPU FRSolver
 
-完整的 GPU 版 FR 求解器，对应 core/fr_solver.py。
+完整的 GPU 版 FR 求解器，对应 core/fr_solver/。
 所有计算在 GPU 上完成，数据常驻显存，只在 I/O 时传输。
 
 设计：
 - 与 CPU 版 FRSolver 接口一致（solve/step/compute_*_residual）
 - 内部使用 GPUArrayManager 管理 GPU 数据
-- 残差计算全部走 CuPy（gpu_inviscid.py / gpu_viscous.py）
+- 残差计算全部走 CuPy（gpu_inviscid/ / gpu_viscous/）
 - 时间积分走 GPUTimeIntegrator（gpu_time_integration.py）
 - 支持 P0 和 P>=1 两种路径
 - 支持单 GPU 稳态/伪稳态求解

@@ -91,7 +91,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
 
 
 def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
-    """interpolate_to_new_order 的带维度校验版本，从 fr_solver.py 拆分
+    """interpolate_to_new_order 的带维度校验版本，从 fr_solver/ 拆分
     （对应旧版本 FRSolver._interpolate_to_new_order 方法体）。"""
     interpolate_to_new_order(solver, new_order)
 

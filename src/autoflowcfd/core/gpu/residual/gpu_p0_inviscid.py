@@ -241,7 +241,7 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
         n_cells: 单元数
         n_faces: 面数
         mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数，调用方
-            （gpu_solver.py）必须显式传入 `solver.freestream["mach_ref"]`。
+            （gpu_solver/）必须显式传入 `solver.freestream["mach_ref"]`。
 
     Returns:
         residual_gpu: (n_cells, 1, 5) CuPy 残差数组
