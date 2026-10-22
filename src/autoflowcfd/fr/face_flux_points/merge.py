@@ -305,10 +305,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> _KernelFaceDa
             is_lower = is_lower_fp_standard if is_std else is_lower_fp_flipped
             ow_mask[f] = is_lower if half == "lower" else ~is_lower
 
-        # 分配 extra 数组（float64——同一套跨单元插值矩阵，与 nb_interp/
-        # ow_interp 一样存在坍缩坐标模态 Vandermonde 条件数病态问题，
-        # 见 face_flux_points/kernel.py::build_fp_newton_parallel 文档，
-        # 不能降精度）
+        # 分配 extra 数组（float64：与 nb_interp/ow_interp 同一套跨单元插值矩阵，
+        # 界面上自由流保持性靠两侧迹逐位抵消，不能降精度）
         n_extra_nb = len(_multi_nb_faces)
         n_extra_ow = len(_multi_ow_faces)
         _nb_extra_mats_arr = np.zeros((max(n_extra_nb, 1), n_fp, n_sps), dtype=np.float64)

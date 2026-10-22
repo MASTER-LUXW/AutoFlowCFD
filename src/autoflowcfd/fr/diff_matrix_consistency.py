@@ -44,7 +44,7 @@ Kopriva《Implementing Spectral Methods for PDEs》Ch.8 对 GCL 的讨论）：
 ## 适用范围（一条重要限制）
 
 对**直边四面体**，`D' @ 1 = 0` 是自由流保持的**充分**条件（度量逐单元
-常数，可以提到求和外面）。对**棱柱**（坍缩坐标 + 双线性侧面）度量逐点
+常数，可以提到求和外面）。对**棱柱**（双线性侧面）度量逐点
 变化，自由流保持需要完整的离散 GCL `sum_m D_m(adj(J)_m) = 0`，行和修正
 只消掉其中"度量恒定部分"那一项——所以棱柱段的改善是部分的，不应期待落到
 eps。真实网格实测见 `tests/unit/test_diff_matrix_constant_annihilation.py`。
@@ -92,8 +92,8 @@ def enforce_constant_annihilation(
     if not np.isfinite(D3).all():
         # NaN/inf 会让下面的 `worst > limit` 比较恒为 False 从而静默穿过，
         # 把一个彻底损坏的矩阵当成"行和已经很小"。实际踩过一次：给
-        # `build_collapsed_diff_matrices` 传 Gauss-Lobatto 点集（含坍缩基
-        # 的退化端点）会让模态 Vandermonde 奇异、D 全是 NaN。
+        # 给（已删除的）坍缩基微分矩阵构造传 Gauss-Lobatto 点集（含坍缩基
+        # 的退化端点）让模态 Vandermonde 奇异、D 全是 NaN。
         n_bad = int((~np.isfinite(D3)).sum())
         raise ValueError(
             f"微分矩阵含 {n_bad} 个非有限元素（NaN/inf）——矩阵构造已经失败"
