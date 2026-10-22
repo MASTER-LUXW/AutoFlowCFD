@@ -90,7 +90,7 @@ def build_ms_interp_parallel(
     读取。
     """
 
-    # ---- Neighbor multi-source ----
+    # ---- neighbor 侧多源 ----
     for idx in prange(n_ms_nb):
         f = ms_nb_faces[idx]
         oc = owner_cell_arr[f]
@@ -159,7 +159,7 @@ def build_ms_interp_parallel(
                 if nb_mask[f, p]:
                     nb_interp[f, p] = interp_pn[p]
 
-        # ---- Secondary Newton + interp ----
+        # ---- 第二源的 Newton 定位与插值 ----
         sec_cell = ms_nb_sec_cell[idx]
         sec_code = ms_nb_sec_cube_face[idx]
         # 两类原生面分开判（`code >= 6` 原本等价于"是原生四面体面"，
@@ -227,7 +227,7 @@ def build_ms_interp_parallel(
                     nb_extra_mat[ei, p] = interp_sec[p]
         nb_cell_id[f] = pn_c
 
-    # ---- Owner multi-source ----
+    # ---- owner 侧多源 ----
     for idx in prange(n_ms_ow):
         f = ms_ow_faces[idx]
         oc = owner_cell_arr[f]
@@ -297,7 +297,7 @@ def build_ms_interp_parallel(
             ow_cell_id[f] = pn_c
             continue
 
-        # ---- Secondary Newton + interp ----
+        # ---- 第二源的 Newton 定位与插值 ----
         sec_cell = ms_ow_sec_cell[idx]
         sec_code = ms_ow_sec_cube_face[idx]
         # 两类原生面分开判（`code >= 6` 原本等价于"是原生四面体面"，

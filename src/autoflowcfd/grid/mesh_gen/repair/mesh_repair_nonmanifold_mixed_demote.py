@@ -135,7 +135,7 @@ def demote_invalid_prisms_to_tets(
 
     if messy.any():
         bad_idx = np.flatnonzero(messy)
-        split_tets = _split_prisms_to_tets(prism_cells[bad_idx])  # (3*n_bad,4), block layout
+        split_tets = _split_prisms_to_tets(prism_cells[bad_idx])  # (3*n_bad,4)，按块排列
         degenerate = (
             (split_tets[:, 0] == split_tets[:, 1]) | (split_tets[:, 0] == split_tets[:, 2]) |
             (split_tets[:, 0] == split_tets[:, 3]) | (split_tets[:, 1] == split_tets[:, 2]) |

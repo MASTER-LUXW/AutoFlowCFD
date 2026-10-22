@@ -153,7 +153,7 @@ def parse_cells_from_nas(
                                 _note(line_no, line_stripped)
                             continue
 
-                        # Flexible parsing (whitespace-tokenized fallback)
+                        # 宽松解析（按空白分词的回退路径）
                         parts = line_stripped[6:].split()
                         if len(parts) >= 6:
                             try:
@@ -213,7 +213,7 @@ def parse_cells_from_nas(
                             _note(line_no, line_stripped)
                             continue
 
-                    # Flexible parsing
+                    # 宽松解析（按空白分词）
                     parts = line_stripped[6:].split()
 
                     if len(parts) >= 5:

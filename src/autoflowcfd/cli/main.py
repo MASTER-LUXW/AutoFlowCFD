@@ -98,7 +98,7 @@ def cli(verbose: bool) -> None:
         )
 
 
-# Register subcommand groups
+# 注册子命令组
 cli.add_command(grid)
 cli.add_command(solve)
 cli.add_command(post)

@@ -96,7 +96,7 @@ def convert_layers_to_prisms(
 
     logger.info(f"Converting {n_layers-1} layer pairs to {n_base_faces} boundary-layer prism(s) each...")
 
-    sorted_base = np.sort(base_faces, axis=1)  # (n_faces, 3) -> v0<v1<v2, same per layer
+    sorted_base = np.sort(base_faces, axis=1)  # (n_faces, 3) -> v0<v1<v2，每层相同
 
     n_prisms = n_base_faces * (n_layers - 1)
     prisms = np.empty((n_prisms, 6), dtype=np.int64)

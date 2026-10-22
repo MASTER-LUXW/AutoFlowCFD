@@ -91,7 +91,7 @@ class NASParser:
         logger.info(f"Parsing NAS file: {self.file_path}")
 
         try:
-            # Step 1: Detect file version
+            # 第 1 步：识别文件版本
             self.version = self._detect_version()
             logger.info(f"Detected NAS version: {self.version}")
 
@@ -101,7 +101,7 @@ class NASParser:
                     f"Supported versions: {self.SUPPORTED_VERSIONS}"
                 )
 
-            # Step 2: Parse nodes (delegated)
+            # 第 2 步：解析节点（委托）
             logger.info("Parsing nodes...")
             nodes, node_id_to_index = parse_nodes_from_nas(
                 str(self.file_path), self.encoding
@@ -125,7 +125,7 @@ class NASParser:
             nodes.y = nodes.y * scale_factor
             nodes.z = nodes.z * scale_factor
 
-            # Step 3: Parse cells (delegated)
+            # 第 3 步：解析单元（委托）
             logger.info("Parsing cells...")
             surface_cells, cell_pids = parse_cells_from_nas(
                 str(self.file_path), node_id_to_index, self.encoding
@@ -172,7 +172,7 @@ class NASParser:
             apply_bc_types(boundaries, self.bc_types)
             logger.info(f"Parsed {len(boundaries.groups)} boundary groups")
 
-            # Step 5: Compute bounding box
+            # 第 5 步：计算包围盒
             bounding_box = self._compute_bounding_box(nodes)
 
             metadata = GridMetadata(

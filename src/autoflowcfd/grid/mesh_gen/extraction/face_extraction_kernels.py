@@ -142,7 +142,7 @@ def _scan_sorted_faces_numba(
     # 关键修复：Numba 在 njit 函数中不支持 np.concatenate
     # 使用足够大的预分配代替动态调整大小
     # 为安全起见，分配完整大小（最坏情况：所有面都是唯一的）
-    alloc_size = n_faces_raw  # Conservative: use full size
+    alloc_size = n_faces_raw  # 保守取法：按完整尺寸分配
     unique_key1_temp = np.zeros(alloc_size, dtype=np.int64)
     unique_max_temp = np.zeros(alloc_size, dtype=np.int32)
     face_conn_temp = np.full((alloc_size, 2), -1, dtype=np.int32)

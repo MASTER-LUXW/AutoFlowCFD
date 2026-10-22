@@ -52,12 +52,12 @@ class MeshQualityValidator:
     def __init__(self):
         """初始化 validator，使用默认质量阈值。"""
         self.thresholds = {
-            'max_negative_volumes': 0,       # No negative volumes allowed
+            'max_negative_volumes': 0,       # 不允许负体积
             'max_volume_ratio': 1e6,         # 全局范围 - 仅供参考，见 MeshQualityReport 文档字符串
-            'max_aspect_ratio': 100.0,       # fallback when no BL/core split is available
-            'bl_max_aspect_ratio': 50.0,     # BL cells: expected to be stretched
-            'core_max_aspect_ratio': 10.0,   # core-fill cells: should be close to isotropic
-            'max_skewness': 0.95,            # radius-ratio based (Fluent-equivalent severity)
+            'max_aspect_ratio': 100.0,       # 无法区分边界层 / 核心区时的统一上限
+            'bl_max_aspect_ratio': 50.0,     # 边界层单元：本来就是拉伸的
+            'core_max_aspect_ratio': 10.0,   # 核心填充单元：应接近各向同性
+            'max_skewness': 0.95,            # 按半径比定义（与 Fluent 同等严格）
             # 角度；与 OpenFOAM 对齐（Green-Gauss 对非正交性比表面法向修正格式更敏感，因此这里刻意比
             # Fluent 宽松的 orthogonal-quality 下限更严格）
             'max_orthogonality_angle': 70.0,

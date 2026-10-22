@@ -146,7 +146,7 @@ class FlatFaceGeometry:
     # color_face_indices[c] = 颜色 c 的面索引数组（int64），
     # n_colors = 总颜色数。同色面之间无 owner_cell 冲突，可安全直接
     # prange + 写入共享 buffer。
-    color_face_indices: list  # list of np.ndarray (int64), length = n_colors
+    color_face_indices: list  # np.ndarray(int64) 的列表，长度为 n_colors
     n_colors: int
 
     # 逐通量点的单位外法向（adj 行归一化，与 `true_normal` 那个面平面法向不是一回事：扭曲面上

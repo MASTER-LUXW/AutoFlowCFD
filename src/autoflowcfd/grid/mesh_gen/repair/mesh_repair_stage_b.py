@@ -44,7 +44,7 @@ def run_stage_b_repair(
     if not np.any(bad_mask):
         return merged_nodes, merged_cells, bad_mask, repair_actions
 
-    # Stage B': Local cavity remesh
+    # Stage B'：局部空腔重划分
     max_b_prime_attempts = 3
     b_prime_attempt_count = 0
 

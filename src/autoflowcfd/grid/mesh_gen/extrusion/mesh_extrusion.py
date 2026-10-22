@@ -211,7 +211,7 @@ def extrude_layers(
                 layer_thickness = max_layer_thickness
                 next_cumulative_thickness = current_thickness + layer_thickness
 
-        # Reactive convergence clamp
+        # 反应式收敛钳制
         clamp_budget_for_convergence(current_nodes, surface_faces, remaining_budget)
 
         # 只保留 seam taper_scale（seam 处平滑过渡到零，与尖角处的厚度
