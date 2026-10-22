@@ -31,14 +31,6 @@ from .turbulence.des import DDESModel, IDDESModel
 from .turbulence.wall_model import EquilibriumWallModel
 from .turbulence.sgs import WALEModel
 
-# Backend 模块（第四次评审：删除了 V1 时代与生产路径完全脱节、且用
-# 已被弃用的 numba.cuda 判据的 create_backend/NumbaBackend/CUDABackend/
-# BackendBase，见 backend/base.py、backend/__init__.py 模块文档。
-# get_available_backends/list_available_backends 现在只有一份实现
-# （backend/__init__.py），这里直接复用，不再各自维护一份可能给出不同
-# 结论的判据。）
-from .backend import get_available_backends, list_available_backends, SolutionVector
-
 
 __all__ = [
     'FRState',
@@ -52,8 +44,5 @@ __all__ = [
     'IDDESModel',
     'EquilibriumWallModel',
     'WALEModel',
-    'SolutionVector',
     'FRSolver',
-    'get_available_backends',
-    'list_available_backends',
 ]

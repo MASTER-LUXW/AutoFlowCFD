@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from loguru import logger
 
-from ..core.backend.base import SolutionVector
+from .solution_vector import SolutionVector
 from . import vtk_export_legacy, vtk_export_xml
 from .vtk_export_fields import boundary_zone_ids, cell_fields, expand_fields, point_fields
 

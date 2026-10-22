@@ -70,7 +70,7 @@ def _run_mean(tmp_path, coefficient_values, rebuild_error=None):
     p = "autoflowcfd.cli.post.transient_commands"
     with patch(f"{p}._load_grid_data"), patch(f"{p}._locate_grid_file"), \
          patch(f"{p}._list_checkpoints", return_value=ckpts), \
-         patch(f"{p}._to_solution_vector"), patch(f"{p}._export_point_fields_vtk"), \
+         patch(f"{p}.SolutionVector"), patch(f"{p}._export_point_fields_vtk"), \
          patch("autoflowcfd.core.utils.checkpoint.CheckpointManager.load",
                side_effect=lambda f: (None, {}, 0, meta[f])), \
          patch("autoflowcfd.postprocess.TransientStatistics", side_effect=make_stats), \

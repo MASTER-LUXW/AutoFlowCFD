@@ -19,8 +19,8 @@ from autoflowcfd.cli.post.helpers import (
     _load_grid_data,
     _locate_grid_file,
     _physical_time,
-    _to_solution_vector,
 )
+from autoflowcfd.postprocess.solution_vector import SolutionVector
 
 
 def _accumulate_history(case: str, grid: Optional[str], warmup_time: float, on_sample=None):
@@ -48,7 +48,7 @@ def _accumulate_history(case: str, grid: Optional[str], warmup_time: float, on_s
         if time < warmup_time:
             n_excluded += 1
             continue
-        stats.accumulate(_to_solution_vector(solution_data), time=time)
+        stats.accumulate(SolutionVector(solution_data), time=time)
         if on_sample is not None:
             on_sample(stats, ckpt_file, metadata)
     if n_excluded == len(ckpt_files):

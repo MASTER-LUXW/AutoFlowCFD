@@ -16,7 +16,6 @@
 | `turbulence/` | 湍流模型（`sa/`、`sst/`、`des/`、`sgs.py`、壁面模型 `wall_model/`）、模型族定义 `registry.py` 与统一的输运模型接口 `transported.py` |
 | `utils/` | Order Continuation、壁面距离、checkpoint、来流方向等共用工具 |
 | `probes/` | 求解器侧探针（每个物理步在探针处求解多项式的值） |
-| `backend/` | 后端可用性检测（`get_available_backends`，与 `--backend gpu` 同一判据）与 `SolutionVector` |
 
 ## 构造求解器
 

@@ -16,7 +16,7 @@ from typing import Dict, Optional
 import numpy as np
 from loguru import logger
 
-from ..core.backend.base import SolutionVector
+from .solution_vector import SolutionVector
 from ._field_utils import cell_to_node
 
 
@@ -104,9 +104,8 @@ class TransientStatistics:
     def accumulate(self, solution: SolutionVector, time: float) -> None:
         """加入一个时刻的单元积分平均解（单元数必须与网格一致）。"""
         n_cells = int(self.grid_data.cell_count)
-        if solution is None or solution.data is None or solution.n_cells != n_cells:
-            got = None if solution is None or solution.data is None else solution.n_cells
-            raise ValueError(f"样本解的单元数 {got} 与网格单元数 {n_cells} 不符")
+        if solution.n_cells != n_cells:
+            raise ValueError(f"样本解的单元数 {solution.n_cells} 与网格单元数 {n_cells} 不符")
         u, v, w = solution.get_velocity()
         values = {'velocity_u': u, 'velocity_v': v, 'velocity_w': w, 'pressure': solution.get_pressure()}
         for name, cell_values in values.items():

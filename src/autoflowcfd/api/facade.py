@@ -43,9 +43,9 @@ class AutoFlowCFDAPI(_APIGridMixin, _APIConfigMixin, _APISolveMixin, _APIPostMix
         import sys
 
         from autoflowcfd import __version__
-        from autoflowcfd.core.backend import get_available_backends
+        from autoflowcfd.core.gpu import backend_availability
 
-        backends = get_available_backends()
+        backends = backend_availability()
         return {
             'platform': platform.platform(),
             'backends': backends,

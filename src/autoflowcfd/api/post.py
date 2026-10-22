@@ -58,7 +58,7 @@ class _APIPostMixin:
             fields: 导出的场（默认速度、压力；可含 k/omega/nu_tilde/nut/turbulence/q_criterion，高阶导出另可含 density）
         """
         from autoflowcfd.postprocess.vtk_export import VTKExporter
-        from autoflowcfd.core.backend.base import SolutionVector
+        from autoflowcfd.postprocess.solution_vector import SolutionVector
 
         if self.solver is None or self.volume_mesh is None:
             raise ValueError("export_vtk 需要先运行 run_steady/run_transient 或 resume_simulation")
@@ -80,7 +80,7 @@ class _APIPostMixin:
         # 单元积分平均（求积权重 x det(J)），与 checkpoint 写出的守恒解单元平均同一个函数
         W = cell_integration_weights(host)
         U_cell_avg = weighted_cell_average(host.state.U, W)
-        solution = SolutionVector(data=U_cell_avg, n_cells=U_cell_avg.shape[0], n_variables=U_cell_avg.shape[1])
+        solution = SolutionVector(U_cell_avg)
         q_field = None
         if fields is not None and 'q_criterion' in fields:
             from autoflowcfd.postprocess.q_criterion import q_criterion_cell_field

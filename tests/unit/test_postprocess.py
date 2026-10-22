@@ -10,7 +10,7 @@ import csv
 from autoflowcfd.grid.structures import (
     GridData, NodeArray, CellArray, BoundaryMap, GridMetadata,
 )
-from autoflowcfd.core.backend.base import SolutionVector
+from autoflowcfd.postprocess.solution_vector import SolutionVector
 from autoflowcfd.postprocess import (
     AerodynamicCoefficients,
     AerodynamicForces,
@@ -111,7 +111,7 @@ class TestVTKExporter(unittest.TestCase):
             metadata=metadata
         )
         U = np.array([[1.2, 1.2 * 30.0, 0.0, 0.0, 101325.0 / 0.4 + 0.5 * 1.2 * 30.0 ** 2]])
-        self.solution = SolutionVector(data=U, n_cells=1, n_variables=5)
+        self.solution = SolutionVector(U)
 
     def test_export_legacy_format(self):
         """导出 legacy VTK 格式"""
@@ -264,7 +264,7 @@ class TestTransientStatistics(unittest.TestCase):
     def _sample(self, u, p):
         rho = 1.2
         U = np.array([[rho, rho * u, 0.0, 0.0, p / 0.4 + 0.5 * rho * u * u]])
-        return SolutionVector(data=U, n_cells=1, n_variables=5)
+        return SolutionVector(U)
 
     def test_mean_and_rms_match_direct_computation(self):
         stats = TransientStatistics(self.grid_data)
@@ -287,10 +287,10 @@ class TestTransientStatistics(unittest.TestCase):
         stats.accumulate(self._sample(20.0, 101325.0), time=1.0)
         np.testing.assert_allclose(stats.compute_statistics().mean_fields['velocity_u'], 15.0, rtol=1e-12)
 
-    def test_sample_without_data_is_rejected(self):
+    def test_sample_with_wrong_cell_count_is_rejected(self):
         stats = TransientStatistics(self.grid_data)
         with self.assertRaises(ValueError):
-            stats.accumulate(SolutionVector(), time=0.0)
+            stats.accumulate(SolutionVector(np.ones((2, 5))), time=0.0)
 
     def test_compute_statistics_no_samples(self):
         with self.assertRaises(RuntimeError):

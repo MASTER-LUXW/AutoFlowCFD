@@ -91,7 +91,7 @@ def cell_fields(grid, solution, turbulence: Dict[str, np.ndarray], q_criterion: 
     n_cells = int(grid.cell_count)
     out: Dict[str, np.ndarray] = {}
     if 'velocity' in fields or 'pressure' in fields:
-        if solution is None or solution.data is None or solution.n_cells != n_cells:
+        if solution is None or solution.n_cells != n_cells:
             raise ValueError("没有与网格单元数一致的解数据，无法导出速度/压力")
         if 'velocity' in fields:
             out['velocity'] = np.column_stack(solution.get_velocity())

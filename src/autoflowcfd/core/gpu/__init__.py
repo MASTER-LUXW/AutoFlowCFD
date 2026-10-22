@@ -47,6 +47,15 @@ except ImportError:
     gpu_available = False
 
 
+def backend_availability():
+    """各求解后端在本机是否可用：CPU 恒可用，GPU 与 `solve --backend gpu` 同一判据（CuPy 可导入）。
+
+    `solve status --backend` 与 API `check_environment` 共用（`utils doctor` 另在设备上实际分配数组做诊断）。
+    2026-10-22（I-93）以前在 `core/backend/__init__.py`。
+    """
+    return {"cpu": True, "gpu": gpu_available}
+
+
 def get_cupy():
     """返回 CuPy 模块，不可用时返回 None。"""
     return cp

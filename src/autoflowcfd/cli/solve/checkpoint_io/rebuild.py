@@ -164,7 +164,7 @@ def rebuild_from_checkpoint(
     face_flux_points）的求解器，喂给
     `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr`
     —— 这是气动系数计算真正需要的输入（FR 原生多点解 + 面几何）。旧版
-    V1 `CoefficientCalculator`（假设单元中心 `GridData`/`SolutionVector`、
+    V1 `CoefficientCalculator`（假设单元中心 `GridData` 与单元平均解、
     依赖从未存在的 `get_face_data()`、系数恒为 0，见 6_整体专家组二次评审.md
     发现 23）已在第三轮评审整改中移除。
 

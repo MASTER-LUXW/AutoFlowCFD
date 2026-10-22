@@ -282,8 +282,8 @@ def status(backend: bool) -> None:
         backend: 列出可用后端
     """
     if backend:
-        from autoflowcfd.core.backend import get_available_backends
-        click.echo(f"Available backends: {get_available_backends()}")
+        from autoflowcfd.core.gpu import backend_availability
+        click.echo(f"Available backends: {backend_availability()}")
         return
 
     def option(command, name):

@@ -110,17 +110,6 @@ def _physical_time(metadata: dict, ckpt_file) -> float:
     return float(metadata[PHYSICAL_TIME_KEY])
 
 
-def _to_solution_vector(solution_data):
-    """把 checkpoint 里读出的 numpy 数组包装成 SolutionVector。"""
-    from autoflowcfd.core.backend.base import SolutionVector
-
-    if isinstance(solution_data, np.ndarray):
-        n_cells = solution_data.shape[0]
-        n_variables = solution_data.shape[1] if len(solution_data.shape) > 1 else 5
-        return SolutionVector(data=solution_data, n_cells=n_cells, n_variables=n_variables)
-    return solution_data
-
-
 def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] = None) -> Tuple:
     """加载网格 + 单个 checkpoint 的解，供 coefficients/export-vtk 使用。
 
@@ -128,6 +117,7 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
         (grid_data, solution, history, iteration, metadata)
     """
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
+    from autoflowcfd.postprocess.solution_vector import SolutionVector
 
     case_path = Path(case)
     ckpt_file = _locate_checkpoint(case_path, checkpoint)
@@ -137,7 +127,7 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
 
     grid_data = _load_grid_data(_locate_grid_file(case_path, grid, metadata))
 
-    solution = _to_solution_vector(solution_data)
+    solution = SolutionVector(solution_data)
 
     if grid_data.cell_count != solution.n_cells:
         raise ValueError(

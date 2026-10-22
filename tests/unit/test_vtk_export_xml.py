@@ -13,7 +13,7 @@ import pytest
 
 pv = pytest.importorskip("pyvista")
 
-from autoflowcfd.core.backend.base import SolutionVector  # noqa: E402
+from autoflowcfd.postprocess.solution_vector import SolutionVector  # noqa: E402
 from autoflowcfd.postprocess._field_utils import cell_to_node  # noqa: E402
 from autoflowcfd.postprocess.vtk_export import VTKExporter  # noqa: E402
 from autoflowcfd.postprocess.vtk_export_xml import export_volume  # noqa: E402
@@ -61,7 +61,7 @@ def test_point_data_on_mixed_mesh(tmp_path, fmt, name):
     U = np.zeros((2, 5))
     U[:, 0] = rho
     U[:, 4] = p / (gamma - 1.0)
-    path = VTKExporter(grid, SolutionVector(data=U, n_cells=2, n_variables=5)).export(
+    path = VTKExporter(grid, SolutionVector(U)).export(
         str(tmp_path / name), fields=["pressure"], format=fmt, binary=False)
     result = pv.read(str(path))
     np.testing.assert_allclose(result.point_data["Pressure"][[0, 1, 2]], p[0], rtol=1e-6)
@@ -70,7 +70,7 @@ def test_point_data_on_mixed_mesh(tmp_path, fmt, name):
 
 def test_missing_requested_field_raises():
     grid = _mixed_grid()
-    exporter = VTKExporter(grid, SolutionVector(data=np.ones((2, 5)), n_cells=2, n_variables=5))
+    exporter = VTKExporter(grid, SolutionVector(np.ones((2, 5))))
     with pytest.raises(ValueError, match="湍流场"):
         exporter.export("unused.vtk", fields=["k"])
     with pytest.raises(ValueError, match="Q 准则"):
