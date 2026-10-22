@@ -352,7 +352,7 @@ class GridValidator:
 
         与 _check_aspect_ratio 复用同一个 quality_metrics 实现（相对
         epsilon 下限），不再维护一份固定 1e-10 epsilon 的独立实现——两者
-        曾经用不同公式，导致直方图和 传递/fail 判定对同一批单元给出不一致
+        曾经用不同公式，导致直方图和通过 / 不通过判定对同一批单元给出不一致
         的数值。
         """
         connectivity = self.grid_data.cells.connectivity

@@ -1,4 +1,4 @@
-"""质量报告的 传递/fail 判定与改进建议文本生成。
+"""质量报告的通过 / 不通过判定与改进建议文本生成。
 
 从 quality_validator.py 拆分出来：evaluate_quality 只依据阈值字典判定
 MeshQualityReport 是否通过、写警告文本；generate_recommendations 只根据

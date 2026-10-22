@@ -1,13 +1,7 @@
-"""四面体/棱柱单元朝向修正（从 curved_mapping.py 拆分）。
+"""四面体 / 棱柱单元朝向修正：`signed_tet_volume`、`fix_tet_orientation`、`fix_prism_orientation`。
 
-从 curved_mapping.py 中拆分出来（原文件超过 400 行的项目约定上限）：
-signed_tet_volume / fix_tet_orientation /
-fix_prism_orientation 是"单元朝向修正"这一个独立算法阶段（原文件里也
-已经用同名注释分节隔开），只依赖 numpy，不与 CurvedMapping 类、Duffy
-坍缩坐标变换、解析精确雅可比等其余内容共享任何状态，是天然的拆分边界。
-curved_mapping.py 在模块顶层原样重新导出这三个名字，任何既有的
-`从 autoflowcfd.grid.curved_mapping.curved_mapping 导入 fix_tet_orientation` 之类
-导入路径（high_order_mesh.py 等）不受影响，逻辑/数值结果完全未改动。
+加载高阶网格时（`grid/high_order/high_order_mesh.py`）对全部单元统一朝向，面连接关系与原生基的面局部坐标都依赖
+这一约定。只依赖 numpy；包级别（`autoflowcfd.grid.curved_mapping`）导出后两个函数。
 """
 
 import numpy as np
