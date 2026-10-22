@@ -56,7 +56,10 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub.mesh = types.SimpleNamespace(n_sps_per_cell=n_sps)
     # 每物理步推进合成湍流入口（此替身没有 SEM 入口）需要的两个属性
     stub.boundary_ghost_provider = types.SimpleNamespace(code_to_config={})
-    stub.freestream = {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}
+    stub.freestream = {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0, "mach_ref": 0.1}
+    stub.turb_model_name = "NONE"
+    stub.order = stub.current_order = 1
+    stub.dist_flat_face = types.SimpleNamespace(perm=np.arange(n_local), compact_cell_type=np.zeros(n_local, dtype=int))
     stub.time_integrator = GPUTimeIntegrator(scheme="dual_time")
     # GPUTimeIntegrator 本身没有 dual_time_steps 属性（step() 的
     # DUAL_TIME 分支用 getattr(...,5) 兜底，与单机 GPU gpu_solver.py
@@ -71,7 +74,6 @@ def _make_stub(n_local, n_sps, n_vars, target):
     # 初始猜测同样必须是真实物理量级的守恒变量（与 target 用不同随机种子，
     # 确保确实需要迭代收敛，不是从 target 本身出发的平凡情形）。
     stub.U_gpu = _make_target(n_local, n_sps, np.random.default_rng(999))
-    stub.iteration = 0
     # 逐单元局部 CFL 步长（2026-09-14）：`step()` 的 DUAL_TIME 分支现在
     # 用 `_compute_local_time_step_gpu()` 算内层伪时间步长，而不是把调用
     # 方传入的全局 `dt` 铺满（那条"已接受的简化"已补齐，见
@@ -96,10 +98,6 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub.low_mach_precond_enabled = False
     stub._cfl_controller = None
 
-    def _update_cfl_controller(residual_norm, newton_info=None):
-        return None
-    stub._update_cfl_controller = _update_cfl_controller
-
     calls = {"count": 0}
 
     # 层流：没有湍流模型时湍流更新直接返回 None（带输运方程的双时间步见 test_dual_time_newton.py）
@@ -120,12 +118,21 @@ def _make_stub(n_local, n_sps, n_vars, target):
         return -5.0 * (stub.U_gpu - target)
     stub._compute_total_residual_gpu = _compute_total_residual_gpu
 
-    def _global_residuals(res_flat):
-        return float(np.linalg.norm(res_flat)), np.zeros(5)
-    stub._monitor_residuals = _global_residuals
-
     stub._calls = calls
     return stub
+
+
+def _monitor(res, solver):
+    """编排层报告的残差范数（`residual_norm.monitor_residuals`，按参考量级归一化的逐方程 RMS）。"""
+    from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+    from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+    from autoflowcfd.core.time_integration.residual_norm import monitor_residuals
+
+    n_local, n_sps = solver.partition.n_local_cells, solver.mesh.n_sps_per_cell
+    return monitor_residuals(LocalReductions(np), res.reshape(n_local, n_sps, 5),
+                             native_cell_is_prism(solver.dist_flat_face)[:n_local], 1,
+                             _reference_scales({"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, 5))[0]
 
 
 class TestMultiGpuDistributedRkUsesSharedIntegrator:
@@ -142,7 +149,7 @@ class TestMultiGpuDistributedRkUsesSharedIntegrator:
     def test_rk3_matches_hand_rolled_and_reports_stage0_residual(self):
         from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
 
-        n_local, n_sps, n_vars = 3, 2, 5
+        n_local, n_sps, n_vars = 3, 6, 5            # P1 棱柱：6 个解点全是真实自由度
         rng = np.random.default_rng(21)
         target = _make_target(n_local, n_sps, rng)
         stub = _make_stub(n_local, n_sps, n_vars, target)
@@ -167,8 +174,8 @@ class TestMultiGpuDistributedRkUsesSharedIntegrator:
         norm = gd_mod.MultiGPUDistributedSolver.step(stub, dt=0.0)
 
         np.testing.assert_allclose(stub.U_gpu.reshape(-1, n_vars), U3, rtol=1e-13, atol=0.0)
-        assert norm == pytest.approx(float(np.linalg.norm(5.0 * (U0 - T))),
-                                     rel=1e-14),             "残差范数必须是 stage 0 的物理残差 R(U^n)"
+        assert norm == pytest.approx(_monitor(5.0 * (U0 - T), stub), rel=1e-14), \
+            "残差范数必须是 stage 0 的物理残差 R(U^n)"
         assert calls["n"] == 3, "正性回调必须在每个 RK stage 都被调用"
 
 

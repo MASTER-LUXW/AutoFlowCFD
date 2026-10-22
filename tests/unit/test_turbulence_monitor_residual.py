@@ -88,11 +88,15 @@ def test_cpu_distributed_matches_cpu(turb):
 
 
 def test_multi_gpu_reduces_the_written_back_rates():
-    """多 GPU：视图写回模型时一并写回本分区的速率，监控残差在同一处归约（本机没有多 GPU 端到端替身）。"""
+    """多 GPU：视图写回模型时一并写回本分区的速率；监控残差由四个后端共用的单步编排按后端的归约（多 GPU 为
+    MPIReductions）与湍流模型统一归约（本机没有多 GPU 端到端替身）。"""
     write_back = module_source("autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source")
     assert "advance_transported_fields(ctx.view" in write_back and "model.last_update_rates" in write_back
-    monitor = module_source("autoflowcfd.core.gpu.distributed.gpu_distributed.residual")
-    assert "explicit_turbulence_residual(red, self.turb_model_gpu" in monitor
+    backend = module_source("autoflowcfd.core.gpu.distributed.gpu_distributed.stepping")
+    assert "self.reductions = MPIReductions(self.xp)" in backend
+    assert "self.turbulence_model = solver.turb_model_gpu" in backend
+    orchestration = " ".join(module_source("autoflowcfd.core.time_integration.step_orchestration").split())
+    assert "explicit_turbulence_residual( backend.reductions, backend.turbulence_model" in orchestration
 
 
 def test_implicit_subsystem_residual_takes_precedence():

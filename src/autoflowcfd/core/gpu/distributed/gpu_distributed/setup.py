@@ -187,11 +187,10 @@ class _MultiGPUSetupMixin:
                 self._open_mask_gpu = cp.asarray(open_mask_np)
 
     def _finish_setup(self, mode: str) -> None:
-        """收敛历史、步数计数、同步与启动日志。"""
+        """收敛历史、同步与启动日志。"""
         from autoflowcfd.core.fr_solver.convergence_history import ConvergenceHistory
 
         self.convergence_history = ConvergenceHistory()
-        self.iteration = 0
         barrier()
         if is_root():
             n_local, n_halo = self.partition.n_local_cells, self.partition.n_halo

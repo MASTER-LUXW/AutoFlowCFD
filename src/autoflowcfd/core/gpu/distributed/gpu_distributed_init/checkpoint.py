@@ -91,7 +91,6 @@ class _GPUDistributedCheckpointMixin:
         U_local, metadata, iteration = distributed_load_checkpoint(path, self)
         self.state.U[:self.partition.n_local_cells] = U_local
         self.push_host_state()
-        self.iteration = iteration
         return metadata, iteration
 
     def pull_host_state(self) -> None:
