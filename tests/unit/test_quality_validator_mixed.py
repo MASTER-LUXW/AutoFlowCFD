@@ -22,7 +22,7 @@ def _mesh(tet):
     return VolumeMeshData(
         nodes=NodeArray(x=_NODES[:, 0].copy(), y=_NODES[:, 1].copy(), z=_NODES[:, 2].copy()),
         cells=TetrahedralCells(connectivity=np.array([tet], dtype=np.int32), volumes=np.array([_TET_VOLUME])),
-        boundaries=BoundaryMap(groups={}, bc_types={}),
+        boundaries=BoundaryMap(groups={}, bc_types={}, faces={}),
         metadata=GridMetadata(node_count=7, cell_count=2, boundary_groups=[], file_format="test"),
         prism_cells=PrismCells(connectivity=np.array([[0, 1, 2, 3, 4, 5]], dtype=np.int32),
                                volumes=np.array([_PRISM_VOLUME])),

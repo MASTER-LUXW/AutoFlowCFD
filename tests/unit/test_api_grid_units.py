@@ -62,7 +62,7 @@ def test_get_volume_mesh_info_counts_tets_and_prisms():
     vm = VolumeMeshData(
         nodes=NodeArray(x=np.arange(7.0), y=np.zeros(7), z=np.zeros(7)),
         cells=TetrahedralCells(connectivity=np.array([[0, 1, 2, 6]], dtype=np.int32), volumes=np.array([1.0])),
-        boundaries=BoundaryMap(groups={}, bc_types={}),
+        boundaries=BoundaryMap(groups={}, bc_types={}, faces={}),
         metadata=GridMetadata(node_count=7, cell_count=2, boundary_groups=[], file_format="test"),
         prism_cells=PrismCells(connectivity=np.array([[0, 1, 2, 3, 4, 5]], dtype=np.int32), volumes=np.array([1.0])),
     )

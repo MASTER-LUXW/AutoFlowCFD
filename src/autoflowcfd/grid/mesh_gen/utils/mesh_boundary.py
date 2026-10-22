@@ -4,9 +4,11 @@
   每个外部面落在一个输入面网格三角形上、每个三角形被外部面恰好覆盖，否则报错（网格非流形 / 不封闭，或修补改动了
   输入表面）。
 - `map_boundaries_by_geometry`：外部工具生成的体网格——节点与面网格无关，只能按位置近似匹配；匹配不上的外部面报错。
-- `match_points_to_surface_groups`：点到面网格边界组的唯一匹配实现（先几何包含、其余按位置近似；
-  `map_boundaries_by_geometry`、`exterior_faces_by_group` 与求解期逐面打标签
-  `face_connectivity_boundary_tags.tag_boundary_groups_by_geometry` 共用）。
+- `label_partial_mesh_boundaries`：调试用局部网格（只导出生成管线的一段），不在输入表面上的外部面归 'INTERFACE'。
+- `match_points_to_surface_groups`：点到面网格边界组的唯一匹配实现（先几何包含、其余按位置近似）。
+
+三者都逐面给出边界组（`BoundaryMap.faces`，见该类文档）——之后的一切消费方（求解期打标签、壁面距离、周期配对、
+导出）都读它，不再回到原始面网格做几何匹配。
 """
 
 import numpy as np
@@ -135,18 +137,6 @@ def _classify_exterior_faces(nodes, faces, surface_nodes, surface_faces, surface
     )
 
 
-def _groups_from_faces(names, owner, group, bc_source):
-    groups, bc_types = {}, {}
-    for gi, name in enumerate(names):
-        cells = np.unique(owner[group == gi])
-        if len(cells) == 0:
-            continue
-        groups[name] = cells.astype(np.int32)
-        if name in bc_source:
-            bc_types[name] = bc_source[name]
-    return groups, bc_types
-
-
 def map_generated_boundaries(
     nodes: np.ndarray,
     prism_cells: np.ndarray,
@@ -169,8 +159,8 @@ def map_generated_boundaries(
     （内部缺口、或修补移动了表面点），直接报错——按这份网格给出的边界条件会是错的。
 
     Returns:
-        BoundaryMap：组名 -> 拥有该组外部面的单元（全局混合编号：棱柱 [0,n_prism)、四面体其后）；
-        边界条件类型取面网格自己的（没有类型的组不编造默认值，由求解器报错）。
+        BoundaryMap：逐面边界组（`faces`）与拥有这些面的单元（`groups`，全局混合编号：棱柱 [0,n_prism)、四面体
+        其后）；边界条件类型取面网格自己的。
 
     Raises:
         RuntimeError: 有面被超过两个单元共享。
@@ -202,12 +192,13 @@ def map_generated_boundaries(
         raise ValueError("体网格外表面没有恰好覆盖输入面网格：" + "；".join(parts)
                          + "。体网格内部有缺口，或修补移动了表面点——按这份网格给出的边界条件是错的。")
 
-    groups, bc_types = _groups_from_faces(ext["names"], ext["owner"], ext["group"], surface_boundaries.bc_types)
+    bmap = BoundaryMap.from_exterior_faces(ext["names"], ext["face_nodes"], ext["owner"], ext["group"],
+                                           surface_boundaries.bc_types)
     logger.info(
         f"Generated-mesh boundary mapping: {len(host)} exterior faces cover the {len(ext['tri_area'])} input "
-        f"surface triangles exactly, {len(groups)} group(s): {[(n, len(c)) for n, c in groups.items()]}"
+        f"surface triangles exactly, {len(bmap.groups)} group(s): {bmap.face_counts()}"
     )
-    return BoundaryMap(groups=groups, bc_types=bc_types)
+    return bmap
 
 
 def label_partial_mesh_boundaries(
@@ -219,77 +210,17 @@ def label_partial_mesh_boundaries(
     surface_boundaries: 'BoundaryMap',
 ) -> 'BoundaryMap':
     """调试用局部网格（`--core-only` 等只导出管线某一段）的边界标注：落在输入面网格上的外部面取所在三角形的组，
-    其余外部面（与未导出部分之间的界面）的所属单元归入 'INTERFACE'。局部网格本来就不封闭，不做覆盖校验。"""
+    其余外部面（与未导出部分之间的界面）归入 'INTERFACE'。局部网格本来就不封闭，不做覆盖校验。"""
     from ...schema.grid_boundaries import BoundaryMap
 
     ext = _classify_exterior_faces(nodes, _mixed_faces(nodes, prism_cells, tet_cells, strict=False),
                                    surface_nodes, surface_faces, surface_boundaries)
-    groups, bc_types = _groups_from_faces(ext["names"], ext["owner"], ext["group"], surface_boundaries.bc_types)
-    interface = np.unique(ext["owner"][ext["group"] < 0])
-    if len(interface):
-        groups["INTERFACE"] = interface.astype(np.int32)
-        bc_types["INTERFACE"] = "INTERFACE"
-    return BoundaryMap(groups=groups, bc_types=bc_types)
-
-
-def exterior_faces_by_group(volume_mesh) -> Dict[str, np.ndarray]:
-    """体网格每个边界组的外部面（节点编号，(n, 3)），逐面判定归属——不经过单元级分组。
-
-    单元级分组（`BoundaryMap.groups` 是单元列表）在角上有歧义：一个单元同时拥有两个组的外部面时出现在两个
-    组里，按单元反推边界面会把它的两个面同时写进两个组（cube_demo 导出的体网格因此多出 316 个重复/错组的
-    边界面）。这里按面网格逐面判定，判据随网格来源：
-
-    - 本项目生成的网格（`metadata.file_format == "hybrid"`）：外部面精确落在面网格三角形上，几何包含判据
-      （与 `map_generated_boundaries` 同一个分类核心），对不上直接报错；
-    - 生成管线某一段的调试局部网格（`"partial"`，`--bl-only`/`--core-only`）：同一判据，不在输入表面上的面
-      （与未导出部分之间的界面）归入 'INTERFACE'；
-    - 外部导入的网格：表面可能被重新三角化，用导入时同一套位置近似匹配（`match_points_to_surface_groups`，
-      容差系数 0.75），匹配不上直接报错——与导入时 `map_boundaries_by_geometry` 一致；
-    - 没有面网格数据：只在单元级分组没有歧义（没有单元同时属于多个组）时按单元分组，否则报错。
-    """
-    nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
-    prism = volume_mesh.prism_cells.connectivity if volume_mesh.prism_cells is not None else np.empty((0, 6), np.int64)
-    tets = volume_mesh.cells.connectivity
-    surface = getattr(volume_mesh, "surface_mesh", None)
-    if surface is not None:
-        fmt = getattr(volume_mesh.metadata, "file_format", None)
-        if fmt in ("hybrid", "partial"):
-            ext = _classify_exterior_faces(nodes, _mixed_faces(nodes, prism, tets, strict=fmt == "hybrid"),
-                                           surface["nodes"], surface["faces"], surface["boundaries"])
-            off = ext["group"] < 0
-            if off.any() and fmt == "hybrid":
-                raise ValueError(f"{int(off.sum())} 个外部面不在输入面网格上，无法确定边界组")
-            out = {name: ext["face_nodes"][ext["group"] == gi] for gi, name in enumerate(ext["names"])
-                   if (ext["group"] == gi).any()}
-            if off.any():
-                out["INTERFACE"] = ext["face_nodes"][off]
-            return out
-        faces = volume_mesh.ensure_faces_exist()
-        bidx = faces.get_boundary_face_indices()
-        face_nodes = faces.node_connectivity[bidx].astype(np.int64)
-        names, group = match_points_to_surface_groups(
-            nodes[face_nodes].mean(axis=1), surface["nodes"], surface["faces"], surface["boundaries"].groups,
-            _EXTERNAL_MATCH_TOLERANCE_FACTOR)
-        _require_all_matched(group, nodes[face_nodes])
-        return {name: face_nodes[group == gi] for gi, name in enumerate(names) if (group == gi).any()}
-
-    faces = volume_mesh.ensure_faces_exist()
-    bidx = faces.get_boundary_face_indices()
-    owners = faces.connectivity[bidx, 0]
-    face_nodes = faces.node_connectivity[bidx].astype(np.int64)
-    membership = np.zeros(volume_mesh.cell_count, dtype=np.int64)
-    for cells in volume_mesh.boundaries.groups.values():
-        membership[np.asarray(cells)] += 1
-    if (membership[owners] > 1).any():
-        raise ValueError(
-            f"{int((membership[owners] > 1).sum())} 个外部面的所属单元同时属于多个边界组，没有面网格数据无法逐面确定"
-            "归属（按单元反推会把这些面同时写进多个组）")
-    out = {}
-    for name, cells in volume_mesh.boundaries.groups.items():
-        in_group = np.zeros(volume_mesh.cell_count, dtype=bool)
-        in_group[np.asarray(cells)] = True
-        out[name] = face_nodes[in_group[owners]]
-    return out
+    names, group = list(ext["names"]), ext["group"].copy()
+    if (group < 0).any():
+        group[group < 0] = len(names)
+        names.append("INTERFACE")
+    return BoundaryMap.from_exterior_faces(names, ext["face_nodes"], ext["owner"], group,
+                                           {**surface_boundaries.bc_types, "INTERFACE": "INTERFACE"})
 
 
 def match_points_to_surface_groups(
@@ -365,8 +296,7 @@ def map_boundaries_by_geometry(
     匹配：容差为最近面网格三角形外接半径代理量的 `distance_tolerance_factor` 倍（随局部网格尺度缩放）。
 
     每个外部面都必须匹配到一个组，否则报错（2026-10-20 以前未匹配面的所属单元放进 'UNCLASSIFIED' 并按 WALL 处理，
-    面网格没有任何组时全部外部面都这样处理）。组成员按面归属构建：组 = 拥有该组外部面的单元，一个单元同时拥有两个
-    组的外部面时属于两个组（此前按单元覆盖写、只留最后一个组，角部单元从另一个组里消失）。
+    面网格没有任何组时全部外部面都这样处理）。边界组逐面给出（`BoundaryMap.faces`）。
 
     Args:
         volume_mesh: 外部解析的体网格（`nas_parser_volume.parse_volume_mesh_nas` 的输出）。
@@ -374,8 +304,8 @@ def map_boundaries_by_geometry(
         distance_tolerance_factor: 见上。
 
     Returns:
-        BoundaryMap：单元编号为全局混合编号（棱柱 [0, n_prism)、四面体其后，与 `map_generated_boundaries` 相同）；
-        边界条件类型取面网格自己的（没有类型的组不编造默认值）。
+        BoundaryMap：逐面边界组与拥有这些面的单元（全局混合编号，与 `map_generated_boundaries` 相同）；边界条件
+        类型取面网格自己的。
 
     Raises:
         ValueError: 体网格没有外部面、面网格没有边界组，或有外部面匹配不到任何组。
@@ -403,9 +333,10 @@ def map_boundaries_by_geometry(
     )
     _require_all_matched(group, face_corners)
 
-    groups, bc_types = _groups_from_faces(names, owner, group, surface_grid.boundaries.bc_types)
+    bmap = BoundaryMap.from_exterior_faces(names, faces.node_connectivity[boundary_face_idx], owner, group,
+                                           surface_grid.boundaries.bc_types)
     logger.info(
-        f"Geometric boundary mapping completed: {len(boundary_face_idx)} exterior faces, {len(groups)} group(s): "
-        f"{[(n, len(c)) for n, c in groups.items()]}"
+        f"Geometric boundary mapping completed: {len(boundary_face_idx)} exterior faces, {len(bmap.groups)} group(s): "
+        f"{bmap.face_counts()}"
     )
-    return BoundaryMap(groups=groups, bc_types=bc_types)
+    return bmap

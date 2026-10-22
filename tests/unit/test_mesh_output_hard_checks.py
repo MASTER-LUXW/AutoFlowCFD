@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import (
-    exterior_faces_by_group, map_boundaries_by_geometry, map_generated_boundaries,
+    map_boundaries_by_geometry, map_generated_boundaries,
 )
 from autoflowcfd.grid.schema.grid_boundaries import BoundaryMap
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
@@ -101,13 +101,3 @@ def test_external_mapping_unmatched_faces_are_an_error():
     vm, nodes, tets = _volume_mesh()
     with pytest.raises(ValueError, match="没有任何边界组"):
         map_boundaries_by_geometry(vm, _external(vm, nodes, BoundaryMap(groups={}, bc_types={})))
-
-
-def test_external_exterior_faces_by_group_unmatched_is_an_error():
-    vm, _, _ = _volume_mesh()
-    sb = vm.surface_mesh["boundaries"]
-    vm.surface_mesh["boundaries"] = BoundaryMap(groups={k: v for k, v in sb.groups.items() if k != "x_min"},
-                                                bc_types={k: v for k, v in sb.bc_types.items() if k != "x_min"})
-    vm.metadata.file_format = "external_volume_mesh"
-    with pytest.raises(ValueError, match="匹配不到面网格的任何边界组"):
-        exterior_faces_by_group(vm)

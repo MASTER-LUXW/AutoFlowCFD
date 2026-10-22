@@ -43,9 +43,9 @@ def _mesh(order, layout):
     mesh.load_from_volume_mesh(SimpleNamespace(
         cell_count=3, nodes=_MockNodes(nodes), cells=_MockCells(tets),
         prism_cells=_MockCells(np.array([gid], dtype=np.int32))))
-    fc = mesh.face_connectivity
-    mesh.boundary_groups = {"farfield": np.unique(fc.owner_cell[fc.is_boundary]).astype(np.int64)}
-    mesh.boundary_bc_types = {"farfield": "FARFIELD"}
+    from tests.unit._boundary_groups import tag_all_boundary_faces
+
+    tag_all_boundary_faces(mesh)
     return mesh
 
 

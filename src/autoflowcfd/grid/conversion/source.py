@@ -59,8 +59,9 @@ def _flatten_groups(names: List[str], faces_by_group: Dict[str, np.ndarray]):
 
 def load_volume_mesh_nas(path: str, units: str = "mm"):
     """读体网格 .nas（GRID + CTETRA/CPENTA）为 `VolumeMeshData`，不做任何修复或重新生成（`grid convert` 与
-    后处理共用）。文件里同时有 CTRIA3 边界面（本项目导出的体网格、ANSA 体网格导出都有）时，把这些带 PSHELL
-    分组的三角形挂成 `surface_mesh`，外部面由此逐面定组（`mesh_boundary.exterior_faces_by_group`）。
+    后处理共用）。文件里同时有 CTRIA3 边界面（本项目导出的体网格、ANSA 体网格导出都有）时，外部面按这些带 PSHELL
+    分组的三角形逐面定组（`mesh_boundary.map_boundaries_by_geometry`，定不了组即报错），三角形挂成 `surface_mesh`；
+    没有 CTRIA3 时没有边界组。
 
     Raises:
         ValueError: 文件里没有 CTETRA/CPENTA（是面网格）
@@ -72,7 +73,11 @@ def load_volume_mesh_nas(path: str, units: str = "mm"):
         raise ValueError(f"'{path}' 没有 CTETRA/CPENTA 卡片，是面网格而不是体网格")
     vol = parse_volume_mesh_nas(path, units=units)
     if _has_shell_cards(path):
+        from ..mesh_gen.utils.mesh_boundary import map_boundaries_by_geometry
+
         shell = NASParser(path, units=units).parse()
+        vol.boundaries = map_boundaries_by_geometry(vol, shell)
+        vol.metadata.boundary_groups = list(vol.boundaries.groups)
         vol.surface_mesh = {
             "nodes": np.column_stack([shell.nodes.x, shell.nodes.y, shell.nodes.z]),
             "faces": shell.cells.connectivity,
@@ -84,8 +89,8 @@ def load_volume_mesh_nas(path: str, units: str = "mm"):
 def load_convertible_mesh(path: str, units: str = "mm") -> ConvertibleMesh:
     """读 .nas 网格。
 
-    - 含 CTETRA/CPENTA：体网格（`load_volume_mesh_nas`）。带 CTRIA3 边界面时外部面按这些三角形逐面定组
-      （`exterior_faces_by_group`，定不了组即报错）；没有 CTRIA3 时全部外部面归 'exterior'。
+    - 含 CTETRA/CPENTA：体网格（`load_volume_mesh_nas`）。带 CTRIA3 边界面时取其逐面边界组；没有 CTRIA3 时
+      全部外部面归 'exterior'。
     - 否则：面网格（`NASParser`），三角形按 PSHELL 分组，不属于任何组的归 'ungrouped'。
 
     Args:
@@ -95,17 +100,14 @@ def load_convertible_mesh(path: str, units: str = "mm") -> ConvertibleMesh:
     from ..nas_io.parser_core import NASParser
 
     if _has_volume_cards(path):
-        from ..mesh_gen.utils.mesh_boundary import exterior_faces_by_group
-
         vol = load_volume_mesh_nas(path, units=units)
         nodes = np.column_stack([vol.nodes.x, vol.nodes.y, vol.nodes.z])
         prisms = vol.prism_cells.connectivity if vol.prism_cells is not None else np.empty((0, 6), np.int64)
         tets = vol.cells.connectivity
         bc_types: Dict[str, str] = {}
-        surface = getattr(vol, "surface_mesh", None)
-        if surface is not None:
-            faces_by_group = exterior_faces_by_group(vol)
-            bc_types = dict(surface["boundaries"].bc_types)
+        if vol.boundaries.faces:
+            faces_by_group = dict(vol.boundaries.faces)
+            bc_types = dict(vol.boundaries.bc_types)
         else:
             faces = vol.ensure_faces_exist()
             faces_by_group = {"exterior": faces.node_connectivity[faces.get_boundary_face_indices()]}

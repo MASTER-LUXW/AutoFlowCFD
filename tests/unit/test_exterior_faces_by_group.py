@@ -1,8 +1,8 @@
-"""边界面逐面分组（2026-10-09，`mesh_boundary.exterior_faces_by_group`）。
+"""体网格的逐面边界组（`BoundaryMap.faces`，2026-10-22 I-130；2026-10-09 起导出端已逐面判定）。
 
-此前导出端按单元级分组反推边界面：角上单元同时拥有两个组的外部面时出现在两个组里，它的两个面被同时写进两个
-组——cube_demo 导出的体网格 39488 个外部面写出了 39804 个 CTRIA3。PSHELL 名称还写成边界条件类型的小写，
-两个 WALL 组同名、原始组名丢失。
+2026-10-09 以前导出端按单元级分组反推边界面：角上单元同时拥有两个组的外部面时出现在两个组里，它的两个面被同时
+写进两个组——cube_demo 导出的体网格 39488 个外部面写出了 39804 个 CTRIA3。PSHELL 名称还写成边界条件类型的小写，
+两个 WALL 组同名、原始组名丢失。现在边界组本身逐面存储，旧格式（只有单元下标）的体网格被拒绝。
 """
 
 import re
@@ -10,7 +10,8 @@ import re
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import exterior_faces_by_group, map_generated_boundaries
+from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import map_generated_boundaries
+from autoflowcfd.grid.schema.grid_boundaries import BoundaryMap
 from autoflowcfd.grid.nas_io.nas_export import export_volume_mesh_to_nas
 from autoflowcfd.grid.schema.grid_cells import TetrahedralCells
 from autoflowcfd.grid.schema.grid_data import VolumeMeshData
@@ -38,7 +39,7 @@ def test_each_exterior_face_lands_in_exactly_one_group():
     corner_cells = sum(len(c) for c in vm.boundaries.groups.values()) - len(
         np.unique(np.concatenate(list(vm.boundaries.groups.values()))))
     assert corner_cells > 0                          # 确有同时属于多个组的单元
-    by_group = exterior_faces_by_group(vm)
+    by_group = vm.boundaries.faces
     all_faces = np.vstack(list(by_group.values()))
     assert len(all_faces) == len(_exterior(tets)[0])  # 不重不漏
     assert len({tuple(sorted(f)) for f in all_faces.tolist()}) == len(all_faces)
@@ -47,10 +48,19 @@ def test_each_exterior_face_lands_in_exactly_one_group():
         assert np.allclose(nodes[faces][..., axis], value)   # 每个面都在自己那个立方体面上
 
 
-def test_ambiguous_cell_groups_without_surface_data_are_rejected():
+def test_old_format_volume_mesh_is_rejected():
+    """边界组只有单元下标的旧格式：构造即报错；pickle 读入不经过 __post_init__，加载成高阶网格时报错。"""
+    from types import SimpleNamespace
+
+    from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+
     vm, _, _ = _volume_mesh(with_surface=False)
-    with pytest.raises(ValueError, match="同时属于多个边界组"):
-        exterior_faces_by_group(vm)
+    old = BoundaryMap(groups=dict(vm.boundaries.groups), bc_types=dict(vm.boundaries.bc_types))
+    with pytest.raises(ValueError, match="逐面"):
+        VolumeMeshData(nodes=vm.nodes, cells=vm.cells, boundaries=old, metadata=vm.metadata)
+    unpickled = SimpleNamespace(**{**vars(vm), "boundaries": SimpleNamespace(groups=old.groups, bc_types=old.bc_types)})
+    with pytest.raises(ValueError, match="逐面"):
+        HighOrderMesh(order=1).load_from_volume_mesh(unpickled)
 
 
 def test_exported_nas_has_one_ctria3_per_exterior_face_and_group_names(tmp_path):

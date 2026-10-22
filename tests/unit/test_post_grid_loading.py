@@ -73,5 +73,6 @@ def test_boundary_patches_are_tagged_per_face_with_recorded_types(tmp_path):
 def test_exterior_face_outside_every_group_is_an_error(tmp_path):
     src, _ = _volume_nas(tmp_path)
     grid = _load_grid_data(Path(src))
+    exterior = np.vstack(list(grid.boundaries.faces.values()))
     with pytest.raises(ValueError, match="不属于任何边界组"):
-        boundary_zone_ids(grid, np.array([[0, 1, 10**6]]))
+        boundary_zone_ids(grid, np.vstack([exterior, [[0, 1, 10**6]]]))

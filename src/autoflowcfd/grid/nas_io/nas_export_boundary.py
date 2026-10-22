@@ -5,8 +5,8 @@ PSHELL 属性 + 真实 CTRIA3 面单元（外加 PSOLID/ANSA_PART 元数据）�
 nas_export.py 里节点/单元几何写入的部分区分开。
 
 主要组件：
-    - write_boundaries：写出 PSHELL/CTRIA3/PSOLID/ANSA_PART 等边界元数据卡片（每组边界面逐面判定，
-      见 mesh_boundary.exterior_faces_by_group）
+    - write_boundaries：写出 PSHELL/CTRIA3/PSOLID/ANSA_PART 等边界元数据卡片（每组的边界面取逐面边界组
+      `BoundaryMap.faces`）
 """
 
 from loguru import logger
@@ -20,9 +20,7 @@ def write_boundaries(
 
     Args:
         f: 文件句柄
-        volume_mesh: VolumeMeshData——提供 `boundaries`（含 groups 和
-            bc_types 的 BoundaryMap）；每组的边界面逐面判定（见
-            mesh_boundary.exterior_faces_by_group）。
+        volume_mesh: VolumeMeshData——提供 `boundaries`（BoundaryMap：逐面边界组 faces 与 bc_types）。
         solid_pid: 已用于 CTETRA/CPENTA 元素的 PSOLID 属性 ID
             （由调用方预留，不会与 PSHELL PID 冲突）。
         start_eid: 第一个可用的 Nastran 元素 ID (n_prism + n_tets + 1)，
@@ -33,9 +31,7 @@ def write_boundaries(
         logger.warning("No boundary groups found, skipping boundary export")
         return
 
-    from ..mesh_gen.utils.mesh_boundary import exterior_faces_by_group
-
-    faces_by_group = exterior_faces_by_group(volume_mesh)
+    faces_by_group = boundaries.faces
 
     pid_counter = 1
     mid_counter = 1

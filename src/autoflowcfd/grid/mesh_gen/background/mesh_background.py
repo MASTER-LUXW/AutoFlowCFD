@@ -223,9 +223,7 @@ def generate_hybrid_mesh(
             file_format="hybrid"
         )
 
-        # 输入面网格随体网格保存（与外部导入路径同一格式）：求解期逐面打边界标签
-        # （tag_boundary_groups_for_mesh）与导出边界面（exterior_faces_by_group）都靠它逐面判定归属，
-        # 不经过有歧义的单元级分组——此前 .pkl 路径没有它，角上单元的外部面会被归到同一个组
+        # 输入面网格随体网格保存（与外部导入路径同一格式）：参考面积估算用；边界组已逐面给出（boundaries.faces）
         return VolumeMeshData(
             nodes=nodes_obj,
             cells=cells_obj,

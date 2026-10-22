@@ -28,9 +28,9 @@ def _mixed_mesh(order, tri=(0, 1, 4)):
                          prism_cells=_MockCells(np.array([[0, 1, 2, 3, 4, 5]], np.int32)))
     m = HighOrderMesh(order=order)
     m.load_from_volume_mesh(mv)
-    fc = m.face_connectivity
-    m.boundary_groups = {"farfield": np.unique(fc.owner_cell[fc.is_boundary]).astype(np.int64)}
-    m.boundary_bc_types = {"farfield": "FARFIELD"}
+    from tests.unit._boundary_groups import tag_all_boundary_faces
+
+    tag_all_boundary_faces(m)
     return m
 
 
@@ -116,9 +116,9 @@ def _two_tet_mesh(order):
                          prism_cells=_MockCells(np.array([[0, 1, 2, 3, 4, 5]], np.int32)))
     m = HighOrderMesh(order=order)
     m.load_from_volume_mesh(mv)
-    fc = m.face_connectivity
-    m.boundary_groups = {"farfield": np.unique(fc.owner_cell[fc.is_boundary]).astype(np.int64)}
-    m.boundary_bc_types = {"farfield": "FARFIELD"}
+    from tests.unit._boundary_groups import tag_all_boundary_faces
+
+    tag_all_boundary_faces(m)
     return m
 
 

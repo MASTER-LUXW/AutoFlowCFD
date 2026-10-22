@@ -15,7 +15,7 @@ from .face_connectivity import FaceTopologyError, FRFaceConnectivity
 
 def pair_periodic_boundary_faces(
     face_conn: FRFaceConnectivity,
-    boundary_groups: Dict[str, np.ndarray],
+    boundary_faces: Dict[str, np.ndarray],
     group_a: str,
     group_b: str,
     translation: np.ndarray,
@@ -40,13 +40,8 @@ def pair_periodic_boundary_faces(
 
     Args:
         face_conn: build_face_connectivity 的输出（尚未做任何周期配对）
-        boundary_groups: BoundaryMap.groups，与 tag_boundary_groups 同源。
-            注意：`BoundaryMap.groups` 是按**单元**（owner 单元 全局索引）
-            记录组成员关系的（见 grid/schema/grid_boundaries.py），而不是
-            按**面**。对于"角点单元"（同一个单元同时有多个边界面分属不同
-            边界组，例如一个既贴周期面又贴壁面的单元），仅凭单元 ID 筛选
-            会把该单元的其它边界面（如壁面）误当作候选周期面混入——必须
-            在下面用面法向量方向做二次几何筛选剔除，见函数体注释。
+        boundary_faces: 逐面边界组 `BoundaryMap.faces`（体网格节点编号的三角形），两组的面按节点三元组精确取出
+            （2026-10-22 I-130 以前按 owner 单元筛选，角点单元的其它边界面（如壁面）会混进候选，要靠法向二次筛选）。
         group_a, group_b: 待配对的两个边界组名
         translation: (3,) 从 group_a 到 group_b 的平移向量。约定：
             group_a/group_b 所在的边界面必须是与 translation 垂直的平面
@@ -74,42 +69,28 @@ def pair_periodic_boundary_faces(
         raise ValueError(f"Periodic translation vector must be nonzero, got {translation.tolist()}")
     translation_dir = translation / translation_norm
 
+    from .face_connectivity_boundary_tags import face_group_codes
+
     boundary_idx = face_conn.get_boundary_face_indices()
-    boundary_owners = face_conn.owner_cell[boundary_idx]
+    codes, _ = face_group_codes(face_conn.face_node_ids[boundary_idx],
+                                {group_a: boundary_faces[group_a], group_b: boundary_faces[group_b]})
 
-    cand_a = boundary_idx[np.isin(boundary_owners, np.asarray(boundary_groups[group_a]))]
-    cand_b = boundary_idx[np.isin(boundary_owners, np.asarray(boundary_groups[group_b]))]
-
-    # 见上方 Args 说明：按 owner 单元筛出的候选面里可能混入了角点单元
-    # 的其它边界面（例如同时贴壁面的周期角点单元，其壁面记录也会因为
-    # "owner 单元属于 group_a" 被 np.isin 选中）。周期面法向量必须与
-    # translation 方向平行，用这个纯几何约束二次过滤：明显不平行（接近
-    # 正交）的直接判定为"该单元的其它边界面误入候选集"予以剔除；
-    # 既不明显平行也不明显正交的暧昧情况直接报错，不允许靠阈值猜测。
+    # 平移周期性的定义：周期面是与平移向量垂直的平面，两组的每个面法向都必须与平移方向平行
     normal_align_parallel = 1.0 - 1e-6
-    normal_align_ambiguous_floor = 0.05
 
-    def _filter_on_periodic_plane(cand_idx: np.ndarray, group_name: str) -> np.ndarray:
-        if len(cand_idx) == 0:
-            return cand_idx
-        align = np.abs(face_conn.normal[cand_idx] @ translation_dir)
-        on_plane = align >= normal_align_parallel
-        ambiguous = (~on_plane) & (align > normal_align_ambiguous_floor)
-        if np.any(ambiguous):
-            bad_local = np.flatnonzero(ambiguous)
+    def _on_periodic_plane(idx: np.ndarray, group_name: str) -> np.ndarray:
+        align = np.abs(face_conn.normal[idx] @ translation_dir)
+        off = np.flatnonzero(align < normal_align_parallel)
+        if off.size:
             raise FaceTopologyError(
-                f"Periodic group '{group_name}': {len(bad_local)} candidate boundary "
-                f"face(s) have a normal that is neither clearly parallel nor clearly "
-                f"orthogonal to the translation direction {translation_dir.tolist()} "
-                f"(|cos θ| values: {sorted(np.round(align[bad_local], 4).tolist())}). "
-                f"This means the periodic boundary plane is not flat/perpendicular to "
-                f"the translation vector, or the mesh has a genuine non-conformity here "
-                f"- cannot silently classify these faces as in-plane or not."
-            )
-        return cand_idx[on_plane]
+                f"Periodic group '{group_name}': {off.size} face(s) have a normal not parallel to the translation "
+                f"direction {translation_dir.tolist()} (|cos θ| values: "
+                f"{sorted(np.round(align[off], 4).tolist())[:10]}) - the periodic boundary plane is not "
+                f"flat/perpendicular to the translation vector.")
+        return idx
 
-    idx_a = _filter_on_periodic_plane(cand_a, group_a)
-    idx_b = _filter_on_periodic_plane(cand_b, group_b)
+    idx_a = _on_periodic_plane(boundary_idx[codes == 0], group_a)
+    idx_b = _on_periodic_plane(boundary_idx[codes == 1], group_b)
 
     if len(idx_a) != len(idx_b):
         raise FaceTopologyError(
@@ -183,7 +164,7 @@ def apply_periodic_pairing_from_boundary_map(face_conn: FRFaceConnectivity, boun
 
     Args:
         face_conn: build_face_connectivity 的输出
-        boundary_map: 提供 .bc_types / .groups / .get_parameters() 的对象
+        boundary_map: 提供 .bc_types / .faces / .get_parameters() 的对象
             （BoundaryMap 实例，或具备同名接口的对象）
 
     Returns:
@@ -228,7 +209,7 @@ def apply_periodic_pairing_from_boundary_map(face_conn: FRFaceConnectivity, boun
             )
 
         face_conn = pair_periodic_boundary_faces(
-            face_conn, boundary_map.groups, name, paired_with, np.asarray(translation, dtype=np.float64)
+            face_conn, boundary_map.faces, name, paired_with, np.asarray(translation, dtype=np.float64)
         )
         processed.add(name)
         processed.add(paired_with)

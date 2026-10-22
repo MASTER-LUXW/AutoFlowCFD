@@ -90,7 +90,7 @@ class TestVolumeMeshData:
         volumes = TetrahedralCells.compute_volumes(nodes, connectivity)
         cells = TetrahedralCells(connectivity=connectivity, volumes=volumes)
 
-        boundaries = BoundaryMap(groups={}, bc_types={})
+        boundaries = BoundaryMap(groups={}, bc_types={}, faces={})
         metadata = GridMetadata(
             node_count=4,
             cell_count=1,
@@ -121,7 +121,7 @@ class TestVolumeMeshData:
         volumes = TetrahedralCells.compute_volumes(nodes, connectivity)
         cells = TetrahedralCells(connectivity=connectivity, volumes=volumes)
 
-        boundaries = BoundaryMap(groups={}, bc_types={})
+        boundaries = BoundaryMap(groups={}, bc_types={}, faces={})
         metadata = GridMetadata(
             node_count=4,
             cell_count=1,
@@ -152,7 +152,7 @@ class TestVolumeMeshData:
         volumes = TetrahedralCells.compute_volumes(nodes, connectivity)
         cells = TetrahedralCells(connectivity=connectivity, volumes=volumes)
 
-        boundaries = BoundaryMap(groups={}, bc_types={})
+        boundaries = BoundaryMap(groups={}, bc_types={}, faces={})
 
         # Wrong metadata
         metadata = GridMetadata(

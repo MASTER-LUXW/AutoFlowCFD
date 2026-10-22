@@ -52,7 +52,7 @@ def fake_pkl(tmp_path):
     vm = VolumeMeshData(
         nodes=NodeArray(x=np.zeros(4), y=np.zeros(4), z=np.zeros(4)),
         cells=TetrahedralCells(connectivity=np.array([[0, 1, 2, 3]], dtype=np.int32), volumes=np.array([1.0])),
-        boundaries=BoundaryMap(groups={}, bc_types={}),
+        boundaries=BoundaryMap(groups={}, bc_types={}, faces={}),
         metadata=GridMetadata(node_count=4, cell_count=1, boundary_groups=[], file_format='test'),
     )
     pkl_path = tmp_path / "volume.pkl"

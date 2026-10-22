@@ -1,31 +1,9 @@
-"""Regression test for a real, confirmed, previously-unfixed bug found
-2026-08-23 (user directly asked "tag_boundary_groups 修复了吗" after an
-earlier P1-divergence investigation flagged it as a live suspect, then
-ruled it out for cube_demo specifically because that mesh's four boundary
-groups happen not to overlap - but the underlying defect is real and
-independent of any specific mesh):
+"""边界面打组标签：逐面边界组（`BoundaryMap.faces` / `HighOrderMesh.boundary_faces`）按节点三元组精确对号
+（`face_connectivity_boundary_tags.py`，2026-10-22 I-130）。
 
-`tag_boundary_groups` matches boundary faces to a named group by their
-*owner cell* index (`np.isin(boundary_owners, cell_id_set)`), using
-`BoundaryMap.groups` which is itself a cell-granular aggregate (see
-`map_boundaries_by_geometry`'s own `volume_cell_to_boundary: Dict[int,
-str]` - a plain dict keyed by cell index that already collapses
-per-face matches). A "corner cell" that legitimately owns boundary faces
-in two different groups (e.g. one face on WALL, another on FARFIELD)
-gets ALL of its boundary faces tagged with whichever group is iterated
-last - silently applying the wrong boundary condition to the face that
-belongs to the other group.
-
-Fix: `tag_boundary_groups_by_geometry` re-does the nearest-neighbour
-geometric match directly against the *face's own centroid* (not its
-owner cell), using the same KD-tree + per-face-radius-tolerance approach
-`map_boundaries_by_geometry` already uses - each face decides its own
-group independently, so two faces sharing an owner cell can legitimately
-end up in different groups. `tag_boundary_groups_for_mesh` is the single
-entry point all four call sites (fr_solver/boundary.py,
-core/utils/solver_helpers.py, postprocess/fr_coefficients.py x2) now use;
-it prefers the geometric method when `mesh.boundary_surface_mesh` is
-available and falls back to the old cell-based method otherwise.
+历史：2026-08-23 发现按 owner 单元打标签时，同时拥有两个组外部面的角点单元的全部边界面被打成最后遍历到的那个组；
+此后改为对每个边界面中心做几何最近邻匹配（依赖原始面网格），按单元的路径在有歧义时报错（I-125）。现在边界组本身
+逐面存储，打标签是整数对号。
 """
 
 from types import SimpleNamespace
@@ -35,116 +13,71 @@ import pytest
 
 from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
 from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import (
-    tag_boundary_groups,
-    tag_boundary_groups_by_geometry,
+    face_group_codes,
     tag_boundary_groups_for_mesh,
+    triangle_keys,
 )
 
 
 def _corner_cell_face_conn():
-    """一个 owner 单元（id=0）带两个边界面：一个中心在 x=0（真实组 'WALL'），
-    一个在 x=10（真实组 'FARFIELD'）——典型的角点单元情形。
-    """
-    n_faces = 2
+    """一个 owner 单元（id=0）带两个边界面（节点 0-1-2 与 0-2-3），另有一个内部面：典型的角点单元。"""
     return FRFaceConnectivity(
-        owner_cell=np.array([0, 0], dtype=np.int32),
-        neighbor_cell=np.array([-1, -1], dtype=np.int32),
-        owner_cube_face=np.array([0, 1], dtype=np.int32),
-        neighbor_cube_face=np.array([-1, -1], dtype=np.int32),
-        normal=np.array([[-1.0, 0, 0], [1.0, 0, 0]]),
-        area=np.array([1.0, 1.0]),
-        center=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
-        face_node_ids=np.zeros((n_faces, 3), dtype=np.int32),
-        is_boundary=np.array([True, True]),
-        face_translation=np.zeros((n_faces, 3)),
+        owner_cell=np.array([0, 0, 0], dtype=np.int32),
+        neighbor_cell=np.array([-1, -1, 1], dtype=np.int32),
+        owner_cube_face=np.array([6, 7, 8], dtype=np.int32),
+        neighbor_cube_face=np.array([-1, -1, 6], dtype=np.int32),
+        normal=np.array([[-1.0, 0, 0], [0.0, -1.0, 0], [0.0, 0, 1.0]]),
+        area=np.ones(3),
+        center=np.zeros((3, 3)),
+        face_node_ids=np.array([[0, 1, 2], [0, 2, 3], [1, 2, 3]], dtype=np.int32),
+        is_boundary=np.array([True, True, False]),
+        face_translation=np.zeros((3, 3)),
     )
 
 
-def _corner_cell_surface_mesh():
-    """两个小三角形，一个在 x=0 附近（组 'WALL'），一个在 x=10 附近
-    （组 'FARFIELD'）——体网格的每个边界面各自应当匹配到的真值。
-    """
-    nodes = np.array([
-        [-0.1, 0.0, 0.0], [0.1, 0.1, 0.0], [0.1, -0.1, 0.0],  # tri 0: near x=0
-        [9.9, 0.0, 0.0], [10.1, 0.1, 0.0], [10.1, -0.1, 0.0],  # tri 1: near x=10
-    ])
-    faces = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
-    boundaries = SimpleNamespace(groups={
-        "WALL": np.array([0], dtype=np.int32),
-        "FARFIELD": np.array([1], dtype=np.int32),
-    })
-    return {"nodes": nodes, "faces": faces, "boundaries": boundaries}
+def _mesh(faces, bc_types):
+    return SimpleNamespace(face_connectivity=_corner_cell_face_conn(), boundary_faces=faces, boundary_bc_types=bc_types)
 
 
-class TestCellBasedTaggingMisattributesCornerCellFaces:
-    def test_ambiguous_corner_cell_is_an_error(self):
-        """同一个单元被两个组声称拥有（角点单元）：按单元匹配无法判定每个面属于哪个组，报错并点出具体单元与
-        冲突的组名（I-125；此前只给 warning、按最后遍历到的组把两个面都打成同一个组）。"""
-        fc = _corner_cell_face_conn()
-        boundary_groups = {
-            "WALL": np.array([0], dtype=np.int32),
-            "FARFIELD": np.array([0], dtype=np.int32),
-        }
-        with pytest.raises(ValueError, match="cell 0") as info:
-            tag_boundary_groups(fc, boundary_groups)
-        assert "WALL" in str(info.value) and "FARFIELD" in str(info.value)
-
-    def test_no_ambiguity_warning_when_groups_do_not_overlap(self):
-        """互不重叠的组（常见情形，例如 cube_demo 的四个边界组）不能触发这条
-        新警告——它只应对真正有歧义的单元触发。
-        """
-        from loguru import logger
-
-        fc = _corner_cell_face_conn()
-        boundary_groups = {
-            "WALL": np.array([0], dtype=np.int32),
-            "FARFIELD": np.array([1], dtype=np.int32),
-        }
-        messages = []
-        handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")
-        try:
-            tag_boundary_groups(fc, boundary_groups)
-        finally:
-            logger.remove(handler_id)
-
-        ambiguity_warnings = [m for m in messages if "claimed by more than one" in m]
-        assert ambiguity_warnings == []
+def test_two_faces_of_one_corner_cell_land_in_their_own_groups():
+    mesh = _mesh({"WALL": np.array([[2, 1, 0]]), "FARFIELD": np.array([[3, 0, 2]])},
+                 {"WALL": "WALL", "FARFIELD": "FARFIELD"})
+    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
+    assert group_code.tolist() == [name_to_code["WALL"], name_to_code["FARFIELD"], -1]   # 顶点顺序无关
 
 
-class TestGeometricTaggingResolvesCornerCellCorrectly:
-    def test_each_face_gets_its_own_true_group(self):
-        fc = _corner_cell_face_conn()
-        surface_mesh = _corner_cell_surface_mesh()
-
-        group_code, name_to_code = tag_boundary_groups_by_geometry(fc, surface_mesh)
-
-        assert group_code[0] == name_to_code["WALL"]
-        assert group_code[1] == name_to_code["FARFIELD"]
-        assert group_code[0] != group_code[1]
+def test_group_face_missing_from_the_mesh_is_an_error():
+    mesh = _mesh({"WALL": np.array([[0, 1, 2]]), "FARFIELD": np.array([[0, 2, 9]])},
+                 {"WALL": "WALL", "FARFIELD": "FARFIELD"})
+    with pytest.raises(ValueError, match="找不到"):
+        tag_boundary_groups_for_mesh(mesh)
 
 
-class TestUnifiedEntryPointPicksStrategyByMeshAttribute:
-    def test_uses_geometric_method_when_surface_mesh_present(self):
-        fc = _corner_cell_face_conn()
-        mesh = SimpleNamespace(
-            face_connectivity=fc,
-            boundary_groups={"WALL": np.array([0], dtype=np.int32),
-                             "FARFIELD": np.array([0], dtype=np.int32)},
-            boundary_surface_mesh=_corner_cell_surface_mesh(),
-        )
-        group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
-        assert group_code[0] != group_code[1]  # geometric method used - correctly resolved
+def test_face_claimed_by_two_groups_is_an_error():
+    mesh = _mesh({"WALL": np.array([[0, 1, 2]]), "FARFIELD": np.array([[1, 2, 0], [0, 2, 3]])},
+                 {"WALL": "WALL", "FARFIELD": "FARFIELD"})
+    with pytest.raises(ValueError, match="多个边界组"):
+        tag_boundary_groups_for_mesh(mesh)
 
-    def test_falls_back_to_cell_based_method_when_surface_mesh_absent(self):
-        fc = _corner_cell_face_conn()
-        mesh = SimpleNamespace(
-            face_connectivity=fc,
-            boundary_groups={"WALL": np.array([0], dtype=np.int32),
-                             "FARFIELD": np.array([0], dtype=np.int32)},
-            boundary_surface_mesh=None,
-        )
-        with pytest.raises(ValueError, match="原始面网格"):          # 按单元匹配：有歧义的单元报错
-            tag_boundary_groups_for_mesh(mesh)
-        mesh.boundary_groups = {"WALL": np.array([0], dtype=np.int32), "FARFIELD": np.array([1], dtype=np.int32)}
-        group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)     # 无歧义时按单元匹配照常成立
-        assert group_code[0] == group_code[1] == name_to_code["WALL"]
+
+def test_mesh_without_face_groups_is_rejected():
+    with pytest.raises(ValueError, match="逐面"):
+        tag_boundary_groups_for_mesh(_mesh(None, {}))
+
+
+def test_periodic_groups_are_not_tagged():
+    """周期面配对之后是内部面，周期组不参与边界面打标签（否则它们的面在边界面里找不到）。"""
+    mesh = _mesh({"WALL": np.array([[0, 1, 2], [0, 2, 3]]), "P": np.array([[5, 6, 7]])},
+                 {"WALL": "WALL", "P": "PERIODIC"})
+    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
+    assert set(name_to_code) == {"WALL"} and group_code[:2].tolist() == [0, 0]
+
+
+def test_keys_do_not_overflow_on_large_node_ids():
+    """(a n + b) n + c 在 n > 2.1e6 时溢出 int64；按字节拼接的键与节点数无关。"""
+    big = 3_000_000
+    tri = np.array([[big, big + 1, big + 2], [big + 2, big + 1, big], [big, big + 1, big + 3]])
+    keys = triangle_keys(tri)
+    assert keys[0] == keys[1] and keys[0] != keys[2]
+    codes, names = face_group_codes(tri[[0, 2]], {"a": tri[[2]], "b": tri[[1]]})
+    assert codes.tolist() == [1, 0] and names == ["a", "b"]

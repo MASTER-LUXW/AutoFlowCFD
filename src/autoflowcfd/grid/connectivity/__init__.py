@@ -11,17 +11,17 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
 )
 from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import (  # noqa: F401
-    tag_boundary_groups,
-    tag_boundary_groups_by_geometry,
+    face_group_codes,
     tag_boundary_groups_for_mesh,
+    triangle_keys,
 )
 
 __all__ = [
     'FRFaceConnectivity',
     'build_face_connectivity',
-    'tag_boundary_groups',
-    'tag_boundary_groups_by_geometry',
+    'face_group_codes',
     'tag_boundary_groups_for_mesh',
+    'triangle_keys',
     'CUBE_FACE_CODES',
     'CUBE_FACE_NAMES',
 ]

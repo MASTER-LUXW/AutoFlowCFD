@@ -3,7 +3,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import click
 import numpy as np
 import pytest
 
@@ -14,12 +13,14 @@ from autoflowcfd.grid.schema import (
 )
 
 _APPLY = "autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source"
+_CELL0_FACES = [[0, 1, 2], [0, 1, 3], [0, 2, 3]]          # 单元 0 的三个外部面（z=0、y=0、x=0）
+_CELL1_FACES = [[1, 2, 4], [1, 3, 4], [2, 3, 4]]          # 单元 1 的三个外部面
 
 
 def _volume_mesh_with_wall():
-    """两个共享一个面的四面体，WALL 组 = **单元** 0（`BoundaryMap.groups` 存单元索引）。
+    """两个共享一个面的四面体，WALL 组 = 单元 0 的三个外部面（逐面边界组 `BoundaryMap.faces`）。
 
-    单元 0 = [0,1,2,3] 与单元 1 共享面 [1,2,3]，故单元 0 有 3 个边界面，节点并集恰是
+    单元 0 = [0,1,2,3] 与单元 1 共享面 [1,2,3]，故单元 0 有 3 个外部面，节点并集恰是
     {0,1,2,3}；节点 4 只属于单元 1。
     """
     nodes = NodeArray(
@@ -31,8 +32,8 @@ def _volume_mesh_with_wall():
         connectivity=np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int32),
         volumes=np.array([1.0 / 6.0, 1.0 / 6.0]),
     )
-    boundaries = BoundaryMap(groups={'wall': np.array([0], dtype=np.int32)},
-                             bc_types={'wall': 'WALL'})
+    boundaries = BoundaryMap(groups={'wall': np.array([0], dtype=np.int32)}, bc_types={'wall': 'WALL'},
+                             faces={'wall': np.array(_CELL0_FACES)})
     metadata = GridMetadata(node_count=5, cell_count=2,
                             boundary_groups=['wall'], file_format='test')
     return VolumeMeshData(nodes=nodes, cells=cells, boundaries=boundaries,
@@ -81,35 +82,21 @@ class TestCliEntry:
         # 都落在三角形外，最近点是斜边中点（如 (0.5,0.5,0)），距离 sqrt(1.5)
         assert source.query(nodes[4:5])[0] == pytest.approx(np.sqrt(1.5), rel=1e-14)
 
-    def test_out_of_range_cell_index_is_a_cli_error(self):
-        vd = _volume_mesh_with_wall()
-        vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
-        solver = MagicMock()
-        solver.turb_model_name = 'SST'
-        with pytest.raises(click.ClickException, match='超出体网格单元数'):
-            compute_wall_distance_for_solver(solver, vd)
-
 
 class TestWallFacesComeFromBoundaryFaces:
-    """壁面取自 WALL 组的**边界面**（2026-09-15 一阶物理错误修复：此前用 `max(indices) >=
-    n_nodes` 猜 `BoundaryMap.groups` 存的是单元还是节点索引，恰好只在 WALL 组上猜错——
-    plate_demo 壁距 max 0.976 m，真实 4.359 m）。"""
+    """壁面取自 WALL 组的逐面边界组（2026-09-15 以前用 `max(indices) >= n_nodes` 猜 `BoundaryMap.groups` 存的是单元
+    还是节点索引，恰好只在 WALL 组上猜错——plate_demo 壁距 max 0.976 m，真实 4.359 m）。"""
 
     def test_wall_faces_are_the_wall_cells_boundary_faces(self):
         fn = wall_face_nodes(_volume_mesh_with_wall())
         assert fn.shape[0] == 3
         assert sorted(np.unique(fn[fn >= 0]).tolist()) == [0, 1, 2, 3]
 
-    def test_cell_index_out_of_range_is_rejected_not_truncated(self):
-        vd = _volume_mesh_with_wall()
-        vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
-        with pytest.raises(ValueError, match='超出体网格单元数'):
-            wall_face_nodes(vd)
-
     def test_non_wall_groups_are_excluded(self):
         """只有 bc_type == 'WALL' 的组参与壁距；SLIP_WALL（外场/风洞壁）必须排除。"""
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['tunnel'] = np.array([1], dtype=np.int32)
+        vd.boundaries.faces['tunnel'] = np.array(_CELL1_FACES)
         vd.boundaries.bc_types['tunnel'] = 'SLIP_WALL'
         fn = wall_face_nodes(vd)
         assert fn.shape[0] == 3 and 4 not in fn.tolist()
@@ -126,16 +113,12 @@ class TestWallFacesComeFromBoundaryFaces:
 
 
 def _volume_mesh_with_surface():
-    """同一对四面体，带原始面网格：单元 0 的三个边界面里只有 z=0 的 [0,1,2] 是壁面，x=0、y=0 两面是对称面
-    （单元 0 同时属于壁面组与对称面组——组交界单元）。"""
+    """同一对四面体：单元 0 的三个外部面里只有 z=0 的 [0,1,2] 是壁面，x=0、y=0 两面与单元 1 的外部面是对称面
+    （单元 0 同时拥有壁面组与对称面组的面——组交界单元）。"""
     vd = _volume_mesh_with_wall()
     vd.boundaries = BoundaryMap(groups={'wall': np.array([0], dtype=np.int32), 'sym': np.array([0, 1], dtype=np.int32)},
-                                bc_types={'wall': 'WALL', 'sym': 'SYMMETRY'})
-    surf_tris = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 4], [1, 3, 4], [2, 3, 4]])
-    vd.surface_mesh = {"nodes": vd.nodes.get_coordinates(), "faces": surf_tris,
-                       "boundaries": BoundaryMap(groups={'wall': np.array([0], dtype=np.int32),
-                                                         'sym': np.array([1, 2, 3, 4, 5], dtype=np.int32)},
-                                                 bc_types={'wall': 'WALL', 'sym': 'SYMMETRY'})}
+                                bc_types={'wall': 'WALL', 'sym': 'SYMMETRY'},
+                                faces={'wall': np.array([[0, 1, 2]]), 'sym': np.array(_CELL0_FACES[1:] + _CELL1_FACES)})
     return vd
 
 
@@ -143,7 +126,7 @@ class TestWallFacesPerFace:
     """壁面面片逐面归组 + 物理无滑移固壁判据认 bc_overrides（I-92）。"""
 
     def test_boundary_cell_of_two_groups_contributes_only_its_wall_face(self):
-        """修复前按"owner 单元属于壁面组"选取，单元 0 的三个边界面（含两个对称面）全被算成壁面。"""
+        """2026-10-17 以前按"owner 单元属于壁面组"选取，单元 0 的三个外部面（含两个对称面）全被算成壁面。"""
         faces = wall_face_nodes(_volume_mesh_with_surface())
         assert sorted(map(sorted, faces.tolist())) == [[0, 1, 2]]
 
@@ -152,12 +135,6 @@ class TestWallFacesPerFace:
         assert wall_face_nodes(vd, {'wall': {"type": "WALL", "is_no_slip": False}}).shape[0] == 0   # 覆盖成滑移壁
         both = wall_face_nodes(vd, {'sym': {"type": "WALL", "is_no_slip": True}})                    # 覆盖成无滑移壁
         assert both.shape[0] == 6
-
-    def test_cell_selection_refuses_a_wall_cell_shared_with_another_group(self):
-        vd = _volume_mesh_with_surface()
-        vd.surface_mesh = None
-        with pytest.raises(ValueError, match="同时属于别的边界组"):
-            wall_face_nodes(vd)
 
 
 def test_physical_no_slip_wall_criterion_is_shared():

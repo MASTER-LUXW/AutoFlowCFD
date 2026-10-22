@@ -207,34 +207,33 @@ class _MockCells:
         self.connectivity = connectivity
 
 
-class _MockBoundaries:
-    def __init__(self, groups, bc_types):
-        self.groups = groups
-        self.bc_types = bc_types
+def plane_boundary_map(nodes, prism_conn, tet_conn, planes, tol, bc_types, parameters=None):
+    """外部面按所在平面逐面分组，得到体网格的逐面边界映射（与生产同一格式，`BoundaryMap.faces`）。
 
-
-def attach_plane_surface_mesh(mesh, planes, tol):
-    """按边界面中心所在的平面给边界面分组，作为"原始面网格"挂到 `mesh.boundary_surface_mesh`。
-
-    `planes` 为 `[(组名, 坐标轴, 坐标值), ...]`。按单元定义的组在角/棱单元上无法判定每个面属于哪个组（一个单元
-    同时贴着两个平面），`tag_boundary_groups` 对这种单元报错（I-125）；与生产网格一样带上面网格，边界面按自身
-    位置逐面归组（`tag_boundary_groups_for_mesh` 的几何路径）。此前这些测试网格的角单元边界面被打成同一个组。
+    外部面取生产的面提取（`FaceExtractor.extract_faces_mixed`，棱柱四边形侧面按统一对角线拆成两个三角形，与求解
+    器的面连接关系同一套三角形）。`planes` 为 `[(组名, 坐标轴, 坐标值), ...]`，每个外部面的三个角点必须恰好落在
+    一个平面上。
     """
-    from autoflowcfd.grid.schema import BoundaryMap
+    from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
+    from autoflowcfd.grid.schema import BoundaryMap, NodeArray
 
-    fc = mesh.face_connectivity
-    bidx = fc.get_boundary_face_indices()
-    centers = fc.center[bidx]
-    groups = {}
-    for k, c in enumerate(centers):
-        hits = [name for name, axis, value in planes if abs(c[axis] - value) < tol]
-        if len(hits) != 1:
-            raise ValueError(f"边界面中心 {c} 落在 {hits} 上（应恰好一个平面）")
-        groups.setdefault(hits[0], []).append(k)
-    groups = {name: np.asarray(idx, dtype=np.int32) for name, idx in groups.items()}
-    bc_types = {name: (mesh.boundary_bc_types or {}).get(name, "WALL") for name in groups}
-    mesh.boundary_surface_mesh = {"nodes": np.asarray(mesh._node_coords), "faces": np.asarray(fc.face_node_ids[bidx]),
-                                  "boundaries": BoundaryMap(groups=groups, bc_types=bc_types)}
+    nodes = np.asarray(nodes, dtype=np.float64)
+    faces = FaceExtractor.extract_faces_mixed(
+        np.asarray(prism_conn, dtype=np.int32).reshape(-1, 6), np.asarray(tet_conn, dtype=np.int32).reshape(-1, 4),
+        NodeArray.from_array(nodes), strict=True)
+    bidx = faces.get_boundary_face_indices()
+    tri = np.asarray(faces.node_connectivity[bidx], dtype=np.int64)
+    corners = nodes[tri]
+    on = np.stack([np.all(np.abs(corners[:, :, axis] - value) < tol, axis=1) for _name, axis, value in planes],
+                  axis=1)
+    if not np.all(on.sum(axis=1) == 1):
+        bad = np.flatnonzero(on.sum(axis=1) != 1)
+        raise ValueError(f"{bad.size} 个外部面不在恰好一个平面上，例如中心 {corners[bad[0]].mean(axis=0)}")
+    bmap = BoundaryMap.from_exterior_faces([name for name, _a, _v in planes], tri, faces.connectivity[bidx, 0],
+                                           np.argmax(on, axis=1), bc_types)
+    if parameters:
+        bmap.parameters.update(parameters)
+    return bmap
 
 
 def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz, rotate_odd_tets=False):
@@ -284,38 +283,21 @@ def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz, rotate_odd_tets=False):
         tet_conn[1::2] = tet_conn[1::2][:, [1, 2, 0, 3]]
     n_tets = len(tet_conn)
 
-    # 边界分组：按每个 tet 的 4 个节点是否有 >=3 个落在目标边界平面上
-    # （即该 tet 恰有一个面完全位于边界平面），纯几何判据，不依赖对
-    # 6-tet 分解组合规律的手工推导。
     tol = 1e-9 * max(Lx, H, Lz, 1.0)
-
-    def face_on_plane(coord_vals, target):
-        on_plane = np.abs(coord_vals - target) < tol
-        return on_plane.sum(axis=1) >= 3
-
-    tet_coords = nodes[tet_conn]  # (n_tets,4,3)
-    groups = {
-        "wall_bottom": np.flatnonzero(face_on_plane(tet_coords[:, :, 1], 0.0)),
-        "wall_top": np.flatnonzero(face_on_plane(tet_coords[:, :, 1], H)),
-        "z_min": np.flatnonzero(face_on_plane(tet_coords[:, :, 2], 0.0)),
-        "z_max": np.flatnonzero(face_on_plane(tet_coords[:, :, 2], Lz)),
-        "x_min": np.flatnonzero(face_on_plane(tet_coords[:, :, 0], 0.0)),
-        "x_max": np.flatnonzero(face_on_plane(tet_coords[:, :, 0], Lx)),
-    }
-    bc_types = {name: "WALL" for name in groups}  # 占位，真正类型由 bc_overrides 决定
-
+    planes = [("wall_bottom", 1, 0.0), ("wall_top", 1, H), ("z_min", 2, 0.0), ("z_max", 2, Lz),
+              ("x_min", 0, 0.0), ("x_max", 0, Lx)]
     mock_volume = SimpleNamespace(
         cell_count=n_tets,
         nodes=_MockNodes(nodes),
         cells=_MockCells(tet_conn),
         prism_cells=None,
-        boundaries=_MockBoundaries(groups, bc_types),
+        # 组的类型占位，真正类型由 bc_overrides 决定
+        boundaries=plane_boundary_map(nodes, np.empty((0, 6)), tet_conn, planes, tol,
+                                      {name: "WALL" for name, _a, _v in planes}),
     )
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume, build_faces=True)
-    attach_plane_surface_mesh(mesh, [("wall_bottom", 1, 0.0), ("wall_top", 1, H), ("z_min", 2, 0.0), ("z_max", 2, Lz),
-                                     ("x_min", 0, 0.0), ("x_max", 0, Lx)], tol)
     return mesh
 
 
@@ -451,34 +433,17 @@ def build_prism_mesh_from_lines(order, x_lines, y_lines, z_lines):
 
     extent = [float(a[-1] - a[0]) for a in (x_lines, y_lines, z_lines)]
     tol = 1e-9 * max(extent + [1.0])
-
-    def face_on_plane(coord_vals, target):
-        on_plane = np.abs(coord_vals - target) < tol
-        return on_plane.sum(axis=1) >= 3
-
-    prism_coords = nodes[prism_conn]  # (n_prisms,6,3)
-    groups = {
-        "wall_bottom": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], y_lines[0])),
-        "wall_top": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], y_lines[-1])),
-        "z_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], z_lines[0])),
-        "z_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], z_lines[-1])),
-        "x_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], x_lines[0])),
-        "x_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], x_lines[-1])),
-    }
-    bc_types = {name: "WALL" for name in groups}
-
-    empty_tets = np.zeros((0, 4), dtype=np.int32)
+    planes = [("wall_bottom", 1, y_lines[0]), ("wall_top", 1, y_lines[-1]), ("z_min", 2, z_lines[0]),
+              ("z_max", 2, z_lines[-1]), ("x_min", 0, x_lines[0]), ("x_max", 0, x_lines[-1])]
     mock_volume = SimpleNamespace(
         cell_count=n_prisms,
         nodes=_MockNodes(nodes),
-        cells=_MockCells(empty_tets),
+        cells=_MockCells(np.zeros((0, 4), dtype=np.int32)),
         prism_cells=_MockCells(prism_conn),
-        boundaries=_MockBoundaries(groups, bc_types),
+        boundaries=plane_boundary_map(nodes, prism_conn, np.zeros((0, 4)), planes, tol,
+                                      {name: "WALL" for name, _a, _v in planes}),
     )
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume, build_faces=True)
-    attach_plane_surface_mesh(mesh, [("wall_bottom", 1, y_lines[0]), ("wall_top", 1, y_lines[-1]),
-                                     ("z_min", 2, z_lines[0]), ("z_max", 2, z_lines[-1]),
-                                     ("x_min", 0, x_lines[0]), ("x_max", 0, x_lines[-1])], tol)
     return mesh

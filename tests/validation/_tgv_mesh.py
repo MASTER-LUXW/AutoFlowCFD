@@ -30,9 +30,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-from autoflowcfd.grid.schema.grid_boundaries import BoundaryMap
 
-from ._channel_mesh import _MockCells, _MockNodes
+from ._channel_mesh import _MockCells, _MockNodes, plane_boundary_map
 
 
 def build_triply_periodic_tet_mesh(order, n, L):
@@ -77,36 +76,18 @@ def build_triply_periodic_tet_mesh(order, n, L):
     n_tets = len(tet_conn)
 
     tol = 1e-9 * max(L, 1.0)
-
-    def face_on_plane(coord_vals, target):
-        return (np.abs(coord_vals - target) < tol).sum(axis=1) >= 3
-
-    tet_coords = nodes[tet_conn]
-    groups = {
-        "x_min": np.flatnonzero(face_on_plane(tet_coords[:, :, 0], 0.0)),
-        "x_max": np.flatnonzero(face_on_plane(tet_coords[:, :, 0], L)),
-        "y_min": np.flatnonzero(face_on_plane(tet_coords[:, :, 1], 0.0)),
-        "y_max": np.flatnonzero(face_on_plane(tet_coords[:, :, 1], L)),
-        "z_min": np.flatnonzero(face_on_plane(tet_coords[:, :, 2], 0.0)),
-        "z_max": np.flatnonzero(face_on_plane(tet_coords[:, :, 2], L)),
-    }
-    bc_types = {name: "PERIODIC" for name in groups}
-    boundary_map = BoundaryMap(
-        groups={k: v.astype(np.int32) for k, v in groups.items()},
-        bc_types=bc_types,
-        parameters={
-            "x_min": {"paired_with": "x_max", "translation": [L, 0.0, 0.0]},
-            "y_min": {"paired_with": "y_max", "translation": [0.0, L, 0.0]},
-            "z_min": {"paired_with": "z_max", "translation": [0.0, 0.0, L]},
-        },
-    )
-
-    empty_prisms = np.zeros((0, 6), dtype=np.int32)
+    planes = [("x_min", 0, 0.0), ("x_max", 0, L), ("y_min", 1, 0.0), ("y_max", 1, L), ("z_min", 2, 0.0),
+              ("z_max", 2, L)]
+    boundary_map = plane_boundary_map(
+        nodes, np.zeros((0, 6)), tet_conn, planes, tol, {name: "PERIODIC" for name, _a, _v in planes},
+        {"x_min": {"paired_with": "x_max", "translation": [L, 0.0, 0.0]},
+         "y_min": {"paired_with": "y_max", "translation": [0.0, L, 0.0]},
+         "z_min": {"paired_with": "z_max", "translation": [0.0, 0.0, L]}})
     mock_volume = SimpleNamespace(
         cell_count=n_tets,
         nodes=_MockNodes(nodes),
         cells=_MockCells(tet_conn),
-        prism_cells=_MockCells(empty_prisms),
+        prism_cells=_MockCells(np.zeros((0, 6), dtype=np.int32)),
         boundaries=boundary_map,
     )
 

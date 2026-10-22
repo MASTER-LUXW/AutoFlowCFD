@@ -9,7 +9,7 @@ from loguru import logger
 
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, InletSEMGhostState
 
-from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh
+from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh, triangle_keys
 
 
 class BoundaryPhysics(NamedTuple):
@@ -111,10 +111,18 @@ def build_boundary_ghost_provider(mesh, ops, physics: BoundaryPhysics,
     bc_types = mesh.boundary_bc_types or {}
 
     face_conn = mesh.face_connectivity
+    boundary_idx = face_conn.get_boundary_face_indices()
+    # 声明为周期的组必须真的配对过：配对在网格加载时完成（`face_connectivity_periodic.py`），配对后的周期面是内部
+    # 面。这里防的是加载之后才把类型改成 PERIODIC——那些面仍在边界上，却没有任何边界条件
+    for name in (n for n, raw_type in bc_types.items() if raw_type == "PERIODIC"):
+        n_left = int(np.count_nonzero(np.isin(triangle_keys(face_conn.face_node_ids[boundary_idx]),
+                                              triangle_keys(mesh.boundary_faces[name]))))
+        if n_left:
+            raise ValueError(f"周期边界组 '{name}' 有 {n_left} 个面未配对（仍是边界面）：周期类型必须在网格加载之前"
+                             "给出，并带 paired_with/translation 参数")
     group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, face_conn)
     # 每个边界面都必须属于一个边界组（2026-10-09 以前没有组的边界面静默当成远场：网格内部缺口的面因此在流场
     # 内部施加来流条件——cube_demo 生成网格的 86 个缺口面里有 20 个就是这样）
-    boundary_idx = face_conn.get_boundary_face_indices()
     untagged = boundary_idx[group_code[boundary_idx] < 0]
     if len(untagged):
         centers = face_conn.center[untagged]
@@ -188,19 +196,6 @@ def build_boundary_ghost_provider(mesh, ops, physics: BoundaryPhysics,
 
     use_sem = uses_synthetic_inlet(physics.turb_model_name)
 
-    # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
-    # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的
-    # 单元必须出现在带平移向量的内部面上。
-    periodic_names = [name for name, raw_type in bc_types.items() if raw_type == "PERIODIC"]
-    if periodic_names:
-        periodic_face = (~face_conn.is_boundary) & np.any(face_conn.face_translation != 0.0, axis=1)
-    for name in periodic_names:
-        cells = np.asarray((mesh.boundary_groups or {}).get(name, ()), dtype=np.int64)
-        paired = periodic_face & (np.isin(face_conn.owner_cell, cells) | np.isin(face_conn.neighbor_cell, cells))
-        if not np.any(paired):
-            raise ValueError(f"周期边界组 '{name}' 的面未配对（网格连接关系里没有它的周期面）：周期类型必须在"
-                             "网格加载之前给出，并带 paired_with/translation 参数")
-
     code_to_config: Dict[int, Dict[str, Any]] = {}
     for name, code in name_to_code.items():
         override = bc_overrides.get(name)
@@ -212,15 +207,7 @@ def build_boundary_ghost_provider(mesh, ops, physics: BoundaryPhysics,
         if name not in bc_types:
             raise ValueError(
                 f"边界组 '{name}' 没有边界条件类型（mesh.boundary_bc_types 缺这个组，也没有 bc_overrides）")
-        raw_type = bc_types[name]
-        if raw_type == "PERIODIC":
-            # 周期面配对之后是内部面，这个组不需要幽灵态；逐面几何匹配下仍留在边界上的面说明配对失败
-            # （单元级匹配不含周期组，见 `tag_boundary_groups_for_mesh`）
-            n_left = int(np.count_nonzero(face_conn.is_boundary & (group_code == code)))
-            if n_left:
-                raise ValueError(f"周期边界组 '{name}' 有 {n_left} 个未配对的边界面（配对后的周期面是内部面），"
-                                 "检查周期面的几何对应")
-            continue
+        raw_type = bc_types[name]          # 周期组不在这里（打标签不含周期组，配对后它们的面是内部面）
         if raw_type not in type_map:
             raise ValueError(f"边界组 '{name}' 的类型 {raw_type!r} 求解器不支持（支持 {sorted(type_map)}）")
         mapped_type, default_params = type_map[raw_type]

@@ -162,7 +162,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
         if len(prism_conn) else None
     )
 
-    boundaries_obj = BoundaryMap(groups={}, bc_types={})
+    boundaries_obj = BoundaryMap(groups={}, bc_types={}, faces={})       # 边界组由 map_boundaries_by_geometry 给出
     metadata = GridMetadata(
         node_count=len(node_xyz),
         cell_count=cells_obj.count + (prism_obj.count if prism_obj else 0),

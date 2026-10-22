@@ -157,9 +157,9 @@ class VolumeMeshData:
     属性:
         nodes: 节点数组
         cells: 四面体单元数组（核心区 tetgen 填充 + 未转换为棱柱的 BL 单元）
-        boundaries: 边界映射
+        boundaries: 边界映射（体网格须逐面给出边界组 `boundaries.faces`，见 `BoundaryMap`）
         metadata: 网格元数据
-        faces: 面数据数组（用于FVM通量计算）
+        faces: 面数据（面提取结果：面角点、所属单元、面积与法向）
         surface_mesh: 原始表面网格数据，用于参考面积计算
         prism_cells: 边界层三棱柱单元（可选）。存在时，全局单元索引约定为
             [0, prism_cells.count) 是棱柱，[prism_cells.count, cell_count)
@@ -197,6 +197,7 @@ class VolumeMeshData:
                 f"Metadata cell count ({self.metadata.cell_count}) doesn't match "
                 f"actual cell count ({total_cells})"
             )
+        require_face_boundary_groups(self)
 
     @property
     def node_count(self) -> int:
@@ -266,3 +267,15 @@ class VolumeMeshData:
                 raise RuntimeError(f"Face extraction failed: {e}")
 
         return self.faces
+
+
+def require_face_boundary_groups(volume_mesh) -> None:
+    """体网格必须逐面给出边界组（`BoundaryMap.faces`）。pickle 读入不经过 `__post_init__`，加载处
+    （`HighOrderMesh.load_from_volume_mesh`）同样调用这里。
+
+    Raises:
+        ValueError: 没有逐面边界组——2026-10-22（I-130）以前写出的 .pkl 只存单元下标，需用一次性转换脚本转成新格式
+    """
+    if getattr(volume_mesh.boundaries, "faces", None) is None:
+        raise ValueError("体网格没有逐面的边界组（BoundaryMap.faces）：这是 2026-10-22 以前格式的网格（边界组只存单元"
+                         "下标），需先转换成逐面格式（重新生成 / 导入，或用一次性转换脚本）")

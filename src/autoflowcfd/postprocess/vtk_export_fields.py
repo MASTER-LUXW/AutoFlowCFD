@@ -50,35 +50,17 @@ def expand_fields(fields: Optional[List[str]], turbulence: Dict[str, np.ndarray]
 def boundary_zone_ids(grid, tri_conn: np.ndarray):
     """外部三角面 -> (BoundaryID, BoundaryTypeID, id 图例, 类型图例)。
 
-    边界组的面集合由 `mesh_boundary.exterior_faces_by_group` 逐面给出（有面网格数据时按几何包含逐面
-    归属），这里按排序后的节点三元组对号。
+    边界组的面集合就是体网格的逐面边界组（`BoundaryMap.faces`），这里按排序后的节点三元组对号
+    （`face_group_codes`：外部面不属于任何组、或组里的面不在外部面里都报错）。
     """
-    from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import exterior_faces_by_group
+    from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import face_group_codes
 
-    faces_by_group = exterior_faces_by_group(grid)
-    boundary_names = list(faces_by_group)
-    surface = getattr(grid, "surface_mesh", None)
-    bc_types = dict(surface["boundaries"].bc_types) if surface is not None else dict(grid.boundaries.bc_types)
-    group_type = [str(bc_types.get(name, _UNKNOWN_TYPE)) for name in boundary_names]
+    boundary_id, boundary_names = face_group_codes(tri_conn, grid.boundaries.faces)
+    if (boundary_id < 0).any():
+        raise ValueError(f"{int((boundary_id < 0).sum())}/{len(boundary_id)} 个外部面不属于任何边界组")
+    group_type = [str(grid.boundaries.bc_types.get(name, _UNKNOWN_TYPE)) for name in boundary_names]
     type_names = sorted(set(group_type))
 
-    n_nodes = int(grid.node_count)
-
-    def _key(tris):
-        t = np.sort(np.asarray(tris, dtype=np.int64), axis=1)
-        return (t[:, 0] * n_nodes + t[:, 1]) * n_nodes + t[:, 2]
-
-    keys = np.concatenate([_key(faces_by_group[name]) for name in boundary_names])
-    ids = np.concatenate([np.full(len(faces_by_group[name]), gi, dtype=np.int32)
-                          for gi, name in enumerate(boundary_names)])
-    order = np.argsort(keys)
-    keys, ids = keys[order], ids[order]
-    query = _key(tri_conn)
-    pos = np.minimum(np.searchsorted(keys, query), len(keys) - 1)
-    found = keys[pos] == query
-    if not found.all():
-        raise ValueError(f"{int((~found).sum())}/{len(query)} 个外部面不属于任何边界组")
-    boundary_id = ids[pos]
     type_id = np.asarray([type_names.index(t) for t in group_type], dtype=np.int32)[boundary_id]
     id_legend = [f"{i}={name}" for i, name in enumerate(boundary_names)]
     type_legend = [f"{i}={name}" for i, name in enumerate(type_names)]

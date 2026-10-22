@@ -87,7 +87,8 @@ class HighOrderMesh:
         self.face_flux_points: Optional["_KernelFaceData"] = None
         self.boundary_groups: Optional[Dict[str, np.ndarray]] = None
         self.boundary_bc_types: Optional[Dict[str, str]] = None
-        self.boundary_surface_mesh: Optional[Dict[str, object]] = None
+        # 逐面边界组（体网格节点编号的三角形，`BoundaryMap.faces`）：边界面打标签的唯一来源
+        self.boundary_faces: Optional[Dict[str, np.ndarray]] = None
 
         # 供 fr/face_flux_points/geometry.py 按需重新映射任意计算立方体坐标点到
         # 物理坐标（Flux 点 与 SPs 是不同的点集，需要能对单元重新映射）
@@ -131,9 +132,13 @@ class HighOrderMesh:
         n_prisms = len(prism_conn) if prism_conn is not None else 0
         self.n_prism_cells = n_prisms
 
-        boundary_groups = None
-        if getattr(volume_mesh_data, "boundaries", None) is not None:
-            boundary_groups = volume_mesh_data.boundaries.groups
+        # 带边界映射的体网格必须是逐面格式（旧格式 .pkl 在这里报错并提示转换）；没有边界映射的只做几何用
+        # （边界面打标签时报错）
+        boundaries = getattr(volume_mesh_data, "boundaries", None)
+        if boundaries is not None:
+            from autoflowcfd.grid.schema.grid_data import require_face_boundary_groups
+
+            require_face_boundary_groups(volume_mesh_data)
 
         self.n_cells = n_prisms + (len(tet_conn) if tet_conn is not None else 0)
 
@@ -171,15 +176,10 @@ class HighOrderMesh:
 
         logger.info(f"HighOrderMesh initialized: {self.n_cells} cells (all Jacobians verified positive)")
 
-        if getattr(volume_mesh_data, "boundaries", None) is not None:
-            self.boundary_groups = boundary_groups
-            self.boundary_bc_types = volume_mesh_data.boundaries.bc_types
-
-        # 供 tag_boundary_groups_for_mesh 做逐面几何匹配用（单元粒度的 self.boundary_groups 在角/棱单元上
-        # 无法判定每个面属于哪个组）。体网格生成、导入与 .nas 体网格求解路径都写入 volume_mesh.surface_mesh，
-        # 随 .pkl 一起保存；缺失时（合成网格、旧版 .pkl）回退到单元级别匹配，有歧义的单元报错。
-        if getattr(volume_mesh_data, "surface_mesh", None) is not None:
-            self.boundary_surface_mesh = volume_mesh_data.surface_mesh
+        if boundaries is not None:
+            self.boundary_faces = boundaries.faces
+            self.boundary_groups = boundaries.groups              # 拥有这些面的单元（由 faces 派生）
+            self.boundary_bc_types = boundaries.bc_types
 
         if build_faces:
             self.face_connectivity = build_face_connectivity(

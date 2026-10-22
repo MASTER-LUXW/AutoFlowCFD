@@ -48,17 +48,16 @@ def test_unpaired_periodic_faces_are_reported():
 
 def test_boundary_face_without_a_group_is_an_error():
     """没有组的边界面此前静默当成远场（网格内部缺口的面因此在流场内部施加来流条件）。"""
-    mesh = build_channel_mesh_prism(1, 4, 4, 2, 0.4, 0.1, 0.08)     # 有只接触 z_max 的单元
-    mesh.boundary_bc_types = dict(FULL)
-    surf = mesh.boundary_surface_mesh["boundaries"]                  # z_max 的面在面网格里没有组
-    del surf.groups["z_max"], surf.bc_types["z_max"]
+    mesh = build_channel_mesh_prism(1, 4, 4, 2, 0.4, 0.1, 0.08)
+    mesh.boundary_bc_types = {k: v for k, v in FULL.items() if k != "z_max"}
+    del mesh.boundary_faces["z_max"]                                 # z_max 的面不属于任何组
     with pytest.raises(ValueError, match="不属于任何边界组"):
         ghost_provider(mesh, _FREESTREAM)
 
 
 def test_paired_periodic_groups_need_no_ghost_state_and_do_not_claim_other_faces():
-    """周期面配对后是内部面：单元级标记不含周期组（否则同时贴着周期面与别的边界的角点单元，其余边界面会被
-    标成周期组——此前这些面静默按远场处理），求解器对它们不建幽灵态。"""
+    """周期面配对后是内部面：打标签不含周期组，求解器对它们不建幽灵态；同时贴着周期面与别的边界的角点单元，
+    其余边界面仍按各自的组标记。"""
     from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh
     from tests.validation._periodic_mesh import build_periodic_channel_mesh_x
 

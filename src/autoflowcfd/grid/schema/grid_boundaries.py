@@ -1,4 +1,4 @@
-"""网格边界条件映射结构：BoundaryMap（边界组 -> 边界面所属单元、边界类型、Property ID 与参数）。"""
+"""网格边界条件映射结构：BoundaryMap（边界组 -> 边界面 / 边界面所属单元、边界类型、Property ID 与参数）。"""
 
 import numpy as np
 from typing import Dict, List, Optional
@@ -7,13 +7,23 @@ from dataclasses import dataclass, field
 
 @dataclass
 class BoundaryMap:
-    """边界条件映射表：边界名称 -> 单元索引列表与边界类型。
+    """边界条件映射表：边界名称 -> 边界面（体网格）/ 单元下标与边界类型。
+
+    同一个类用在两处，`groups` 的含义随之不同：
+      * 面网格（`GridData`）：`groups[名]` 是属于该组的三角形下标，`faces` 为 None；
+      * 体网格（`VolumeMeshData`）：`faces[名]` 是该组的外部面——体网格节点编号的三角形 `(n, 3)`，棱柱侧面四边形按
+        面提取的统一对角线拆成两个（`mesh_gen/utils/prism_split.py`），是边界组归属的唯一事实来源；`groups[名]` 是
+        拥有这些面的单元（全局混合编号：棱柱 [0, n_prism)、四面体其后），由 `faces` 派生。
+
+    逐面存储（2026-10-22，I-130）以前体网格只存单元下标：一个单元同时拥有两个组的外部面（角 / 棱单元）时无法判定
+    每个面属于哪个组，壁面距离过包含（I-92）、角单元误打标签（I-125）、周期配对需要几何二次筛选，求解期逐面打
+    标签只能回到原始面网格做几何匹配。
 
     边界类型由解析器按 Property 名称识别（`grid/nas_io/boundary_types.py`），可用 `--bc-type` 覆盖。
 
     属性:
-        groups: 边界组字典 {boundary_name: cell_indices_array}
-               cell_indices_array: numpy int32数组，存储属于该边界的单元索引
+        groups: 边界组字典 {boundary_name: indices}（int32；面网格为三角形下标，体网格为单元下标，见上）
+        faces: 体网格的逐组外部面 {boundary_name: (n, 3) int64 节点编号}；面网格为 None
         bc_types: 边界条件类型映射 {boundary_name: bc_type}
                  支持的类型: VELOCITY_INLET, PRESSURE_OUTLET, WALL, SYMMETRY, SLIP_WALL
         property_ids: Property ID映射 {boundary_name: PID}
@@ -36,6 +46,27 @@ class BoundaryMap:
     bc_types: Dict[str, str]
     property_ids: Dict[str, int] = field(default_factory=dict)
     parameters: Dict[str, Dict] = field(default_factory=dict)
+    faces: Optional[Dict[str, np.ndarray]] = None
+
+    @classmethod
+    def from_exterior_faces(cls, names: List[str], face_nodes: np.ndarray, owner: np.ndarray, group: np.ndarray,
+                            bc_types: Dict[str, str]) -> 'BoundaryMap':
+        """体网格的边界映射：外部面 `face_nodes (n, 3)`（体网格节点编号）按 `group (n,)`（`names` 的下标）逐面
+        分组，`groups` 取拥有这些面的单元（`owner (n,)`）。没有面的组不出现；出现的组都必须在 `bc_types` 里。"""
+        face_nodes = np.asarray(face_nodes, dtype=np.int64)
+        groups: Dict[str, np.ndarray] = {}
+        faces: Dict[str, np.ndarray] = {}
+        types: Dict[str, str] = {}
+        for gi, name in enumerate(names):
+            sel = np.asarray(group) == gi
+            if not sel.any():
+                continue
+            if name not in bc_types:
+                raise ValueError(f"边界组 '{name}' 没有边界条件类型")
+            faces[name] = np.ascontiguousarray(face_nodes[sel])
+            groups[name] = np.unique(np.asarray(owner)[sel]).astype(np.int32)
+            types[name] = bc_types[name]
+        return cls(groups=groups, bc_types=types, faces=faces)
 
     def __post_init__(self):
         """验证数据结构一致性
@@ -61,12 +92,31 @@ class BoundaryMap:
                 f"property_ids contains unknown boundaries: {pid_keys - group_keys}"
             )
 
+        if self.faces is not None:
+            if set(self.faces) != group_keys:
+                raise ValueError(f"faces 与 groups 的组名不一致：{sorted(set(self.faces) ^ group_keys)}")
+            for name, tri in self.faces.items():
+                tri = np.ascontiguousarray(tri, dtype=np.int64)
+                if tri.ndim != 2 or tri.shape[1] != 3:
+                    raise ValueError(f"边界组 '{name}' 的外部面应为 (n, 3) 节点编号，得到形状 {tri.shape}")
+                self.faces[name] = tri
+
         # 确保所有数组为int32且连续
         for name, indices in self.groups.items():
             if indices.dtype != np.int32:
                 self.groups[name] = indices.astype(np.int32)
             if not indices.flags['C_CONTIGUOUS']:
                 self.groups[name] = np.ascontiguousarray(indices)
+
+    def face_counts(self) -> Dict[str, int]:
+        """体网格每个组的外部面数。
+
+        Raises:
+            ValueError: 不是体网格的边界映射（没有逐面边界组）
+        """
+        if self.faces is None:
+            raise ValueError("这份边界映射没有逐面边界组（面网格的 BoundaryMap）")
+        return {name: int(len(tri)) for name, tri in self.faces.items()}
 
     def get_boundary_type(self, boundary_name: str) -> str:
         """获取边界条件类型
@@ -191,6 +241,8 @@ class BoundaryMap:
             cells = self.groups[name]
             ds_cells = group.create_dataset(f"{prefix}/boundary_{i}/cells", data=cells)
             ds_cells.attrs['name'] = name
+            if self.faces is not None:
+                group.create_dataset(f"{prefix}/boundary_{i}/faces", data=self.faces[name])
 
             # BC类型
             group.create_dataset(
@@ -232,11 +284,14 @@ class BoundaryMap:
         bc_types = {}
         property_ids = {}
         parameters = {}
+        faces = {}
 
         for i, name in enumerate(names):
             # 加载单元索引
             cells = group[f"{prefix}/boundary_{i}/cells"][:]
             groups[name] = cells
+            if f"{prefix}/boundary_{i}/faces" in group:
+                faces[name] = group[f"{prefix}/boundary_{i}/faces"][:]
 
             # 加载BC类型
             bc_type = group[f"{prefix}/boundary_{i}/bc_type"][()].decode('utf-8')
@@ -256,5 +311,6 @@ class BoundaryMap:
             groups=groups,
             bc_types=bc_types,
             property_ids=property_ids,
-            parameters=parameters
+            parameters=parameters,
+            faces=faces if faces else None,
         )

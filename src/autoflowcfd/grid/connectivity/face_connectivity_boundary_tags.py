@@ -1,179 +1,74 @@
 """
-AutoFlowCFD - 边界面组标签打标 (从 face_connectivity.py 拆出，控制单文件行数)
+AutoFlowCFD - 边界面的边界组标签：体网格逐面边界组（`BoundaryMap.faces`，见该类文档）按节点三元组精确对号。
 
-本模块提供三个把 FRFaceConnectivity 的边界面按所属边界组
-（WALL/INLET/OUTLET/...）打标签的函数，供 fr_solver/boundary/ 的 BC
-幽灵态构建等调用点统一复用（WMLES 与气动力积分经幽灵态提供者的组编码取壁面）。
+供边界幽灵态构建（`core/fr_solver/boundary/ghost.py`）、周期配对与边界导出共用。2026-10-22（I-130）以前边界组只存
+单元下标：按单元打标签在角 / 棱单元上无从判定每个面属于哪个组，求解期只能回到原始面网格对每个边界面做几何最近邻
+匹配；现在边界组本身就是面，打标签是精确的整数对号，不涉及任何几何容差。
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
-from loguru import logger
-
-from .face_connectivity import FRFaceConnectivity
 
 
-def tag_boundary_groups(
-    face_conn: FRFaceConnectivity, boundary_groups: Dict[str, np.ndarray]
-) -> Tuple[np.ndarray, Dict[str, int]]:
-    """将边界面按所属边界组（WALL/INLET/OUTLET/...）打标签。
+def triangle_keys(tri: np.ndarray) -> np.ndarray:
+    """三角形 `(n, 3)` 节点编号 -> 与顶点顺序无关的键 `(n,)`（排序后的三个 int64 按字节拼成定长 void；不会像
+    `(a * n + b) * n + c` 那样在大网格上溢出）。"""
+    t = np.ascontiguousarray(np.sort(np.asarray(tri, dtype=np.int64).reshape(-1, 3), axis=1))
+    return t.view(np.dtype((np.void, t.dtype.itemsize * 3))).ravel()
 
-    Args:
-        face_conn: build_face_connectivity 的输出
-        boundary_groups: BoundaryMap.groups，name -> owner 单元全局索引数组
-            （沿用 grid/schema/grid_boundaries.py 的既有约定：棱柱在前、
-            四面体在后的同一套全局单元索引空间）
 
-    Returns:
-        (group_code: (n_faces,) int32，边界面对应组的整数编码，内部面/未匹配为 -1；
-         name_to_code: Dict[str,int]，组名到编码的映射)
-
-    按 owner **单元**匹配：只在每个边界单元恰好属于一个组时成立（合成网格按单元定义的组即如此）。一个单元被
-    多个组同时声称拥有（角/棱单元的两个边界面分属两个组）时，单元粒度的输入已经丢掉了"哪个面属于哪个组"，
-    无从判定——报错，要求提供原始面网格走逐面几何匹配（`tag_boundary_groups_by_geometry`）。本项目的体网格
-    生成、导入与 .nas 体网格求解路径都带原始面网格（`VolumeMeshData.surface_mesh`，随 .pkl 一起保存），走的是
-    逐面匹配。2026-10-17 以前这里只给 warning、按最后遍历到的组把该单元的全部边界面打成同一个组（I-125）。
+def face_group_codes(face_nodes: np.ndarray, faces_by_group: Dict[str, np.ndarray]) -> Tuple[np.ndarray, list]:
+    """`face_nodes (m, 3)` 中每个面所属的组：`(codes (m,) int32，-1 为不属于任何组；names)`，`codes` 是 `names`
+    （`faces_by_group` 的键顺序）里的下标。
 
     Raises:
-        ValueError: 有边界单元被多个组同时声称拥有
+        ValueError: `face_nodes` 里有重复的面；某个组的面在 `face_nodes` 里找不到（组与这些面不对应：网格与边界组
+            不是同一份，或调用方漏了面）；同一个面属于两个组
     """
-    n_faces = face_conn.n_faces
-    group_code = np.full(n_faces, -1, dtype=np.int32)
-    name_to_code: Dict[str, int] = {}
-
-    boundary_idx = face_conn.get_boundary_face_indices()
-    boundary_owners = face_conn.owner_cell[boundary_idx]
-
-    group_items = list(boundary_groups.items())
-    boundary_owner_set = set(np.unique(boundary_owners).tolist())
-    ambiguous: Dict[int, list] = {}
-    for i in range(len(group_items)):
-        name_i, cell_ids_i = group_items[i]
-        set_i = set(np.asarray(cell_ids_i).tolist()) & boundary_owner_set
-        for j in range(i + 1, len(group_items)):
-            name_j, cell_ids_j = group_items[j]
-            set_j = set(np.asarray(cell_ids_j).tolist())
-            for cid in (set_i & set_j):
-                names = ambiguous.setdefault(cid, [])
-                if name_i not in names:
-                    names.append(name_i)
-                if name_j not in names:
-                    names.append(name_j)
-
-    if ambiguous:
-        sample = list(ambiguous.items())[:10]
-        sample_str = "; ".join(f"cell {cid} in groups {names}" for cid, names in sample)
-        raise ValueError(
-            f"{len(ambiguous)} 个边界单元被多个边界组同时声称拥有（角/棱单元的边界面分属不同的组），按单元匹配"
-            f"无法判定每个面属于哪个组。请提供原始面网格（--surface-mesh，或用 grid generate-volume / "
-            f"import-volume 生成的带面网格的 .pkl）走逐面几何匹配。例：{sample_str}"
-            + (f"（另有 {len(ambiguous) - 10} 个）" if len(ambiguous) > 10 else ""))
-
-    for code, (name, cell_ids) in enumerate(boundary_groups.items()):
-        name_to_code[name] = code
-        cell_id_set = np.asarray(cell_ids)
-        mask = np.isin(boundary_owners, cell_id_set)
-        group_code[boundary_idx[mask]] = code
-
-    n_unmatched = int(np.sum(group_code[boundary_idx] < 0))
-    if n_unmatched > 0:
-        logger.warning(
-            f"{n_unmatched}/{len(boundary_idx)} boundary faces did not match any "
-            f"boundary_groups entry (owner cell not found in any group's cell-index "
-            f"list) - build_boundary_ghost_provider rejects untagged boundary faces "
-            f"(no boundary condition can be assigned to them)."
-        )
-
-    return group_code, name_to_code
+    names = list(faces_by_group)
+    keys_f = triangle_keys(face_nodes)
+    m = keys_f.size
+    parts = [triangle_keys(faces_by_group[name]) for name in names]
+    keys_g = np.concatenate(parts) if parts else keys_f[:0]
+    code_g = np.concatenate([np.full(p.size, gi, dtype=np.int32) for gi, p in enumerate(parts)]) if parts \
+        else np.empty(0, dtype=np.int32)
+    uniq, inv = np.unique(np.concatenate([keys_f, keys_g]), return_inverse=True)
+    inv_f, inv_g = inv[:m], inv[m:]
+    if np.unique(inv_f).size != m:
+        raise ValueError(f"{m - np.unique(inv_f).size} 个面在面表里重复出现")
+    position = np.full(uniq.size, -1, dtype=np.int64)
+    position[inv_f] = np.arange(m)
+    target = position[inv_g]
+    missing = target < 0
+    if missing.any():
+        lost = {names[g]: int(n) for g, n in enumerate(np.bincount(code_g[missing], minlength=len(names))) if n}
+        raise ValueError(f"边界组的面在网格的边界面里找不到：{lost}（边界组与这份网格不对应）")
+    if np.unique(target).size != target.size:
+        raise ValueError(f"{target.size - np.unique(target).size} 个边界面同时属于多个边界组")
+    codes = np.full(m, -1, dtype=np.int32)
+    codes[target] = code_g
+    return codes, names
 
 
-def tag_boundary_groups_by_geometry(
-    face_conn: FRFaceConnectivity,
-    surface_mesh: Dict[str, Any],
-    distance_tolerance_factor: float = 0.75,
-) -> Tuple[np.ndarray, Dict[str, int]]:
-    """按真实几何最近邻，逐**面**（不经过任何单元级别聚合）匹配边界组标签。
+def tag_boundary_groups_for_mesh(mesh, face_conn=None) -> Tuple[np.ndarray, Dict[str, int]]:
+    """面连接关系（缺省 `mesh.face_connectivity`；单独传入用于尚未挂回 mesh 的构造中途）的边界面打组标签：
+    `(group_code (n_faces,) int32，内部面 / 未匹配为 -1；name_to_code)`。
 
-    修复 `tag_boundary_groups` 的单元级别聚合缺陷（见该函数文档）：直接
-    对 `face_conn` 自己的每个边界面中心 `center`，用与
-    `mesh_gen/utils/mesh_boundary.py::map_boundaries_by_geometry` 完全
-    相同的算法（KD-tree 最近邻 + 按匹配到的表面面自身外接半径缩放的
-    容差）在原始表面网格的边界组三角面片里找最近邻——同一个单元的两个
-    边界面各自独立判定自己的归属，不会互相覆盖。
+    组取 `mesh.boundary_faces`（`HighOrderMesh.load_from_volume_mesh` 从 `VolumeMeshData.boundaries.faces` 取得）。
+    周期组不参与：配对之后它们的面是内部面（`face_connectivity_periodic.py`）。
 
-    Args:
-        face_conn: build_face_connectivity 的输出（要打标签的真正对象）
-        surface_mesh: VolumeMeshData.surface_mesh 字典（
-            `{'nodes': (n,3), 'faces': (m,3) 三角形连接, 'boundaries': BoundaryMap}`，
-            见 mesh_external_import.import_external_volume_mesh 的写入处，
-            'boundaries'.groups 是原始表面网格的组名->三角面片索引，与
-            `map_boundaries_by_geometry` 用的是同一份数据）
-        distance_tolerance_factor: 与 map_boundaries_by_geometry 同名参数
-            语义一致
-
-    Returns:
-        (group_code, name_to_code)，与 tag_boundary_groups 完全相同的
-        返回值约定，可直接替换该函数在所有调用点的返回值
-    """
-    from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import match_points_to_surface_groups
-
-    n_faces = face_conn.n_faces
-    group_code = np.full(n_faces, -1, dtype=np.int32)
-
-    boundary_idx = face_conn.get_boundary_face_indices()
-    surf_groups = surface_mesh["boundaries"].groups
-    name_to_code: Dict[str, int] = {name: code for code, name in enumerate(surf_groups)}
-    if len(boundary_idx) == 0:
-        return group_code, name_to_code
-
-    _names, group_index = match_points_to_surface_groups(
-        face_conn.center[boundary_idx], surface_mesh["nodes"], surface_mesh["faces"],
-        surf_groups, distance_tolerance_factor,
-    )
-    matched = group_index >= 0
-    group_code[boundary_idx[matched]] = group_index[matched]
-
-    n_unmatched = int(np.sum(~matched))
-    if n_unmatched > 0:
-        logger.warning(
-            f"{n_unmatched}/{len(boundary_idx)} boundary faces (face-level geometric "
-            f"match) did not match any surface boundary group within tolerance - "
-            f"build_boundary_ghost_provider rejects untagged boundary faces "
-            f"(no boundary condition can be assigned to them)."
-        )
-
-    return group_code, name_to_code
-
-
-def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] = None) -> Tuple[np.ndarray, Dict[str,
-                                                                                                                 int]]:
-    """所有调用点的统一入口：优先用逐面几何匹配，缺少原始面网格数据时
-    回退到单元级别匹配。
-
-    `mesh.boundary_surface_mesh`（HighOrderMesh.load_from_volume_mesh 从 VolumeMeshData.surface_mesh 透传；体网格
-    生成、导入与 .nas 体网格求解路径都带它，随 .pkl 一起保存）可用时走 `tag_boundary_groups_by_geometry`；
-    不可用时（按单元定义组的合成网格、旧版 .pkl）走 `tag_boundary_groups`，有歧义的单元报错。当时的四处调用点（BC 幽灵态构建、WMLES 壁面剪应力、
-    两处气动系数积分）此前各自重复同一段
-    `tag_boundary_groups(fc, mesh.boundary_groups or {})`，都受同一个
-    单元级别聚合缺陷影响（气动系数积分场景下，被错误纳入/排除的 WALL
-    面直接污染 Cd/Cl）——统一到这一个入口，行为对四处调用点完全一致。
-
-    Args:
-        mesh: HighOrderMesh 实例
-        face_conn: 默认使用 mesh.face_connectivity；单独传入用于尚未把
-            结果挂回 mesh 的构造中途场景
-
-    Returns:
-        (group_code, name_to_code)，与 tag_boundary_groups 完全相同的
-        返回值约定
+    Raises:
+        ValueError: 网格没有逐面边界组；或见 `face_group_codes`
     """
     fc = face_conn if face_conn is not None else mesh.face_connectivity
-    surface_mesh = getattr(mesh, "boundary_surface_mesh", None)
-    if surface_mesh is not None:
-        return tag_boundary_groups_by_geometry(fc, surface_mesh)
-    # 周期组不参与单元级匹配：周期面配对之后是内部面（`face_connectivity_periodic.py`），这些组在边界上已经
-    # 没有面；留在候选里的话，同时贴着周期面与别的边界的角点单元，其余边界面会被标成周期组
-    bc_types = getattr(mesh, "boundary_bc_types", None) or {}
-    groups = {name: cells for name, cells in (mesh.boundary_groups or {}).items() if bc_types.get(name) != "PERIODIC"}
-    return tag_boundary_groups(fc, groups)
+    faces = getattr(mesh, "boundary_faces", None)
+    if faces is None:
+        raise ValueError("网格没有逐面的边界组（mesh.boundary_faces，来自 VolumeMeshData.boundaries.faces）")
+    bc_types = mesh.boundary_bc_types or {}
+    groups = {name: tri for name, tri in faces.items() if bc_types.get(name) != "PERIODIC"}
+    boundary_idx = fc.get_boundary_face_indices()
+    codes, names = face_group_codes(fc.face_node_ids[boundary_idx], groups)
+    group_code = np.full(fc.n_faces, -1, dtype=np.int32)
+    group_code[boundary_idx] = codes
+    return group_code, {name: code for code, name in enumerate(names)}
