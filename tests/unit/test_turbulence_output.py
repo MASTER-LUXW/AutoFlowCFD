@@ -104,7 +104,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
 
 @pytest.mark.parametrize("name,label", [("k", "TurbulentKineticEnergy"), ("nu_tilde", "SANuTilde")])
 def test_vtk_writes_the_given_turbulence_fields(tmp_path, name, label):
-    from autoflowcfd.grid.structures import BoundaryMap, CellArray, GridData, GridMetadata, NodeArray
+    from autoflowcfd.grid.schema import BoundaryMap, CellArray, GridData, GridMetadata, NodeArray
     from autoflowcfd.postprocess.vtk_export import VTKExporter
 
     grid = GridData(

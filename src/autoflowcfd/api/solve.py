@@ -17,7 +17,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, field_default
-from autoflowcfd.grid.structures import VolumeMeshData
+from autoflowcfd.grid.schema import VolumeMeshData
 
 
 def _resolved_config(config_cls, config, fields: dict):

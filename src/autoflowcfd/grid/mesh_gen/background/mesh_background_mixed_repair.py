@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Tuple
 from loguru import logger
 
 if TYPE_CHECKING:
-    from autoflowcfd.grid.structures import NodeArray
+    from autoflowcfd.grid.schema import NodeArray
 
 
 def _repair_mixed_mesh_post_stage_c(

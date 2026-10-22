@@ -7,7 +7,7 @@
 import os
 from typing import Any, Dict, Optional
 
-from autoflowcfd.grid.structures import GridData, VolumeMeshData
+from autoflowcfd.grid.schema import GridData, VolumeMeshData
 
 from .config import _APIConfigMixin
 from .grid import _APIGridMixin

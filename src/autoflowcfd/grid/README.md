@@ -19,7 +19,8 @@
 ## 典型用法
 
 ```python
-from autoflowcfd.grid import NASParser, GridValidator
+from autoflowcfd.grid.nas_io.parser_core import NASParser
+from autoflowcfd.grid.validation.validator import GridValidator
 
 surface = NASParser("examples/cube_demo/cube_demo.nas", units="mm").parse()
 report = GridValidator(surface).validate()          # passed / summary / aspect_ratio / skewness / jacobian

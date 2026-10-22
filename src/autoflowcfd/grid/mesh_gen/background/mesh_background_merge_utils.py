@@ -134,7 +134,7 @@ def _stop_with_partial_mesh(
     Raises:
         PartialMeshReady: 总是抛出
     """
-    from ...structures import NodeArray, PrismCells, TetrahedralCells, GridMetadata, VolumeMeshData
+    from ...schema import NodeArray, PrismCells, TetrahedralCells, GridMetadata, VolumeMeshData
 
     from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
 

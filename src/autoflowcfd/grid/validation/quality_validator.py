@@ -37,7 +37,7 @@ from .quality_report import MeshQualityReport
 from .quality_evaluation import evaluate_quality, generate_recommendations
 
 if TYPE_CHECKING:
-    from ..structures import FaceData, VolumeMeshData
+    from ..schema import FaceData, VolumeMeshData
 
 
 class MeshQualityValidator:

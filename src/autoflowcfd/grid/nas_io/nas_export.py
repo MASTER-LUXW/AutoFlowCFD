@@ -48,7 +48,7 @@ def export_volume_mesh_to_nas(
         str: 导出文件的路径
 
     Example:
-        >>> from autoflowcfd.grid import NASParser
+        >>> from autoflowcfd.grid.nas_io.parser_core import NASParser
         >>> parser = NASParser('surface.nas')
         >>> volume_mesh = parser.generate_volume_mesh_from_surface(parser.parse())
         >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')

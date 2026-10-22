@@ -13,7 +13,7 @@ from typing import Tuple
 import numpy as np
 from loguru import logger
 
-from ..structures import CellArray
+from ..schema import CellArray
 from .nas_parser_exceptions import NASParseError
 
 # 任何一行元素卡（CTRIA3/CQUAD4）无法解析或引用了不存在的节点都报错（NASParseError，给出数量与前若干行的行号

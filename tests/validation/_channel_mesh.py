@@ -220,7 +220,7 @@ def attach_plane_surface_mesh(mesh, planes, tol):
     同时贴着两个平面），`tag_boundary_groups` 对这种单元报错（I-125）；与生产网格一样带上面网格，边界面按自身
     位置逐面归组（`tag_boundary_groups_for_mesh` 的几何路径）。此前这些测试网格的角单元边界面被打成同一个组。
     """
-    from autoflowcfd.grid.structures import BoundaryMap
+    from autoflowcfd.grid.schema import BoundaryMap
 
     fc = mesh.face_connectivity
     bidx = fc.get_boundary_face_indices()

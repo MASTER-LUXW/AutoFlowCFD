@@ -13,7 +13,7 @@ from typing import Dict
 import numpy as np
 from loguru import logger
 
-from ..structures import GridData
+from ..schema import GridData
 
 
 def check_jacobian(grid_data: GridData) -> Dict[str, float]:

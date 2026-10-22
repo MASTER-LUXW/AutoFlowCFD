@@ -21,7 +21,7 @@ from . import quality_metrics as _qm
 from .quality_evaluation import evaluate_quality, generate_recommendations
 
 if TYPE_CHECKING:
-    from ..structures import FaceData, VolumeMeshData
+    from ..schema import FaceData, VolumeMeshData
     from .quality_report import MeshQualityReport
     from .quality_validator import MeshQualityValidator
 

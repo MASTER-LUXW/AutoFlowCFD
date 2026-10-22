@@ -1,6 +1,6 @@
 """CFD 网格单元数据结构。
 
-提供 SoA（Structure of Arrays）布局的 CPU 和 GPU 单元连接关系存储，
+提供 SoA（Structure of Arrays）布局的单元连接关系存储，
 包括三角形面单元和四面体/棱柱体单元。
 """
 
@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from loguru import logger
 
 if TYPE_CHECKING:
-    import cupy as cp
     from .grid_nodes import NodeArray
 
 
@@ -100,77 +99,6 @@ class CellArray:
             形状元组 (N_cells, 3)
         """
         return self.connectivity.shape
-
-    def to_gpu(self) -> 'CupyCellArray':
-        """转换为GPU数据结构
-
-        Returns:
-            CupyCellArray: CuPy版本的单元数组
-        """
-        try:
-            import cupy as cp
-            return CupyCellArray(
-                connectivity=cp.asarray(self.connectivity),
-                cell_type=cp.asarray(self.cell_type)
-            )
-        except ImportError:
-            raise ImportError(
-                "CuPy is required for GPU operations. "
-                "Install it with: pip install cupy-cuda11x"
-            )
-
-    @classmethod
-    def from_gpu(cls, gpu_cells: 'CupyCellArray') -> 'CellArray':
-        """从GPU数据结构转换
-
-        Args:
-            gpu_cells: CuPy版本的单元数组
-
-        Returns:
-            CellArray: NumPy版本的单元数组
-        """
-        try:
-            import cupy as cp
-            return cls(
-                connectivity=cp.asnumpy(gpu_cells.connectivity),
-                cell_type=cp.asnumpy(gpu_cells.cell_type)
-            )
-        except ImportError:
-            raise ImportError(
-                "CuPy is required for GPU operations. "
-                "Install it with: pip install cupy-cuda11x"
-            )
-
-
-@dataclass
-class CupyCellArray:
-    """GPU单元数组(CuPy版本)
-
-    GPU 加速版本的 CellArray 使用 CuPy arrays.
-
-    属性:
-        connectivity: 单元连接关系 (cupy.ndarray)
-        cell_type: 单元类型数组 (cupy.ndarray)
-    """
-    connectivity: 'cp.ndarray'  # noqa: F821
-    cell_type: 'cp.ndarray'  # noqa: F821
-
-    @property
-    def count(self) -> int:
-        """获取单元数量"""
-        return len(self.connectivity)
-
-    def to_cpu(self) -> CellArray:
-        """转换为CPU数据结构
-
-        Returns:
-            CellArray: NumPy版本的单元数组
-        """
-        import cupy as cp
-        return CellArray(
-            connectivity=cp.asnumpy(self.connectivity),
-            cell_type=cp.asnumpy(self.cell_type)
-        )
 
 
 @dataclass

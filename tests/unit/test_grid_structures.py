@@ -2,7 +2,7 @@
 
 import pytest
 import numpy as np
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     NodeArray,
     CellArray,
     BoundaryMap,

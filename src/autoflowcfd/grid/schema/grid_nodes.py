@@ -1,16 +1,13 @@
 """CFD 网格节点数据结构。
 
-提供 SoA（Structure of Arrays）布局的 CPU 和 GPU 节点坐标存储，
+提供 SoA（Structure of Arrays）布局的节点坐标存储，
 优化数值计算过程中的缓存性能。
 """
 
 import numpy as np
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import Optional, Tuple
 from dataclasses import dataclass
 from loguru import logger
-
-if TYPE_CHECKING:
-    import cupy as cp
 
 
 @dataclass
@@ -83,52 +80,6 @@ class NodeArray:
         """
         return self.x.shape
 
-    def to_gpu(self) -> 'CupyNodeArray':
-        """转换为GPU数据结构
-
-        Returns:
-            CupyNodeArray: CuPy版本的节点数组
-
-        示例:
-            >>> gpu_nodes = nodes.to_gpu()
-            >>> print(type(gpu_nodes.x))  # <class 'cupy.ndarray'>
-        """
-        try:
-            import cupy as cp
-            return CupyNodeArray(
-                x=cp.asarray(self.x),
-                y=cp.asarray(self.y),
-                z=cp.asarray(self.z)
-            )
-        except ImportError:
-            raise ImportError(
-                "CuPy is required for GPU operations. "
-                "Install it with: pip install cupy-cuda11x"
-            )
-
-    @classmethod
-    def from_gpu(cls, gpu_nodes: 'CupyNodeArray') -> 'NodeArray':
-        """从GPU数据结构转换
-
-        Args:
-            gpu_nodes: CuPy版本的节点数组
-
-        Returns:
-            NodeArray: NumPy版本的节点数组
-        """
-        try:
-            import cupy as cp
-            return cls(
-                x=cp.asnumpy(gpu_nodes.x),
-                y=cp.asnumpy(gpu_nodes.y),
-                z=cp.asnumpy(gpu_nodes.z)
-            )
-        except ImportError:
-            raise ImportError(
-                "CuPy is required for GPU operations. "
-                "Install it with: pip install cupy-cuda11x"
-            )
-
     @classmethod
     def from_array(cls, nodes: np.ndarray) -> 'NodeArray':
         """从 (N, 3) 形状的 ndarray 快速构造 NodeArray。
@@ -163,37 +114,3 @@ class NodeArray:
             return np.stack([self.x, self.y, self.z], axis=-1)
         else:
             return np.stack([self.x[indices], self.y[indices], self.z[indices]], axis=-1)
-
-
-@dataclass
-class CupyNodeArray:
-    """GPU节点坐标数组(CuPy版本)
-
-    NodeArray 的 GPU 加速版本，使用 CuPy 数组。
-
-    属性:
-        x: X坐标数组 (cupy.ndarray)
-        y: Y坐标数组 (cupy.ndarray)
-        z: Z坐标数组 (cupy.ndarray)
-    """
-    x: 'cp.ndarray'  # noqa: F821  (CuPy 类型，运行时由 cupy.ndarray 实例填充)
-    y: 'cp.ndarray'  # noqa: F821
-    z: 'cp.ndarray'  # noqa: F821
-
-    @property
-    def count(self) -> int:
-        """获取节点数量"""
-        return len(self.x)
-
-    def to_cpu(self) -> NodeArray:
-        """转换为CPU数据结构
-
-        Returns:
-            NodeArray: NumPy版本的节点数组
-        """
-        import cupy as cp
-        return NodeArray(
-            x=cp.asnumpy(self.x),
-            y=cp.asnumpy(self.y),
-            z=cp.asnumpy(self.z)
-        )

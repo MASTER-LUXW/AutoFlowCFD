@@ -35,7 +35,7 @@ def test_bc_type_options():
 
 
 def _bmap():
-    from autoflowcfd.grid.structures import BoundaryMap
+    from autoflowcfd.grid.schema import BoundaryMap
 
     return BoundaryMap(groups={"inlet": np.array([0]), "fuselage": np.array([1])},
                        bc_types={"inlet": "VELOCITY_INLET", "fuselage": UNSPECIFIED})

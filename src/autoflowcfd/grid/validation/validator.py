@@ -26,7 +26,7 @@ import numpy as np
 from typing import Dict, Any, Tuple
 from loguru import logger
 
-from ..structures import GridData
+from ..schema import GridData
 from .quality_metrics import compute_triangle_aspect_ratios, compute_triangle_skewness_values
 
 

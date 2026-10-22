@@ -18,7 +18,7 @@ import numpy as np
 from typing import Tuple
 from loguru import logger
 
-from ..structures import (
+from ..schema import (
     NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData, BoundaryMap,
 )
 

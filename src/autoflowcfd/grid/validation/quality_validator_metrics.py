@@ -19,7 +19,7 @@ from . import quality_metrics as _qm
 from .quality_report import MeshQualityReport
 
 if TYPE_CHECKING:
-    from ..structures import FaceData
+    from ..schema import FaceData
     from .quality_validator import MeshQualityValidator
 
 

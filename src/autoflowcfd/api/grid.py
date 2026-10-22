@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Union
 from loguru import logger
 
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR, RHO_INF
-from autoflowcfd.grid.structures import GridData, VolumeMeshData
+from autoflowcfd.grid.schema import GridData, VolumeMeshData
 
 
 class _APIGridMixin:

@@ -9,7 +9,7 @@ import pytest
 
 from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 from autoflowcfd.core.utils.wall_distance import wall_face_nodes
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,
 )
 
@@ -120,7 +120,7 @@ class TestWallFacesComeFromBoundaryFaces:
         assert wall_face_nodes(vd).shape[0] == 0
 
     def test_misnamed_accessor_is_gone(self):
-        from autoflowcfd.grid.structures import BoundaryMap as BM
+        from autoflowcfd.grid.schema import BoundaryMap as BM
         assert not hasattr(BM, 'get_node_indices')
         assert hasattr(BM, 'get_cell_indices')
 

@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 from loguru import logger
 
-from ..structures import BoundaryMap
+from ..schema import BoundaryMap
 from .boundary_types import UNSPECIFIED, detect_boundary_type
 from .nas_parser_exceptions import NASParseError
 

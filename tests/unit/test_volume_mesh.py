@@ -1,7 +1,7 @@
 """VolumeMeshData 与四面体体积计算的单元测试。"""
 import numpy as np
 import pytest
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     NodeArray, TetrahedralCells, VolumeMeshData, BoundaryMap, GridMetadata
 )
 

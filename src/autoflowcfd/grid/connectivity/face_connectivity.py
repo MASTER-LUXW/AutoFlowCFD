@@ -33,7 +33,7 @@ import numpy as np
 from loguru import logger
 
 from ..mesh_gen.extraction.face_extractor import FaceExtractor
-from ..structures import NodeArray
+from ..schema import NodeArray
 from ..curved_mapping.curved_mapping import TET_CUBE_FACES, PRISM_CUBE_FACES
 
 # 立方体面标识 -> 整数编码，供 numpy 数组存储（避免存字符串）。

@@ -35,4 +35,3 @@ def test_matches_central_difference_of_the_flux_kernel(seed):
     for k, q in enumerate(Q):
         ref = np.stack([_central_difference(q, v) for v in range(5)], axis=-1)       # (3, 5, 5)
         np.testing.assert_allclose(J[k], ref, rtol=1e-9, atol=1e-9 * np.abs(ref).max())
-

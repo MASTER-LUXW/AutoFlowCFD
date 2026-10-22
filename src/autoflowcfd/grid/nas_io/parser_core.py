@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional, Dict
 from loguru import logger
 
-from ..structures import GridData, NodeArray, GridMetadata, VolumeMeshData
+from ..schema import GridData, NodeArray, GridMetadata, VolumeMeshData
 from .nas_parser_exceptions import NASParserError, NASFormatError, NASParseError
 from .nas_parser_nodes import parse_nodes_from_nas
 from .nas_parser_cells import parse_cells_from_nas

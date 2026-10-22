@@ -3,7 +3,8 @@
 import pytest
 import numpy as np
 from pathlib import Path
-from autoflowcfd.grid import NASParser, GridValidator
+from autoflowcfd.grid.nas_io.parser_core import NASParser
+from autoflowcfd.grid.validation.validator import GridValidator
 
 
 class TestGridParsingIntegration:

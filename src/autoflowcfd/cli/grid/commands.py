@@ -100,7 +100,7 @@ def parse(
         skip_validation: 跳过质量校验
         json_output: 以 JSON 格式输出结果
     """
-    from autoflowcfd.grid import NASParser
+    from autoflowcfd.grid.nas_io.parser_core import NASParser
 
     logger.info(f"Parsing grid file: {input_file}")
 
@@ -119,7 +119,7 @@ def parse(
         # 质量报告（若未跳过）
         quality_passed = True
         if not skip_validation:
-            from autoflowcfd.grid import GridValidator
+            from autoflowcfd.grid.validation.validator import GridValidator
             validator = GridValidator(grid_data)
             quality_report = validator.validate()
             result["quality_report"] = quality_report
@@ -202,7 +202,8 @@ def validate(
         units: 文件坐标单位（mm / m / auto）
         json_output: 以 JSON 格式输出结果
     """
-    from autoflowcfd.grid import NASParser, GridValidator
+    from autoflowcfd.grid.nas_io.parser_core import NASParser
+    from autoflowcfd.grid.validation.validator import GridValidator
 
     logger.info(f"Validating grid: {input_file}")
 
@@ -284,7 +285,7 @@ def info(input_file: str, units: str, json_output: bool) -> None:
         units: 文件坐标单位（mm / m / auto）
         json_output: 以 JSON 格式输出结果
     """
-    from autoflowcfd.grid import NASParser
+    from autoflowcfd.grid.nas_io.parser_core import NASParser
 
     logger.info(f"Getting grid info: {input_file}")
 

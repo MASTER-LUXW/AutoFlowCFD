@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from ...structures import BoundaryMap, GridData, VolumeMeshData
+    from ...schema import BoundaryMap, GridData, VolumeMeshData
 
 # 几何包含判据：法向距离相对面网格包围盒最大边长、重心坐标的下界、覆盖面积的相对误差。生成管线不移动面网格
 # 节点（BL 挤出以面网格节点为棱柱底面、外边界原样使用），外部面落在面网格三角形上只差浮点舍入；

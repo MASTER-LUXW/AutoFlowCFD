@@ -7,7 +7,7 @@ import tempfile
 import json
 import csv
 
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     GridData, NodeArray, CellArray, BoundaryMap, GridMetadata,
 )
 from autoflowcfd.postprocess.solution_vector import SolutionVector

@@ -12,7 +12,7 @@ from typing import Dict, Optional
 import numpy as np
 from loguru import logger
 
-from ..structures import GridData, VolumeMeshData
+from ..schema import GridData, VolumeMeshData
 
 
 def generate_volume_mesh_from_surface(

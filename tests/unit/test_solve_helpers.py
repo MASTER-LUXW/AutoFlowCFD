@@ -46,7 +46,7 @@ def fake_pkl(tmp_path):
     open()/pickle.load() 用的测试。
     """
     import numpy as np
-    from autoflowcfd.grid.structures import (
+    from autoflowcfd.grid.schema import (
         BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,
     )
     vm = VolumeMeshData(

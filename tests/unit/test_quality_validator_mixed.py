@@ -6,7 +6,7 @@
 
 import numpy as np
 
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     BoundaryMap, GridMetadata, NodeArray, PrismCells, TetrahedralCells, VolumeMeshData,
 )
 from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator

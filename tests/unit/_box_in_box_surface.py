@@ -4,7 +4,7 @@
 
 import numpy as np
 
-from autoflowcfd.grid.structures import BoundaryMap, CellArray, GridData, GridMetadata, NodeArray
+from autoflowcfd.grid.schema import BoundaryMap, CellArray, GridData, GridMetadata, NodeArray
 
 
 def _box_surface(lo, hi, n):

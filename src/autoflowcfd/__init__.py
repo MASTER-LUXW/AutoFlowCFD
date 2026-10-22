@@ -70,7 +70,7 @@ for _var in ('MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS', '
              'OMP_NUM_THREADS'):
     os.environ.setdefault(_var, _blas_threads)
 
-from typing import Dict  # noqa: E402  （上面先设线程环境变量，再导入任何可能拉起 numpy 的模块）
+from typing import TYPE_CHECKING, Dict  # noqa: E402  （上面先设线程环境变量，再导入任何可能拉起 numpy 的模块）
 
 from ._version import read_version  # noqa: E402
 
@@ -80,8 +80,20 @@ __maintainer__ = "Mr Lu"
 __email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
 
-# 导入主 API 类
-from .api import AutoFlowCFDAPI  # noqa: E402
+if TYPE_CHECKING:
+    from .api import AutoFlowCFDAPI
+
+
+def __getattr__(name: str):
+    """`autoflowcfd.AutoFlowCFDAPI` 在首次访问时才导入（PEP 562）。包导入因此不加载 API 及其依赖的求解器、网格生成、
+    后处理：`import autoflowcfd.grid.schema`、命令行启动只付自己用到的模块的导入代价（2026-10-22 I-123 以前包导入
+    即导入整个 API）。"""
+    if name == "AutoFlowCFDAPI":
+        from .api import AutoFlowCFDAPI
+
+        return AutoFlowCFDAPI
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # 模块元数据
 __all__ = [
@@ -128,7 +140,7 @@ def get_info() -> Dict[str, str]:
     }
 
 
-def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
+def create_api(verbose: bool = False) -> "AutoFlowCFDAPI":
     """创建 AutoFlowCFD API 实例。
 
     用于创建 API 实例的便捷函数。
@@ -143,4 +155,6 @@ def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
         >>> api = autoflowcfd.create_api()
         >>> grid = api.load_grid("car_surface.nas")
     """
+    from .api import AutoFlowCFDAPI
+
     return AutoFlowCFDAPI(verbose=verbose)

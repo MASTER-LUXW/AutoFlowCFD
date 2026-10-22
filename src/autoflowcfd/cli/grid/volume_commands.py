@@ -104,9 +104,10 @@ def generate_volume(
         units: 输入面网格的坐标单位（mm / m / auto）；导出的体网格 .nas 用同一单位（auto 时为判定出的单位），
             内部与 .pkl 一律为米
     """
-    from autoflowcfd.grid import (
-        NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
-    )
+    from autoflowcfd.grid.nas_io.parser_core import NASParser
+    from autoflowcfd.grid.nas_io.nas_export import export_volume_mesh_to_nas
+    from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
+    from autoflowcfd.grid.validation.validator import GridValidator
     from autoflowcfd.grid.mesh_gen.background.mesh_background_merge_utils import PartialMeshReady
     from autoflowcfd.grid.nas_io.units import SCALE_TO_METERS
 

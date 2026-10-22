@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd import AutoFlowCFDAPI
-from autoflowcfd.grid.structures import (
+from autoflowcfd.grid.schema import (
     BoundaryMap, GridMetadata, NodeArray, PrismCells, TetrahedralCells, VolumeMeshData,
 )
 from autoflowcfd.grid.mesh_gen.extrusion.first_layer import first_layer_height_for_yplus

@@ -1,6 +1,6 @@
 """网格数据容器类。
 
-提供 GridData、CupyGridData 和 VolumeMeshData 类，用于管理
+提供 GridData 和 VolumeMeshData 类，用于管理
 包含节点、单元、边界和元数据的完整网格结构。
 """
 
@@ -9,8 +9,8 @@ from typing import Optional, Dict
 from dataclasses import dataclass
 from loguru import logger
 
-from .grid_nodes import NodeArray, CupyNodeArray
-from .grid_cells import CellArray, CupyCellArray, TetrahedralCells, PrismCells
+from .grid_nodes import NodeArray
+from .grid_cells import CellArray, TetrahedralCells, PrismCells
 from .grid_boundaries import BoundaryMap
 from .grid_metadata import GridMetadata
 from .grid_faces import FaceData
@@ -64,25 +64,6 @@ class GridData:
     def cell_count(self) -> int:
         """获取单元数量"""
         return self.cells.count
-
-    def to_gpu(self) -> 'CupyGridData':
-        """转换为GPU数据结构"""
-        return CupyGridData(
-            nodes=self.nodes.to_gpu(),
-            cells=self.cells.to_gpu(),
-            boundaries=self.boundaries,
-            metadata=self.metadata
-        )
-
-    @classmethod
-    def from_gpu(cls, gpu_grid: 'CupyGridData') -> 'GridData':
-        """从GPU数据结构转换"""
-        return cls(
-            nodes=gpu_grid.nodes.to_cpu(),
-            cells=gpu_grid.cells.to_cpu(),
-            boundaries=gpu_grid.boundaries,
-            metadata=gpu_grid.metadata
-        )
 
     def save_hdf5(self, filepath: str) -> None:
         """保存网格数据到HDF5文件"""
@@ -164,24 +145,6 @@ class GridData:
         logger.success(f"Grid loaded from {filepath}")
 
         return cls(nodes=nodes, cells=cells, boundaries=boundaries, metadata=metadata)
-
-
-@dataclass
-class CupyGridData:
-    """GPU网格数据(CuPy版本)"""
-    nodes: CupyNodeArray
-    cells: CupyCellArray
-    boundaries: BoundaryMap
-    metadata: GridMetadata
-
-    def to_cpu(self) -> GridData:
-        """转换为CPU数据结构"""
-        return GridData(
-            nodes=self.nodes.to_cpu(),
-            cells=self.cells.to_cpu(),
-            boundaries=self.boundaries,
-            metadata=self.metadata
-        )
 
 
 @dataclass
