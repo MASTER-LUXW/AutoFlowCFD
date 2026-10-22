@@ -410,6 +410,26 @@ def test_budget_follows_available_memory(monkeypatch):
     assert "可用" in roomy.describe() and "预留" in roomy.describe()
 
 
+def test_small_problem_keeps_block_ilu_when_free_memory_is_below_the_headroom_cap(monkeypatch):
+    """余量取 `MEMORY_HEADROOM` 与本次最多分配量中较小者（I-217）：小问题在系统空闲内存低于 2 GiB 时仍取块 ILU，
+    档位不随机器上另一个大算例的内存占用而变。此前固定 2 GiB 余量，空闲 1.6 GiB 时 KB 级的块也被拒绝、退回对角
+    预处理（跨后端逐步比对的测试因此偶发失败）。"""
+    from autoflowcfd.core.time_integration.implicit.krylov.linear_solve import krylov_basis_bytes
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+    import autoflowcfd.core.utils.system_memory as sm
+
+    red = LocalReductions()
+    cip = np.arange(48) < 32
+    for available in (int(1.6 * 2 ** 30), 64 * 2 ** 20):
+        monkeypatch.setattr(sm, "available_bytes", lambda xp, a=available: a)
+        p = bb.plan_block_memory(red, cip, 27, 18, 10, 5, 2)
+        assert (p.mean, p.turbulence) == ("ilu", "ilu"), available
+        allocation = (krylov_basis_bytes((32 * 18 + 16 * 10) * 7, red, flexible=1.0)
+                      + bb.RESIDUAL_WORK_FACTOR * 48 * 27 * 7 * 8)
+        assert allocation <= p.reserve <= 2 * allocation + bb.block_mode_bytes("ilu", 32, 16, 18, 10, 5) \
+            + bb.block_mode_bytes("ilu", 32, 16, 18, 10, 2)
+
+
 def test_available_memory_query_is_positive_and_below_physical():
     from autoflowcfd.core.utils.system_memory import available_bytes
 

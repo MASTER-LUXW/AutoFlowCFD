@@ -11,7 +11,11 @@
 * Krylov 基：按 `linear_solve.py::krylov_basis_bytes` 给出（重启长度、灵活模式、单精度存储都在那里定；需要存
   预处理向量的列按所选档位定，见 `plan_block_memory`）；
 * 残差求值与 Newton 步工作数组：`RESIDUAL_WORK_FACTOR` 个按统一槽位存的 float64 状态数组；
-* `MEMORY_HEADROOM`：操作系统与其余进程的波动。
+* 余量：操作系统与其余进程的波动，取 `MEMORY_HEADROOM` 与本次最多要分配的量（Krylov 基 + 工作数组 + 两个缓存都取
+  最好一档）中较小者——防的是这次分配把机器压到换页，风险与分配量同阶。2026-10-22（I-217）以前固定 2 GiB：小问题
+  的块只要 KB 级内存，系统空闲内存一低于 2 GiB 就整体退回对角预处理（大 CFL 下 GMRES 迭代数显著上升），同一算例
+  的线性求解路径随机器当时的空闲内存而变（跨后端逐步比对的测试在机器另有大算例运行时因此偶发失败：两个求解器
+  先后规划时可用内存 1.6~2.15 GiB，一个得到块 ILU、一个得到对角预处理）。大算例的分配量远超 2 GiB，余量不变。
 
 此前是写死的 11 GiB（按 plate_demo P3 在 31.5 GB 机器上的一次实测定的），不看求解器其余部分占了多少：
 cube_demo 粗网格（28.6 万单元：9.06 万棱柱 + 19.6 万四面体）SA P2 平均流选了"两份块 Jacobi"（9.12 GiB），加上湍流块 ILU 1.07 GiB、
@@ -61,7 +65,7 @@ RESTART_FLOOR_FOR_BLOCKS = 30
 #: 缩短重启长度的步长。
 RESTART_STEP = 5
 
-#: 预留给操作系统、其余进程与分配碎片的余量（字节）。
+#: 预留给操作系统、其余进程与分配碎片的余量上限（字节）；实际余量取它与本次最多分配量中较小者（模块文档）。
 MEMORY_HEADROOM = 2 * 2 ** 30
 
 
@@ -167,11 +171,14 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
     n_tet = int(cell_is_prism.size - n_prism)
     n_vars = n_mean + n_turb
     real_entries = (n_prism * n_real_prism + n_tet * n_real_tet) * n_vars
-    fixed = RESIDUAL_WORK_FACTOR * cell_is_prism.size * n_sps * n_vars * 8 + MEMORY_HEADROOM
+    work = RESIDUAL_WORK_FACTOR * cell_is_prism.size * n_sps * n_vars * 8
+    sizes = (n_prism, n_tet, n_real_prism, n_real_tet)
+    best_blocks = block_mode_bytes("ilu", *sizes, n_mean) + (block_mode_bytes("ilu", *sizes, n_turb) if n_turb else 0)
     available = available_bytes(red.xp)
 
     def plan(flexible_fraction: float, restart_cap: Optional[int]) -> BlockPlan:
-        reserve = krylov_basis_bytes(real_entries, red, flexible=flexible_fraction, restart=restart_cap) + fixed
+        allocation = krylov_basis_bytes(real_entries, red, flexible=flexible_fraction, restart=restart_cap) + work
+        reserve = allocation + min(MEMORY_HEADROOM, allocation + best_blocks)
         budget = int(red.min(red.xp.asarray([float(max(available - reserve, 0))])))
         return plan_for_budget(cell_is_prism, n_real_prism, n_real_tet, n_mean, n_turb, budget, available, reserve,
                                restart_cap)
