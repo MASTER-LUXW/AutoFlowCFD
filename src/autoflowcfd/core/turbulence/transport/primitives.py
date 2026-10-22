@@ -29,6 +29,15 @@ from .faces import precompute_scalar_convection_geometry
 from .omega_wall import _compute_open_boundary_face_mask, _compute_wall_dirichlet_face_mask
 
 
+def wall_condition_kwargs(default_wall_zero, wall_zero_face, wall_value) -> dict:
+    """标量对流 / 扩散残差的壁面条件关键字（CPU 与 GPU 两个原语类共用）：`wall_value=(逐面值, 是否施加)` 给出时为
+    非零 Dirichlet 值，否则为零值掩码（`wall_zero_face` 缺省取 `default_wall_zero`，即物理无滑移壁）。"""
+    if wall_value is not None:
+        value_face, has_face = wall_value
+        return {"wall_dirichlet_value_face": value_face, "has_wall_dirichlet_value": has_face}
+    return {"wall_dirichlet_zero_face": default_wall_zero if wall_zero_face is None else wall_zero_face}
+
+
 def prepare_convection_geometry(solver, flat_face_override=None):
     """标量对流的共享几何（只依赖平均流），见 `compute_turbulence_transport_residual`
     的 `conv_geom` 参数。"""
@@ -61,23 +70,16 @@ class CpuScalarTransport:
     def gradient(self, phi):
         return compute_physical_scalar_gradient(np.ascontiguousarray(phi), self.solver.mesh, self.solver.ops)
 
-    def _wall(self, wall_zero_face, wall_value) -> dict:
-        """壁面条件的关键字参数：`wall_value` 给出时为非零 Dirichlet 值，否则为零值掩码（缺省取无滑移壁）。"""
-        if wall_value is not None:
-            value_face, has_face = wall_value
-            return {"wall_dirichlet_value_face": value_face, "has_wall_dirichlet_value": has_face}
-        return {"wall_dirichlet_zero_face": self.wall_zero if wall_zero_face is None else wall_zero_face}
-
     def convection(self, phi, freestream_value: float, wall_zero_face=None, wall_value=None):
         s = self.solver
         return compute_scalar_convection_residual(
-            phi, self.rho, self.vel, s.mesh, s.ops, **self._wall(wall_zero_face, wall_value),
+            phi, self.rho, self.vel, s.mesh, s.ops, **wall_condition_kwargs(self.wall_zero, wall_zero_face, wall_value),
             flat_face_override=self.flat, conv_geom=self.conv_geom,
             open_boundary_face=self.open_face, freestream_value=float(freestream_value))
 
     def diffusion(self, phi, gamma, wall_zero_face=None, wall_value=None, grad=None):
         """`grad`：`phi` 的物理梯度（`gradient(phi)` 的结果），调用方已有时传入、不重算。"""
         s = self.solver
-        return compute_scalar_diffusion_residual(phi, gamma, s.mesh, s.ops, **self._wall(wall_zero_face, wall_value),
-                                                 flat_face_override=self.flat, gamma_band=float(s.mu_molecular),
-                                                 grad_phi=grad)
+        return compute_scalar_diffusion_residual(
+            phi, gamma, s.mesh, s.ops, **wall_condition_kwargs(self.wall_zero, wall_zero_face, wall_value),
+            flat_face_override=self.flat, gamma_band=float(s.mu_molecular), grad_phi=grad)

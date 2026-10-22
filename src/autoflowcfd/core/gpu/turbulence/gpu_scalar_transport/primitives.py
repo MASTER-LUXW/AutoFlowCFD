@@ -11,6 +11,7 @@ CPU 版 `core/turbulence/transport/primitives.py::CpuScalarTransport` 的 GPU �
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
+from autoflowcfd.core.turbulence.transport.primitives import wall_condition_kwargs
 
 from .scalar_residuals import (
     compute_scalar_convection_residual_gpu,
@@ -44,18 +45,11 @@ class GpuScalarTransport:
         return compute_physical_scalar_gradient_gpu(self.xp.ascontiguousarray(phi), self.solver.mesh_data,
                                                     self.solver.ops_data)
 
-    def _wall(self, wall_zero_face, wall_value) -> dict:
-        """壁面条件的关键字参数：`wall_value` 给出时为非零 Dirichlet 值，否则为零值掩码（缺省取无滑移壁）。"""
-        if wall_value is not None:
-            value_face, has_face = wall_value
-            return {"wall_dirichlet_value_face": value_face, "has_wall_dirichlet_value": has_face}
-        return {"wall_dirichlet_zero_face": self.wall_zero if wall_zero_face is None else wall_zero_face}
-
     def convection(self, phi, freestream_value: float, wall_zero_face=None, wall_value=None):
         s = self.solver
         return compute_scalar_convection_residual_gpu(
             phi, self.rho, self.vel, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism,
-            self.n_sps, self.mass_div, **self._wall(wall_zero_face, wall_value),
+            self.n_sps, self.mass_div, **wall_condition_kwargs(self.wall_zero, wall_zero_face, wall_value),
             open_boundary_face=self.open_face, freestream_value=float(freestream_value))
 
     def diffusion(self, phi, gamma, wall_zero_face=None, wall_value=None, grad=None):
@@ -63,5 +57,6 @@ class GpuScalarTransport:
         s = self.solver
         return compute_scalar_diffusion_residual_gpu(
             phi, gamma, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism, self.n_sps,
-            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), **self._wall(wall_zero_face, wall_value),
+            c_ip=self.c_ip, gamma_band=float(s.mu_molecular),
+            **wall_condition_kwargs(self.wall_zero, wall_zero_face, wall_value),
             grad_phi=grad)
