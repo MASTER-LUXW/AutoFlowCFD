@@ -30,54 +30,19 @@ def wall_ghost_state(
     Returns:
         Q_ghost: (n_fp, 5)
 
-    Note（#9 修复，2026-08-28）：is_no_slip=False 这条分支被两种不同物理
-    场景复用——真正的无粘/对称 SLIP_WALL 边界，以及 WMLES 激活时的粘性
-    WALL 边界（见 fr_solver/boundary/ghost.py::build_boundary_ghost_provider）。
-    后一种场景下，"切向速度保持不变"不是在建模真实滑移，而是刻意让这个
-    面对 BR1/LDG 粘性通量的切向梯度贡献退化为零（ghost 切向速度与内部值
-    无跳跃），使壁面模型另外算出的 tau_w
-    （core/turbulence/wall_model/，只作用于物理无滑移壁面）
-    成为该面切向应力的唯一来源，而不是叠加在一个由无滑移镜像逼出的虚假
-    解析梯度剪应力之上——按 WMLES 壁面模型文献的标准做法（wall model 的
-    tau_w 应该"取代"而非"叠加"解析梯度算出的剪应力，见
-    build_boundary_ghost_provider 文档引用的 Kawai & Larsson 团队页面与
-    Kang et al. 2024 arXiv:2405.15899）。
-
-    **措辞更正（2026-09-14）**：此前这里与 `build_boundary_ghost_provider`
-    都把两种场景共享同一构造称为"刻意的工程简化/复用"。"简化"不准确——
-    这两种场景各自的**正确** ghost 态恰好就是同一个：
-      * 滑移/对称壁：物理条件是 u_n=0 + 切向自由滑移 -> 法向镜像反号、
-        切向保持，这是该条件的精确 ghost 构造；
-      * WMLES 粘性壁：要求 tau_w 取代而非叠加解析剪应力 -> 切向必须无
-        跳跃（梯度贡献为零）、法向仍需不可穿透 -> 同样是法向镜像反号、
-        切向保持。
-    两者是"同一个精确构造被两个不同物理条件同时要求"，不是用一个近似
-    去凑合两种情形。复用它没有引入任何误差。
-
-    **2026-09-30 更正**：幽灵态切向无跳跃只让罚项为零；粘性公共通量里的
-    切向牵引还取决于"另一侧"梯度。此前梯度一律取本侧，公共切向牵引就是
-    解析梯度算出的那一份、与 `tau_w` 叠加 —— 上面"梯度贡献为零"并不成立。
-    现在滑移分支落到镜像类粘性边界（`viscous_boundary_kind_for_config`），
-    镜像场梯度使公共切向牵引恰为零，这句话才真正成立。
-
-    **热边界条件（此前只隐含在代码里，2026-09-14 显式写出）**：本函数
-    以 `Q_ghost = Q_int.copy()` 起手、只改速度分量，因此 rho 与 p（进而
-    温度）都直接复制内部值——**两个分支都是零温度跳跃，即绝热壁**。
-    对无滑移粘性壁，绝热是标准且自洽的选择（BR1/LDG 界面项因此不产生
-    壁面热通量）；对滑移/对称壁，零热通量本来就是对称条件的要求。
-    需要注意的是：本项目目前**没有等温壁**（指定壁温）这种边界类型，
-    WMLES 也只给出 tau_w、没有壁面热通量模型——带传热的壁面工况需要
-    另外新增 BC 类型与壁面热通量闭合，那是独立的功能项，不是本构造的
-    近似。这里把它写明，避免读者误以为绝热是偶然结果。
+    * 无滑移：速度镜像 `2 v_wall - v_int`，黎曼求解器在界面上恢复出的速度恰为 `v_wall`（直接令幽灵态等于
+      `v_wall` 时界面平均速度是 `(v_int + v_wall)/2`）。
+    * 滑移（`is_no_slip=False`）：法向速度镜像反号（不可穿透）、切向保持。两种物理条件都要求这同一个构造：
+      滑移 / 对称壁本身；WMLES 激活时的粘性 WALL——壁面模型的 `tau_w` 取代而非叠加解析梯度剪应力（Kawai &
+      Larsson；Kang et al. 2024, arXiv:2405.15899），切向无跳跃使罚项为零，粘性"另一侧"梯度按镜像类边界取
+      （`viscous_boundary_kind_for_config`），使公共切向牵引恰为零（`build_boundary_ghost_provider`）。
+    * 热条件：密度与压力复制内部值，两支都是零温度跳跃，即绝热壁（滑移 / 对称本就要求零热通量）。本项目没有
+      等温壁边界类型，WMLES 也只给出 `tau_w`、没有壁面热通量模型。
     """
     xp = array_module(Q_int, normal)
     Q_ghost = Q_int.copy()
     if is_no_slip:
         v_wall = xp.zeros(3) if wall_velocity is None else xp.asarray(wall_velocity, dtype=Q_int.dtype)
-        # 镜像构造：幽灵态速度 = 2*v_wall - 内部速度，使得黎曼求解器在界面上
-        # （L、R 平均意义下）恢复出恰好等于 v_wall 的速度，是标准的无滑移
-        # 幽灵单元构造方式（避免直接令幽灵态=v_wall 时界面平均速度实际上是
-        # (v_int+v_wall)/2 而非 v_wall 本身的偏差）。
         Q_ghost[:, 1:4] = 2.0 * v_wall[None, :] - Q_int[:, 1:4]
     else:
         vel = Q_int[:, 1:4]
@@ -88,12 +53,11 @@ def wall_ghost_state(
 
 
 def farfield_ghost_state(Q_int: np.ndarray, Q_free: np.ndarray) -> np.ndarray:
-    """远场边界幽灵态：直接取自由来流状态。
+    """远场幽灵态：整份自由来流状态，经 AUSM+up 迎风进入界面通量。
 
-    与旧版本的罚项公式不同，这里把 Q_free 作为幽灵态送入 AUSM+up 黎曼
-    求解器（而不是直接惩罚差值），黎曼求解器自身的特征分裂天然提供了
-    亚声速远场所需的"扰动波可以传出、来流可以传入"的迎风行为，物理上
-    比固定惩罚系数的强 Dirichlet 更合理。
+    这是弱施加的全状态 Dirichlet 条件，不是特征（黎曼不变量）边界：流入 / 流出由迎风通量按法向马赫数取舍
+    （超声速入流全取来流、超声速出流全取内部值），亚声速时出射的声波在边界上部分反射回域内。因此远场边界须离
+    物体足够远，使边界处扰动已衰减到来流量级；需要无反射边界的工况（如气动声学）不能依赖它。
     """
     xp = array_module(Q_int)
     return xp.tile(xp.asarray(Q_free, dtype=Q_int.dtype), (Q_int.shape[0], 1))
