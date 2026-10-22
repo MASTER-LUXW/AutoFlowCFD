@@ -99,7 +99,7 @@ def test_single_node_rebuild_restores_and_overrides(tmp_path, override, expected
         return _fake_solver(kwargs["low_mach_precond"], order=kwargs["order"])
 
     with patch("autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver", return_value=(MagicMock(), MagicMock())), \
-         patch("autoflowcfd.core.FRSolver", side_effect=_fake_frsolver), \
+         patch("autoflowcfd.core.fr_solver.FRSolver", side_effect=_fake_frsolver), \
          patch("autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"), \
          patch("autoflowcfd.cli.solve.aero_coefficients.resolve_reference_area"):
         rebuild_solver_from_checkpoint(ckpt, low_mach_precond=override)

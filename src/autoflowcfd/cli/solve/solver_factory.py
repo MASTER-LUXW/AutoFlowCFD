@@ -44,7 +44,7 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device=None
         backend = resolve_backend_name(backend)
         print(f"   Backend auto -> {backend}")
     if backend == "cpu":
-        from autoflowcfd.core import FRSolver
+        from autoflowcfd.core.fr_solver import FRSolver
 
         solver = FRSolver(mesh=mesh, **solver_kwargs)
         compute_wall_distance_for_solver(solver, volume_data)

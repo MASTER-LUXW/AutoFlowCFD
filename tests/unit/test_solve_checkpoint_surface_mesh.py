@@ -82,7 +82,7 @@ class TestRebuildSolverSurfaceMeshFallback:
             "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(fake_mesh, fake_volume_data),
         ) as mock_load, patch(
-            "autoflowcfd.core.FRSolver", return_value=fake_solver
+            "autoflowcfd.core.fr_solver.FRSolver", return_value=fake_solver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ), patch(

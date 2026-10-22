@@ -112,7 +112,7 @@ class TestRebuildRestoresSolverOrderToTarget:
             "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(MagicMock(), MagicMock()),
         ), patch(
-            "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
+            "autoflowcfd.core.fr_solver.FRSolver", side_effect=_fake_frsolver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ), patch(
@@ -146,7 +146,7 @@ class TestRebuildRestoresSolverOrderToTarget:
             "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(MagicMock(), MagicMock()),
         ), patch(
-            "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
+            "autoflowcfd.core.fr_solver.FRSolver", side_effect=_fake_frsolver
         ), patch(
             "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ), patch(
