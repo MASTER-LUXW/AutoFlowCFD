@@ -60,7 +60,7 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
 
     # 双时间步上一时间层与 Newton 跨步状态随阶数失效（`reset_newton_state` 文档）
     from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-    from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+    from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
     reset_dual_time_history(solver)
     reset_newton_state(solver)

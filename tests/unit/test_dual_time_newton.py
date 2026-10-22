@@ -25,7 +25,7 @@ from autoflowcfd.core.time_integration.implicit import step_newton_krylov
 from autoflowcfd.core.time_integration.implicit.newton.physical_time import (
     BdfTerm, advance_physical_step, inner_iteration_suffix, previous_newton_state, store_newton_state,
 )
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 from autoflowcfd.core.utils.checkpoint_time import TURBULENCE_PREVIOUS_FIELD
 from tests.unit._implicit_jfnk_common import _N, _NV, _SCALES, _linear_system
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）

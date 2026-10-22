@@ -27,7 +27,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.distributed_solver.assembly import DistributedRunSettings
 from autoflowcfd.core.mpi.partition import build_distributed_partition, partition_mesh
 from autoflowcfd.core.time_integration.base import require_distributed_scheme
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
 
 from .compact_view import _CompactMeshDataView

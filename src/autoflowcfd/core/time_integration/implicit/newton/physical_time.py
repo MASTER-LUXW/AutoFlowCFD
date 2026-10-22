@@ -87,6 +87,16 @@ class BdfResidual:
         return out
 
 
+def reset_dual_time_history(owner) -> None:
+    """清空上一物理时间层（平均流 `_dual_time_U_prev` 与湍流 `_dual_time_turb_prev` 一起；BDF2 退化为 BDF1）：
+    构造、换阶、重分发、开始一次新的 `solve()` 时调用。两个属性随 checkpoint 读写（`core/utils/checkpoint_time.py`）。
+
+    2026-10-22（I-41）以前这个函数单独放在 `core/turbulence/dual_time.py`，而同一状态的读写都在本模块。
+    """
+    owner._dual_time_U_prev = None
+    owner._dual_time_turb_prev = None
+
+
 def previous_newton_state(solver, xp, n_cells: int, n_sps: int):
     """上一物理时间层的 Newton 未知量 `(N, 5 + n_turb)`；没有（第一个物理步、或换了湍流模型后只恢复出
     平均流）时 None。平均流与湍流的上一时间层分开存在求解器上（`_dual_time_U_prev`、

@@ -6,7 +6,7 @@ import numpy as np
 from typing import Any
 
 from loguru import logger
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 from autoflowcfd.fr.native_padding import sps_width
 
 

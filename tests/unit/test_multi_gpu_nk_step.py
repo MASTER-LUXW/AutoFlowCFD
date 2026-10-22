@@ -120,7 +120,7 @@ def test_dual_time_branch_solves_bdf1_then_bdf2():
     BDF1 `U1 = (U0 + 5 dt T) / (1 + 5 dt)`，BDF2 `U2 = (2 U1 - U0/2 + 5 dt T) / (3/2 + 5 dt)`。
     上一时间层落在求解器上，伪时间 CFL 不被 step() 末尾的外层残差更新。"""
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
-    from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+    from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
     n_local, n_sps, dt = 4, 6, 0.05
     target = _conservative(n_local, n_sps, np.random.default_rng(7))

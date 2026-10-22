@@ -12,7 +12,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int) -> None:

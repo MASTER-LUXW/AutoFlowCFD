@@ -19,7 +19,7 @@ P0 架构缺口完全不适用于这里。
 """
 
 import numpy as np
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:

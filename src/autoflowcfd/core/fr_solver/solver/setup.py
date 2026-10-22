@@ -13,7 +13,7 @@ from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.core.time_integration.base import TimeIntegrator
 from autoflowcfd.fr.operators import generate_fr_operators
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 class _SolverSetupMixin:

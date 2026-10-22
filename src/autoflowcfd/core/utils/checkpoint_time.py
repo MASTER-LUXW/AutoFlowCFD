@@ -16,7 +16,7 @@
   `time_integrator.current_time` 从不推进、也不写出，`post transient-*` 拿迭代数当物理时间。
 * **探针坐标**（`probe_points`，挂了探针时）：续算按它重新挂上探针、接着写时间序列（`core/probes`）。
 
-湍流输运方程同样做双时间步（`core/turbulence/dual_time.py`），它的上一时间层 `turb_prev_unknowns`
+湍流输运方程同样做双时间步（`time_integration/implicit/newton/physical_time.py`），它的上一时间层 `turb_prev_unknowns`
 （`(n_cells, n_sps, n_transported)`，模型的未知量空间：SST 为 k 与 ln omega）一并写出与恢复。
 """
 

@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值"""
 
 import numpy as np
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 def _interp_state_and_turbulence_local(solver, old_order: int,

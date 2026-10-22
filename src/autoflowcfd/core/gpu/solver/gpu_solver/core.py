@@ -22,7 +22,7 @@ from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIE
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverStepMixin, _GPUSolverInitMixin,

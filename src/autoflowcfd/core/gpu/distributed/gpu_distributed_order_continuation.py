@@ -16,7 +16,7 @@ redistribute_multi_gpu_fully_distributed_for_new_order`（root 用持续持有�
 """
 
 import numpy as np
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
 
 def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
