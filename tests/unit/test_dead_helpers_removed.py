@@ -13,3 +13,14 @@ def test_removed(module, name):
     import importlib
 
     assert not hasattr(importlib.import_module(module), name)
+
+
+def test_reference_area_mixin_is_gone():
+    """V1 遗留的参考面积 mixin（I-84）：宿主类早已不存在，按组名含 BODY/CAR 认车身、只沿 X 投影、异常时静默返回
+    固定值。生产路径是 `cli/solve/aero_coefficients.py::_compute_reference_area_auto`。"""
+    import importlib.util
+
+    import autoflowcfd.core.utils as utils
+
+    assert importlib.util.find_spec("autoflowcfd.core.utils.aero_coeffs") is None
+    assert not hasattr(utils, "ReferenceAreaMixin")
