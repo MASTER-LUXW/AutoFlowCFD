@@ -7,13 +7,9 @@ import numpy as np
 def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     """把一个**全新**（非 resume）求解器的状态重建到 P0。
 
-    Order Continuation 从 P0 起步；全新求解器构造时按目标阶数分配了
-    状态，这里用均匀自由来流在 P0 上重建它，并把湍流场、DES 长度尺度、
-    SGS 涡粘、壁面距离、算子、网格阶数一并切到 P0。
-
-    从 `run_order_continuation` 抽出（2026-09-24，项目「单文件不超 500 行」
-    规范）。抽取时顺带修掉一个真实缺陷：初场速度此前写死成
-    `(vel_inf, 0, 0)`，攻角/侧滑角被丢掉，见下方同名注释。
+    Order Continuation 从 P0 起步；全新求解器构造时按目标阶数分配了状态，这里用均匀自由来流（速度方向取自攻角 /
+    侧滑角）在 P0 上重建它，并把湍流场与涡粘、SGS 涡粘、壁面距离、算子、网格阶数、双时间步上一时间层与
+    Newton 跨步状态一并切到 P0（2026-10-22（I-90）以前后两项由调用方另行重置，同一件事分在两处）。
     """
     from autoflowcfd.core.fr_solver.state import FRState
     from autoflowcfd.fr.operators import generate_fr_operators
@@ -37,7 +33,7 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     )
     solver.state = p0_state
 
-    if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "transported_fields"):
+    if solver.turb_model is not None:          # 输运模型（SST 族 / SA-neg）
         # 重置为模型的来流值（构造时由 Tu/VR 推导，与 init_turbulence_models 同一组值）
         solver.turb_model.set_transported_fields(
             solver.turb_model.freestream_fields((solver.state.n_cells, expected_p0_n_sps), np))
@@ -47,11 +43,10 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
         # 算出，遗漏会让它保留重置前的形状，被 _compute_local_time_step
         # 在 compute_turbulence_source 刷新它之前读取时引发同一类形状
         # 不匹配问题。用 SSTModelFR.__init__ 同样的初值约定（零）。
-        if hasattr(solver.turb_model, "nu_t"):
-            solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
+        solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
         print("[INFO] Turbulence fields reset to P0 dimensions")
 
-    if getattr(solver, "sgs_model", None) is not None and hasattr(solver.sgs_model, "nu_t"):
+    if solver.sgs_model is not None:
         solver.sgs_model.nu_t = None
 
     solver.current_order = 0
@@ -62,5 +57,12 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     # （不取单元平均——见 `recompute_wall_distance_for_current_order` 文档）。
     from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
     recompute_wall_distance_for_current_order(solver)
+
+    # 双时间步上一时间层与 Newton 跨步状态随阶数失效（`reset_newton_state` 文档）
+    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
+    from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+
+    reset_dual_time_history(solver)
+    reset_newton_state(solver)
 
     print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")

@@ -260,3 +260,18 @@ def test_no_hardcoded_plus_x_freestream_fill(rule, what):
         f"又出现了「{what}」—— 攻角/侧滑角（或来流本身）会在这里被静默丢掉。"
         f"改用 core/utils/flow_direction.py::freestream_conservative_state，"
         f"或直接取 solver.freestream 的键：" + "；".join(hits))
+
+
+def test_p0_reset_also_resets_time_stepping_history():
+    """P0 重置把双时间步上一时间层与 Newton 跨步状态一并清掉（I-90：此前由调用方另行重置，直接调用即残留）。"""
+    from autoflowcfd.core.utils.order_continuation import _reset_state_to_p0
+    from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+    from autoflowcfd.core.fr_solver.solver import FRSolver
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+
+    solver = FRSolver(_build_synthetic_mixed_mesh(1), order=1, turb_model_name="NONE",
+                      time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=1.2, vel_inf=10.0, p_inf=1e5,
+                      mu_molecular=1.8e-5)
+    solver._dual_time_U_prev = object()
+    _reset_state_to_p0(solver, 1)
+    assert solver._dual_time_U_prev is None

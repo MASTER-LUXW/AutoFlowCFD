@@ -34,7 +34,6 @@ from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.core.time_integration.time_accurate import advance
 
 from .threads import blas_threads_limited
-from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 def format_step_line(solver, order: int, iteration: int, res: float, initial_res: float, elapsed: float,
@@ -406,10 +405,6 @@ class _SolverSolveMixin(SolveLoopMixin):
 
         if new_order == 0:
             order_continuation._reset_state_to_p0(self, 1)
-            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-            reset_dual_time_history(self)
-            reset_newton_state(self)
         else:
             order_continuation.interpolate_to_new_order_checked(self, new_order)
             self.ops = generate_fr_operators(new_order)
