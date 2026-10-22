@@ -48,7 +48,6 @@ Jacobian 每单元一个 `(27*5)^2` 的块加上面耦合块，在同一网格�
 
 from typing import TYPE_CHECKING, Callable, Optional, Tuple, Union
 
-
 import numpy as np
 
 from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale

@@ -34,7 +34,6 @@ from .setup import _SolverSetupMixin
 from .solve_loop import _SolverSolveMixin
 from .threads import configure_numba_threads
 
-
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 

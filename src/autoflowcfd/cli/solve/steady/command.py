@@ -4,7 +4,6 @@
 
 import click
 
-
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.cli.solve.commands import solve

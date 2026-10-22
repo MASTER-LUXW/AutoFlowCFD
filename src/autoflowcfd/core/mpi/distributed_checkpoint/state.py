@@ -5,7 +5,6 @@ from typing import Optional
 
 import numpy as np
 
-
 from autoflowcfd.core.mpi import get_comm, get_rank, get_size
 
 

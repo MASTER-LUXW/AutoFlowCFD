@@ -6,7 +6,6 @@ import numpy as np
 
 from dataclasses import dataclass, field
 
-
 from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry
 
 from autoflowcfd.core.mpi.partition import DistributedPartition

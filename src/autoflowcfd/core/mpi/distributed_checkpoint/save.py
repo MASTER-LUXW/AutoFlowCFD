@@ -4,9 +4,7 @@ import os
 
 import pickle
 
-
 from typing import Optional
-
 
 from autoflowcfd.core.mpi import get_size
 

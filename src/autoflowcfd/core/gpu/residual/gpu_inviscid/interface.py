@@ -3,7 +3,6 @@
 
 from autoflowcfd.core.gpu import get_cupy
 
-
 from .flux import _ausm_up_flux_batch_gpu
 
 

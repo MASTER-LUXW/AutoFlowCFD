@@ -27,7 +27,6 @@
 from typing import Optional
 import numpy as np
 
-
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.volume_contract import (

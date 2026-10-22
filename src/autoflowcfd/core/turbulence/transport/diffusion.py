@@ -11,7 +11,6 @@
 from typing import Optional
 import numpy as np
 
-
 from autoflowcfd.core.fr_operators.gradients import (
     compute_physical_scalar_gradient,
 )

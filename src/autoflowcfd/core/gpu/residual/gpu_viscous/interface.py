@@ -3,7 +3,6 @@
 
 from autoflowcfd.core.gpu import get_cupy
 
-
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 
 from autoflowcfd.core.thermo import CP_AIR, R_AIR

@@ -17,7 +17,6 @@ AutoFlowCFD V2.0 - 分布式残差计算
 import numpy as np
 from typing import Optional, Callable
 
-
 from autoflowcfd.core.mpi.partition import DistributedPartition
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeometry

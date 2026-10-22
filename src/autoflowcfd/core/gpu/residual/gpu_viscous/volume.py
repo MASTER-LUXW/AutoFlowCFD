@@ -2,7 +2,6 @@
 
 import numpy as np
 
-
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
@@ -11,7 +10,6 @@ from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_share
 from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu, conserved_to_primitive_gpu
 
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
-
 
 from autoflowcfd.core.thermo import R_AIR
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant

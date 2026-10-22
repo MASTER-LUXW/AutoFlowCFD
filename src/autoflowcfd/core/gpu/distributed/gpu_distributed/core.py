@@ -30,7 +30,6 @@ from .setup import _MultiGPUSetupMixin
 from .stepping import _MultiGPUSteppingMixin
 from .timestep import _MultiGPUTimeStepMixin
 
-
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS

@@ -4,11 +4,9 @@ import types
 
 import numpy as np
 
-
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.mpi import get_rank
-
 
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 

@@ -9,7 +9,6 @@ import numpy as np
 from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
 from typing import Optional
 
-
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 

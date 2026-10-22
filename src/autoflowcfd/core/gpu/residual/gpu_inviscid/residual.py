@@ -2,7 +2,6 @@
 
 import numpy as np
 
-
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu

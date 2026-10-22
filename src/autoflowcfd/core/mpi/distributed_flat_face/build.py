@@ -2,7 +2,6 @@
 
 import numpy as np
 
-
 from typing import Optional
 
 from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry, get_flat_face_geometry

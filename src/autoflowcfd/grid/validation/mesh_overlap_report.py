@@ -1,13 +1,4 @@
-"""mesh_overlap_check.py 的结果数据类 OverlapProximityReport。
-
-从 mesh_overlap_check.py 中拆分出来（原文件超过 400 行的项目约定上限）：
-这个 dataclass 只是 check_face_overlap_and_proximity 的返回值容器，本身
-不依赖该函数体的任何内部状态，是最自然的独立单元——原样搬移，字段、
-方法、文档字符串均未改动。mesh_overlap_check.py 里通过
-`从 .mesh_overlap_report 导入 OverlapProximityReport` 重新导出，
-任何 `从 autoflowcfd.grid.验证.mesh_overlap_check 导入
-OverlapProximityReport` 的既有导入路径不受影响。
-"""
+"""`mesh_overlap_check.check_face_overlap_and_proximity` 的结果数据类 OverlapProximityReport（该模块再导出）。"""
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple

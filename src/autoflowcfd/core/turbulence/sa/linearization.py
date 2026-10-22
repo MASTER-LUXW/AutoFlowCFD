@@ -12,7 +12,6 @@ import numpy as np
 
 from autoflowcfd.core.utils.array_module import to_host
 
-
 from .pointwise import sa_diffusivity, sa_gradient_source, sa_source_terms, vorticity_magnitude
 
 

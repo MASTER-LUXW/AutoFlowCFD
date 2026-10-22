@@ -11,7 +11,6 @@ import numpy as np
 
 from typing import Tuple
 
-
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.turbulence.sst.bounds import (
     omega_wall_length_scale,
