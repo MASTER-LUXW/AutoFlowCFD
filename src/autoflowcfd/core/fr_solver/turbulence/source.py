@@ -127,9 +127,9 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
     # 因子），但 turb_model.k_field/omega_field 存的是 k、omega 本身
     # （不是 rho*k/rho*omega，初值 1e-6/1.0 也是 k/omega 量级而非 rho*k/
     # rho*omega 量级）——直接 self.k_field += dt*Sk 会缺一个 1/rho，
-    # 量纲不对。这里换算成 dk/dt ≈ Sk/rho（对缓变 rho 的标准近似：
-    # d(rho*k)/dt = rho*dk/dt + k*drho/dt ≈ rho*dk/dt）再传给
-    # update_fields。
+    # 量纲不对。这里换算成 dk/dt = Sk/rho 再传给 update_fields：输运按对流形式
+    # 求值（`turbulence/transport/`），借连续方程 rho Dk/Dt = d(rho k)/dt + div(rho u k)
+    # 精确成立，对流形式下源项除以 rho 是精确的，不是"缓变 rho"近似。
     rho = Q[:, :, 0]
     dk_dt = Sk / np.maximum(rho, 1e-10)
     # w = ln(omega) 方程的源项部分（omega 由 exp(w) 产生、恒为正）
