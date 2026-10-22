@@ -45,7 +45,7 @@ def resolve_mach_ref(rho_inf: float, vel_inf: float, p_inf: float) -> float:
     见 cfl.py 模块文档"已撤销"一节）。
 
     物理下限钳制（2026-08-26，P2 发散专项修复）：真实来流马赫数低于
-    _MACH_REF_FLOOR 时钳制到下限。AUSM+up 的 Mp 压力扩散项正比于
+    MACH_REF_FLOOR 时钳制到下限。AUSM+up 的 Mp 压力扩散项正比于
     (pR-pL)/(fa*a_half_p²)，其中 fa≈2*mach_ref（滞止面）、
     a_half_p²=beta2*a²、beta2 下限=1.1*mach_ref²——两者同时随
     mach_ref 塌缩，压差的有效放大系数 ~1/mach_ref²：Couette 验证
@@ -55,15 +55,13 @@ def resolve_mach_ref(rho_inf: float, vel_inf: float, p_inf: float) -> float:
     物理上这个下限对应低马赫数渐近展开的适用边界：真实压力扰动按
     ρ·U² ~ mach_ref² 缩小才与预处理通量的 1/mach_ref² 放大相互抵消，
     低于下限后离散舍入/边界瞬态扰动不再随 M² 缩小，方案转为舍入驱动失稳。
-    下限值经真实算例实证扫描标定（分两档）：
+    下限值的标定：
     （1）Couette 棱柱算例：0.02 仍发散（iter 6）、0.05 稳定；
-    （2）TGV 三向周期四面体算例（坍缩坐标四面体基时期标定；真实 mach_ref≈0.0874，
-    网格条件数更差）：0.0874 仍发散（step 5 KE 暴涨至 1e93、
-    step 6 溢出）、0.1 稳定且动能衰减曲线与历史实测一致。
-    因此下限取 0.1——恰好等于 kernels.py 历史注释记载的遗留硬编码值，
-    那次把硬编码改成传入真实值的重构正是这两个算例的共同回归点；
-    0.1 以上真实马赫数的算例不受影响。
-    2026-09-17 在 AUSM+up 物理声速档上用直接谱测量重标定为 0.05（见 `MACH_REF_FLOOR` 上方的表）。
+    （2）直接谱测量（`MACH_REF_FLOOR` 上方的表，2026-09-17，AUSM+up 物理声速档）：0.05 处 3.55 倍裕度；
+    （3）三向周期四面体 TGV（原生基，P2，1296 单元，开低马赫预处理、局部伪时间步、生产显式 CFL 律，
+    2026-10-22 I-201 复核）：mach_ref 0.0882 / 0.05 / 钳到 0.05 的 0.03 三档都稳定推进 3000 步，CFL 达到
+    上限 0.06 并保持 2700 步，残差单调下降。坍缩坐标四面体基时期同一算例在 0.0874 第 5 步发散、曾据此
+    把下限抬到 0.1，那是坍缩基的病态（该基已删除），原生基上不复现。
     """
     mach_ref = vel_inf / np.sqrt(max(GAMMA * p_inf / max(rho_inf, 1e-10), 1e-10))
     floor = MACH_REF_FLOOR
