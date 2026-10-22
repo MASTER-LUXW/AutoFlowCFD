@@ -107,7 +107,7 @@ def accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: 
     `dtau_control.py`），而不是把状态原样交出去 —— 后者被真实运行证明
     会永久停滞。不"硬着头皮走一步"是刻意的：本项目已经吃过一次"越界
     之后收缩救不回来"的亏（项目记忆
-    `adaptive_cfl_four_defects_and_soft_ceiling` 第 12 条）。
+    `time_integration/adaptive_cfl/` 包文档第 8 条）。
 
     为什么不用标准线搜索（Armijo）：那需要一个 merit function
     （通常 `0.5||R||^2`）与它的方向导数，而伪瞬态解的不是

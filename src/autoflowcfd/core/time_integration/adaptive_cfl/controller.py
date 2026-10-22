@@ -26,7 +26,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
              连续 5 步确认后 CFL ×1.05（crawl）
            - 0.95 ≤ ratio ≤ 1.0（死区）：单步比值无信息，交给窗口趋势
              判据（最近 trend_window 步累计下降 < trend_threshold 则
-             ×trend_factor），见模块文档第 4 条
+             ×trend_factor），见模块文档第 2 条
            - 1.0 < ratio ≤ 1.1（轻微恶化）：立即 CFL ×0.9（shrink）
            - ratio > 1.1（明显恶化）：立即 CFL ×0.8（shrink）
         3. 冷却期：两次 CFL 调节之间至少间隔 cooldown_steps 步，
@@ -66,7 +66,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
 
         Args:
             cfl_start: 初始 CFL 数（调用方认为已验证稳定的保守值）。
-                **注意它只是一个断言、不是事实**：软上限（第 8 条）原先
+                **注意它只是一个断言、不是事实**：软上限（第 5 条）原先
                 无条件把 cfl_start 当下界，结果在真实稳定 CFL 低于
                 cfl_start 的工况下那道保护被完全抵消（79 万单元 cube_demo
                 实测：稳定 CFL 约 0.063、cfl_start=0.1，控制器爬到 0.0697
@@ -101,7 +101,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
                 同——每次只放大 10%，且每次放大后窗口清空重新积累，所以
                 从 0.1 爬到 0.5 约需 17 次、~340 步，属于单向温和试探）。
             mild_shrink_confirm_steps: **轻度**恶化（1.0 < ratio <= 1.1）需要
-                连续满足的步数。取 3 的理由见模块文档第 5 条：单步残差上升
+                连续满足的步数。取 3 的理由见模块文档第 3 条：单步残差上升
                 在稳态显式迭代里是正常噪声，据此立刻收缩会让 CFL 在任何
                 残差略带噪声的算例里单向棘轮下滑到下限。重度恶化
                 （ratio > shrink_threshold，含 NaN/inf）**不受这个确认约束**，
@@ -111,12 +111,12 @@ class AdaptiveCFLController(_CFLUpdateMixin):
                 机制，带噪声的收敛轨迹里偶发的收缩会把上限不断压低、
                 放大再也回不去——实测（噪声 sigma=0.4%、均值每步降 0.05%
                 的 6000 步轨迹）CFL 会一路滑到 0.034，比 cfl_start=0.1
-                还低，等于把第 5/6 条修掉的棘轮效应换了个形式又引回来。
+                还低，等于把第 3 条修掉的棘轮效应换了个形式又引回来。
                 默认 100（= 5 倍 trend_window）：贴着稳定边界时收缩频繁、
                 上限稳稳压住；真正安静的区段才缓慢放开。
             ceiling_backoff: 每次发生收缩时，把"软上限"设为
                 `ceiling_backoff * 收缩前的 CFL`（默认 0.95），此后放大
-                不得越过这个上限。理由见模块文档第 8 条：没有它，控制器
+                不得越过这个上限。理由见模块文档第 5 条：没有它，控制器
                 会周期性地重新探过稳定边界，每次探过都要付一段残差过冲
                 的代价——79 万单元真实网格实测因此变成净负收益。
             trend_shrink_threshold: 轻度收缩的**窗口**阈值，与 trend_threshold
@@ -150,7 +150,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
         self.grow_block_ratio = grow_block_ratio
         self.mild_shrink_block_ratio = mild_shrink_block_ratio
 
-        # 三个 CFL 边界参数的协调（见模块文档第 11 条）：`cfl_min > cfl_max`
+        # 三个 CFL 边界参数的协调（见模块文档第 7 条）：`cfl_min > cfl_max`
         # 是自相矛盾的配置，而 `cfl_max` 是调用方更强的意图声明（"这个问题
         # 在这个值以上不稳定"），所以以它为准把 `cfl_min` 钳下去。不静默：
         # 打 warning 说明发生了什么、为什么。
@@ -176,7 +176,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
         # 的 0.045/0.03/0.02，于是 `min(max(cfl*0.9, cfl_min), cfl_max)` 把
         # 收缩结果顶回 cfl_max，看起来像"钉住"。2026-09-17 把 cfl_min 默认
         # 从 0.05 降到 0.01（真实可用工作点通过 CLI 到不了，见本模块文档
-        # 第 11 条）之后，那个偶然的顶住消失了，定 CFL 探针会自己往下滑
+        # 第 7 条）之后，那个偶然的顶住消失了，定 CFL 探针会自己往下滑
         # （实测 0.045 -> 0.03645），而"探针全程恒定"正是稳定边界扫描的
         # 前提——扫出来的数才是所请求的那个 CFL。
         #
@@ -198,7 +198,7 @@ class AdaptiveCFLController(_CFLUpdateMixin):
             )
 
         # 状态
-        # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 11 条的
+        # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 7 条的
         # 协调逻辑改的是 self.cfl_start，若这里仍读形参，初值就会绕过协调
         # （cfl_start=0.5 / cfl_max=0.08 时第一步就跑在 0.5 上）。
         self.cfl_number = self.cfl_start
@@ -208,10 +208,10 @@ class AdaptiveCFLController(_CFLUpdateMixin):
         self._consecutive_crawl = 0          # 连续"缓慢收敛"步数计数
         self._consecutive_mild_bad = 0       # 连续"轻度恶化"步数计数
         # 软上限：放大不得越过它。None 表示尚未发生过收缩、只受 cfl_max
-        # 约束。见模块文档第 8 条。
+        # 约束。见模块文档第 5 条。
         self._cfl_ceiling = None
         self._steps_since_shrink = 0
-        # 绝对基准（见模块文档第 9 条）：自构造/reset 以来见过的最小
+        # 绝对基准（见模块文档第 6 条）：自构造/reset 以来见过的最小
         # **有限**残差，以及"软上限设定当时"的残差（用于给时间性释放
         # 加条件）。None 表示尚无有限残差样本。
         self._res_best = None

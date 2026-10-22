@@ -231,7 +231,7 @@ def check_residual_finite(res, iteration: int, order=None,
         f"  常见成因（按本项目实测频率排序）：\n"
         f"    1. 伪时间步（CFL）过大 —— 用 --cfl-start/--cfl-max 下调：\n"
         f"       显式推进（rk3）是超过了该网格/阶数的稳定边界，越界一次之后\n"
-        f"       收缩救不回来（adaptive_cfl 模块文档第 12 条）；隐式 Newton-Krylov\n"
+        f"       收缩救不回来（adaptive_cfl 包文档第 8 条）；隐式 Newton-Krylov\n"
         f"       是 CFL 增长快过 Newton 线性化的适用范围（先看监视行 NK 一栏的\n"
         f"       线性求解与步长接受情况）\n"
         f"    2. 网格质量门未通过而用 --skip-quality-check 强行求解 ——\n"

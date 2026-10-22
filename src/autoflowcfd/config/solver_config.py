@@ -215,7 +215,7 @@ def cfl_triplet_errors(cfl_init: Optional[float], cfl_max: Optional[float],
     """自适应 CFL 三元组的校验（`SteadyConfig` / `TransientConfig` 构造共用）。
 
     只校验给出的值（None = 由 CFL 律按时间格式取默认，见 `build_cfl_policy`）：都必须为正；给出的两两之间满足
-    min <= init <= max。cfl_min > cfl_max 会让控制器的"收缩"分支把 CFL 调高并突破上限（adaptive_cfl 第 11 条），
+    min <= init <= max。cfl_min > cfl_max 会让控制器的"收缩"分支把 CFL 调高并突破上限（adaptive_cfl 包文档第 7 条），
     cfl_min > cfl_init 会让初值被钳上去，实际跑的不是请求的 CFL。
     """
     named = {"cfl_init": cfl_init, "cfl_max": cfl_max, "cfl_min": cfl_min}

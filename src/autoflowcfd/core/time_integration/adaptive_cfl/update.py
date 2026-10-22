@@ -45,15 +45,15 @@ class _CFLUpdateMixin(_CFLGatesMixin):
         self._step_count += 1
         self._steps_since_last_change += 1
         self._steps_since_shrink += 1
-        # 绝对基准（见模块文档第 9 条）：先更新"到过的最好残差"，本步
+        # 绝对基准（见模块文档第 6 条）：先更新"到过的最好残差"，本步
         # 后续所有判断都能用上它。非有限值不入基准（那是发散本身，
         # 由 ratio=+inf 的 severe 分支处理）。
         if math.isfinite(current_residual) and current_residual > 0:
             if self._res_best is None or current_residual < self._res_best:
                 self._res_best = current_residual
 
-        # 软上限的缓慢释放（见模块文档第 8 条与 ceiling_release_steps）。
-        # 释放额外要求"当前残差不差于上限设定当时"（第 9 条 (b)）：释放的
+        # 软上限的缓慢释放（见模块文档第 5 条与 ceiling_release_steps）。
+        # 释放额外要求"当前残差不差于上限设定当时"（第 6 条 (b)）：释放的
         # 理由是"问题随收敛变容易了"，残差比当时更差时这个理由不成立，
         # 释放就只是去重探一个已知失败的 CFL——实测 step 129 那次正是
         # 这样回到了 step 24 已经失败过的 0.064，并在 45 步后发散。
@@ -128,7 +128,7 @@ class _CFLUpdateMixin(_CFLGatesMixin):
             severe = ratio > self.shrink_threshold
             factor = self.shrink_factor if severe else self.mild_shrink_factor
             label = "shrink" if severe else "shrink_mild"
-            # **轻度恶化需要连续确认**（2026-09-14，见模块文档第 5 条）：
+            # **轻度恶化需要连续确认**（2026-09-14，见模块文档第 3 条）：
             # 单步残差上升在稳态显式迭代里是正常噪声，旧实现对它立刻
             # ×0.9，使 CFL 在任何残差略带噪声的算例里单向棘轮下滑到下限
             # ——真实实测（128 单元压力扰动算例，4000 步）：grow 触发 114
@@ -142,13 +142,13 @@ class _CFLUpdateMixin(_CFLGatesMixin):
             else:
                 self._consecutive_mild_bad += 1
             # 轻度恶化还要过**窗口判据**（2026-09-14 同批第三处，见模块
-            # 文档第 6 条）：只要窗口内（自上次 CFL 调节以来的
+            # 文档第 3 条）：只要窗口内（自上次 CFL 调节以来的
             # trend_window 步）残差**确有累计下降**，就说明当前 CFL 整体
             # 是在起作用的，个别连续几步的小幅上升不构成收缩理由。窗口
             # 还没攒满时退回纯连续确认（保留调节后头 20 步的快速保护）。
             window_full = (self._res_window.maxlen is not None
                            and len(self._res_window) >= self._res_window.maxlen)
-            # 迟滞带（见模块文档第 7 条）：放大要求窗口累计 < trend_threshold
+            # 迟滞带（见模块文档第 4 条）：放大要求窗口累计 < trend_threshold
             # (0.995)，收缩要求窗口累计 > trend_shrink_threshold (1.0)，两者
             # 之间留出空档。共用一个阈值时 CFL 必然在稳定边界上无限抖动。
             window_worsened = False
@@ -160,7 +160,7 @@ class _CFLUpdateMixin(_CFLGatesMixin):
             if severe:
                 confirmed = True
             elif self._mild_shrink_blocked(current_residual):
-                # 绝对基准闸门（模块文档第 13 条）：离历史最好残差还很近，
+                # 绝对基准闸门（模块文档第 9 条）：离历史最好残差还很近，
                 # 缓慢回升是启动暂态的区域轮换，不是失稳。
                 confirmed = False
             elif window_full:
@@ -172,7 +172,7 @@ class _CFLUpdateMixin(_CFLGatesMixin):
                 # 窗口盲区（刚调节过、还没攒满 trend_window 步）：这里如果
                 # 退回"连续 3 步确认"，噪声会稳定地在盲区内凑出 3 连升，
                 # 于是每次放大后马上被收缩抵消——实测就是 CFL 在
-                # 0.050 <-> 0.055 之间无限往复（见模块文档第 6 条）。
+                # 0.050 <-> 0.055 之间无限往复（见模块文档第 3 条）。
                 # 盲区内只对**持续**恶化反应：连续 trend_window//2 步。
                 # 噪声几乎不可能连出这么多步，而真实的单调上升 10 步内
                 # 就会被抓到；更快的失稳本来就走 severe 分支。
@@ -186,7 +186,7 @@ class _CFLUpdateMixin(_CFLGatesMixin):
             if self._steps_since_last_change >= self.cooldown_steps:
                 old_cfl = self.cfl_number
                 # 软上限：记住"这个 CFL 失败过"，此后放大不得越过它
-                # （见模块文档第 8 条）。取收缩前的值而不是收缩后的值，
+                # （见模块文档第 5 条）。取收缩前的值而不是收缩后的值，
                 # 这样上限随每次失败几何式下降、从上方收敛到稳定边界，
                 # 而不是一步跳到远低于边界的位置。
                 # 软上限的下界**只有在 cfl_start 本身尚未被证伪时**才取
@@ -198,17 +198,17 @@ class _CFLUpdateMixin(_CFLGatesMixin):
                 # **真实 bug 修复（2026-09-15）**：但一旦收缩发生在**低于**
                 # cfl_start 的 CFL 上，就已经有直接证据说明 cfl_start 对
                 # 这个问题不稳定，再用它兜底等于把上限抬到一个**已知不稳**
-                # 的值上，第 8 条这道保护被完全抵消。真实复现（79 万单元
+                # 的值上，第 5 条这道保护被完全抵消。真实复现（79 万单元
                 # cube_demo，P1 真实内容、模态滤波器关闭，稳定 CFL 约
                 # 0.063 而 cfl_start=0.1）：上限被钉在 0.1 形同不存在，
                 # 控制器 step 66 爬到 0.0697 -> step 79 被判定过高退回
                 # 0.0627 -> step 100 **又爬回 0.0690** -> step 102 残差
                 # 一步从 2.17e9 跳到 1.87e25，step 103 发散。CFL 历史在
                 # 修复前后的两次运行里逐位相同，死亡步号也相同（103），
-                # 这正是第 8 条要消灭的"周期性穿越稳定边界"本身。
+                # 这正是第 5 条要消灭的"周期性穿越稳定边界"本身。
                 #
                 # 改法是最小的、有证据支撑的：`old_cfl >= cfl_start` 时
-                # 行为逐位不变（那正是第 8 条原本设计的工况）；
+                # 行为逐位不变（那正是第 5 条原本设计的工况）；
                 # `old_cfl < cfl_start` 时下界改用**收缩后的 CFL**——它
                 # 保证上限不会挡住"停在当前值"（不构成棘轮），同时绝不
                 # 高于刚刚失败的那个值。恢复仍由 ceiling_release_steps
@@ -225,13 +225,13 @@ class _CFLUpdateMixin(_CFLGatesMixin):
                 self._cfl_ceiling = (ceiling if self._cfl_ceiling is None
                                      else min(self._cfl_ceiling, ceiling))
                 # 记住"上限是在多差的残差上设的"，供时间性释放做条件判断
-                # （见模块文档第 9 条 (b)）。上限只会下降，所以这里也只
+                # （见模块文档第 6 条 (b)）。上限只会下降，所以这里也只
                 # 记录更严格（更小）的那个残差基准。
                 if math.isfinite(current_residual):
                     self._res_at_ceiling = min(self._res_at_ceiling,
                                                current_residual)
                 self._steps_since_shrink = 0
-                # 双向钳制（见模块文档第 11 条）：下界 cfl_min 之外还必须
+                # 双向钳制（见模块文档第 7 条）：下界 cfl_min 之外还必须
                 # 钳住上界 cfl_max——否则 cfl_number 低于 cfl_min 时这一行
                 # 会把"收缩"变成放大、并突破调用方给定的硬上限。
                 self.cfl_number = min(
