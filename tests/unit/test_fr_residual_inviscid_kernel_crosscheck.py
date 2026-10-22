@@ -111,7 +111,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
     return (residual, correction) if return_correction else residual
 
 
-@pytest.mark.parametrize("order,rel_tol", [(1, 1e-9), (2, 1e-7), (3, 1e-3)])
+@pytest.mark.parametrize("order,rel_tol", [(1, 1e-11), (2, 3e-11), (3, 3e-10)])
 def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
     """均匀自由流场：owner/neighbor 两侧的黎曼求解、边界幽灵态都会被
     触发，是最基础的对比场景。
@@ -129,11 +129,9 @@ def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
     交叉验证过新旧实现在真实信号下一致，只有这种"真值应严格为零"的
     抵消场景才对运算顺序如此敏感。这里改用与
     tests/unit/test_fr_residual_inviscid.py::TestFreeStreamPreservation
-    同一个相对判据哲学（相对 p_inf）。阈值按实测值（P=1: 0、P=2: 5.35e-8、
-    P=3: 2.86e-4）各留约一个数量级安全余量选取，且都比该文件自己 P=2/P=3
-    的物理判据（3e-5/5e-3，反映同一个已知的坍缩坐标模态基高阶条件数
-    问题，不是本次新增的局限）严格得多——这里验证的是"新旧实现算的是
-    同一件事"，不是"残差本身够不够小"。
+    同一个相对判据哲学（相对 p_inf）。阈值按原生基实测值（2026-10-22 I-210：P=1 5.9e-13、P=2 1.6e-12、
+    P=3 1.6e-11）留约 20 倍余量；此前 1e-9 / 1e-7 / 1e-3 是坍缩坐标模态基时期的实测（P=3 2.86e-4）。
+    这里验证的是"新旧实现算的是同一件事"，不是"残差本身够不够小"。
     """
     mesh = _build_synthetic_mixed_mesh(order)
     rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
@@ -149,23 +147,15 @@ def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
     assert rel_diff < rel_tol, f"P={order}: max|old-new|={max_diff:.3e}, rel={rel_diff:.3e}"
 
 
-@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("order", [1, 2, 3])
 def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     """非均匀扰动流场：owner_sources/neighbor_sources 求和路径更容易被
     真实触发到，覆盖面比纯均匀流场广。（此前还列了"alignment<0.5 回退路径"
     —— 那个兜底已于 2026-09-24 删除，理由见 inviscid_kernel.py 函数文档
     "法向一律取自本侧精确度量行"。）
 
-    不含 P=3：诊断已确认——即使把扰动幅度降到 ±0.5 m/s / ±0.5%（比
-    P=1/P=2 用的幅度小 10 倍），**旧的、本次完全未改动的参考实现自己**
-    在这个小型合成网格上算出的残差就已经到 ~1e43 量级（不是新 kernel
-    的问题，两者都异常，新旧对比因此完全不具参考意义）。这是 P=3 坍缩
-    坐标模态基在这个特定小网格上一个预先存在的条件数脆弱性（同一类
-    问题在 tests/unit/test_fr_residual_inviscid.py 里也留有 5e-3 这样
-    宽松得多的判据作为记录），不是本次性能优化引入或应该修复的范围——
-    P=1/P=2 已经充分验证了新 kernel 在真实（非灾难性抵消）信号下与
-    旧实现一致，P=3 的等价性由 test_new_kernel_matches_old_loop_uniform_flow
-    单独覆盖。
+    P=3 在同一扰动幅度下新旧相对差 4.6e-15（原生基实测，2026-10-22 I-210）；坍缩坐标模态基时期 P=3 的参考
+    实现本身在这个小网格的扰动场上就算出 ~1e43 的残差，当时因此排除了 P=3、并对 P=3 用小 10 倍的扰动。
     """
     mesh = _build_synthetic_mixed_mesh(order)
     rng = np.random.default_rng(order * 1000 + 7)
@@ -176,17 +166,8 @@ def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
     # 给每个 (cell, sp) 的原始变量加一个小的随机扰动（保持正性），转回守恒变量。
-    # 扰动幅度刻意保守（P=3 用比 P=1/P=2 更小的幅度）：诊断已确认更大幅度
-    # 的扰动（曾用过 ±5 m/s / ±5% 密度压强）会让 P=3 混合网格的旧实现
-    # 本身（不是新 kernel）算出 ~1e47 量级的残差——这是坍缩坐标模态基
-    # 在 P=3 下已知条件数问题（fr/collapsed_basis.py 文档）在非光滑扰动
-    # 场下被进一步放大的真实、预先存在的数值脆弱性，不是本次新 kernel
-    # 引入的问题，也不是这个交叉验证测试要覆盖的目标——这里只需要一个
-    # 足以触发 owner_sources/neighbor_sources 求和路径、但不把旧实现本身
-    # 推入病态区间的扰动幅度。
     n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    vel_pert = 0.5 if order >= 3 else 5.0
-    frac_pert = 0.005 if order >= 3 else 0.05
+    vel_pert, frac_pert = 5.0, 0.05
     Q = conserved_to_primitive(U)
     Q[..., 0] *= 1.0 + rng.uniform(-frac_pert, frac_pert, size=(n_cells, n_sps))
     Q[..., 1] += rng.uniform(-vel_pert, vel_pert, size=(n_cells, n_sps))
@@ -231,7 +212,7 @@ def _run_with_threads(order, nonuniform, n_threads):
     return _compute_residual_via_new_kernel(U, mesh, mesh.operators)
 
 
-@pytest.mark.parametrize("order,rel_tol", [(1, 1e-9), (2, 1e-7), (3, 1e-3)])
+@pytest.mark.parametrize("order,rel_tol", [(1, 1e-11), (2, 3e-11), (3, 3e-10)])
 def test_parallel_nt1_matches_nt16_uniform_flow(order, rel_tol):
     """均匀流场下 nt=1（等价串行顺序）与 nt=16（真并行）应在与
     新旧实现对比同一量级的相对 p_inf 容差内一致——理由/容差选取哲学
@@ -243,7 +224,7 @@ def test_parallel_nt1_matches_nt16_uniform_flow(order, rel_tol):
     assert rel_diff < rel_tol, f"P={order}: max|nt1-nt16|={max_diff:.3e}, rel={rel_diff:.3e}"
 
 
-@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("order", [1, 2, 3])
 def test_parallel_nt1_matches_nt16_nonuniform_flow(order):
     """非均匀扰动流场下 nt=1 vs nt=16，理由/判据同
     test_new_kernel_matches_old_loop_nonuniform_perturbed_flow。"""

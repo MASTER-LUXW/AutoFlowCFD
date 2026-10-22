@@ -7,15 +7,9 @@
 1. 三方向周期网格必须用四面体（不能像 Couette/等熵涡那样用棱柱）——
    棱柱只能沿单一挤出轴给出天然全等的封盖面，另外两个方向的边界会是
    `FaceExtractor` 按自身规则拆分的四边形侧面，两端拆分不保证互为
-   平移镜像（本项目周期边界条件开发时在单方向棱柱网格上真实复现过
-   这个失败模式）。四面体所有面天生是三角形，用与 (i,j,k) 无关的
-   固定局部拆分模板（见 `_tgv_mesh.py`，复用已验证的
-   `_channel_mesh.py::build_channel_mesh` 同一套模板）可以同时在
-   x/y/z 三个方向给出天然全等的边界三角化，代价是要接受项目记忆
-   `tet_collapsed_coord_anisotropy` 里记录的坍缩坐标各向异性风险——
-   已通过独立的自由流场保持性 + 非均匀周期一致场无异常离群残差
-   两项检查确认这套三方向周期四面体网格在本算例参数下没有触发
-   该风险（见 test_tgv_freestream_preservation）。
+   平移镜像。四面体所有面天生是三角形，用与 (i,j,k) 无关的固定局部拆分
+   模板（见 `_tgv_mesh.py`）可以同时在 x/y/z 三个方向给出天然全等的边界
+   三角化。网格本身没有引入虚假源项由 `test_tgv_freestream_preservation` 检查。
 2. 分子粘度：TGV 要在粗网格、有限步数预算内看到有意义的粘性衰减，需要一个远大于
    空气分子粘度的等效粘度（对应一个能被这套粗网格分辨的低雷诺数层流
    TGV，不是文献里 Re=1600 那种需要精细网格才能分辨的准湍流衰减曲线），
@@ -300,22 +294,11 @@ def test_tgv_viscous_dissipation_rate_converges():
 
 
 def test_tgv_freestream_preservation():
-    """均匀自由流场（无粘/粘性残差理论上处处严格为零）保持性——独立
-    验证三方向周期四面体网格本身没有引入虚假源项，也没有触发项目记忆
-    tet_collapsed_coord_anisotropy 记录的坍缩坐标各向异性放大问题。
+    """均匀自由流场（无粘/粘性残差理论上处处严格为零）保持性：独立验证三方向周期四面体网格（含周期配对）
+    没有引入虚假源项。
 
-    无粘残差判据用相对量（/p_inf），阈值与
-    tests/unit/test_fr_residual_inviscid.py::TestFreeStreamPreservation
-    P=2 情形取同一个 3e-5——同一个 G-04（跨单元插值统一到坍缩坐标模态基
-    +lu_solve）+S-02（体积项 over-integration）修复组合是这里舍入误差
-    的共同来源，两处理应共享同一条已审查过的精度基线，不应各自定一套
-    不可比的绝对阈值。实测 rel=1.30e-5（max|inv_res|=1.315，p_inf=101325），
-    与另一测试文件实测的 1.06e-5 同一数量级，二者互相印证：这是该修复
-    组合已知、有界的舍入噪声下限，不是本文件三方向周期配对（G-05）引入
-    的新缺陷——已用诊断脚本核实：384 个单元中残差 > 1e-2（绝对）的既包含
-    全部 168 个接触周期面的单元，也包含全部 216 个不接触周期面的内部
-    单元，比例上没有随"是否接触周期面"系统性区分，说明放大源自坍缩坐标
-    模态基本身、与周期配对逻辑无关。
+    原生基实测（2026-10-22 I-210，P2，6^3 x 6 单元）：无粘 max|R|/p_inf 1.9e-11、粘性 max|R| 3.1e-7（粘性残差的
+    舍入正比于 mu，这里 mu=1.8375），判据取约 50 / 30 倍余量。此前 3e-5 / 3e-2 是坍缩坐标模态基时期的舍入地板。
     """
     solver, mesh = _build_tgv_solver()
     solver.state.U[:, :, 0] = RHO_INF
@@ -326,15 +309,5 @@ def test_tgv_freestream_preservation():
     inv_res = solver.compute_inviscid_residual()
     visc_res = solver.compute_viscous_residual()
     rel_inv_res = np.max(np.abs(inv_res)) / P_INF
-    assert rel_inv_res < 3e-5, f"rel_inv_res={rel_inv_res:.3e}"
-    # 粘性残差的浮点噪声下限正比于 mu（应力张量本身是 mu 的线性函数）；
-    # 本文件用的 mu=1.8375 Pa·s 比 Couette/等熵涡测试用的默认分子粘度
-    # 1.8e-5 大约 1.0208e5 倍，直接沿用那两个测试的 1e-6 阈值不合理。
-    # 用诊断脚本在同一套三方向周期四面体网格上把 mu 换回默认 1.8e-5
-    # 单独测得 max|visc_res|=1.04e-7，乘以上述 mu 比值得 1.062e-2——与
-    # 这里 mu=1.8375 时实测的 1.066e-2 只差 <1%，证实了"正比于 mu"这条
-    # 线性关系，即这个量级是同一个 G-04/S-02 舍入噪声下限按 mu 线性缩放
-    # 的结果，不是新缺陷。阈值取该缩放值的约 3 倍安全余量（与上面
-    # rel_inv_res 判据、以及 test_fr_residual_inviscid.py 里同一原则
-    # 一致），而不是照抄一个为不同 mu 标定的绝对阈值。
-    assert np.max(np.abs(visc_res)) < 3e-2
+    assert rel_inv_res < 1e-9, f"rel_inv_res={rel_inv_res:.3e}"
+    assert np.max(np.abs(visc_res)) < 1e-5
