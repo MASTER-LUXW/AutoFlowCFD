@@ -145,11 +145,14 @@ def mirror_velocity_gradient(gv: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
 
 @njit(cache=True, inline='always')
 def boundary_other_gradients(gv_s: np.ndarray, gT_s: np.ndarray, adj_row: np.ndarray, kind: int):
-    """边界（含混合拆分面的边界半区）上"另一侧"的梯度 `(gv_x, gT_x)`。
+    """边界（含混合拆分面的边界半区）上"另一侧"的梯度 `(gv_x, gT_x)`，各边界种类的规则只在这里（见模块文档）：
 
-    出口（Neumann）在这里取本侧梯度，法向镜像梯度由 `viscous_common_flux_point` 构造。无滑移壁：速度梯度取本侧（壁面切向
-    速度的法向导数就是壁面剪应力本身），温度梯度法向镜像（绝热）；对称面 /
-    滑移壁：两者都取镜像场的梯度；Dirichlet：取本侧。
+    * 无滑移壁：速度梯度取本侧（壁面切向速度的法向导数就是壁面剪应力本身），温度梯度法向镜像（绝热）；
+    * 对称面 / 滑移壁：两者都取镜像场的梯度；
+    * 出口（Neumann）：只镜像法向导数（`grad u · R`、`R grad T`，充分发展条件）；
+    * Dirichlet：取本侧。
+
+    2026-10-22（I-16）以前出口这一条写在 `viscous_common_flux_point` 里、覆盖调用方传入的值，同一语义两处。
     """
     gv_x = np.empty((3, 3))
     gT_x = np.empty(3)
@@ -157,6 +160,8 @@ def boundary_other_gradients(gv_s: np.ndarray, gT_s: np.ndarray, adj_row: np.nda
         gv_x = mirror_velocity_gradient(gv_s, adj_row)
         gT_x = mirror_normal_component(gT_s, adj_row)
         return gv_x, gT_x
+    if kind == VBC_NEUMANN:
+        return mirror_normal_derivative(gv_s, adj_row), mirror_normal_component(gT_s, adj_row)
     for a in range(3):
         for b in range(3):
             gv_x[a, b] = gv_s[a, b]
