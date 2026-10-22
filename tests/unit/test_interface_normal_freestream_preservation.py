@@ -129,10 +129,10 @@ def _tail(c):
 
 def _expected(c):
     """均匀流下按定义的界面修正：每个 primary 面侧 `-lift (w ⊙ a·F(Q)) / det`。"""
-    from autoflowcfd.core.fr_residual.inviscid import euler_physical_flux
+    from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 
     fl, Q, det = c["flat"], c["Q"], c["det"]
-    F = euler_physical_flux(Q[0, 0])                       # (3, 5)，全场同一个状态
+    F = euler_physical_flux_point(Q[0, 0])                       # (3, 5)，全场同一个状态
     out = np.zeros_like(Q)
     for f in range(fl.n_faces):
         sides = []

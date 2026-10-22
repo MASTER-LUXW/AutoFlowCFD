@@ -18,11 +18,11 @@ import numpy as np
 import pytest
 
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 
 from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
-    euler_physical_flux,
     primitive_to_conserved,
 )
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
@@ -89,7 +89,7 @@ class TestAusmUpConsistency:
             n = rng.normal(size=3)
             n /= np.linalg.norm(n)
 
-            F_exact = euler_physical_flux(q[None, :])[0]
+            F_exact = euler_physical_flux_point(q)
             flux_exact_n = F_exact.T @ n
 
             flux_ausm = compute_ausm_up_flux(q, q, n, 0.2)

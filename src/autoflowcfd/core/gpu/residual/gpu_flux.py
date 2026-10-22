@@ -49,17 +49,14 @@ def primitive_to_conserved_gpu(Q):
     """
     cp = get_cupy()
     rho, u, v, w, p = Q[..., 0], Q[..., 1], Q[..., 2], Q[..., 3], Q[..., 4]
-    rho_safe = cp.maximum(rho, 1e-10)
-    ke = 0.5 * (u**2 + v**2 + w**2)
-    e_internal = p / ((GAMMA - 1.0) * rho_safe)
-    E = e_internal + ke
-    return cp.stack([rho, rho * u, rho * v, rho * w, rho * E], axis=-1)
+    rhoE = p / (GAMMA - 1.0) + 0.5 * rho * (u**2 + v**2 + w**2)
+    return cp.stack([rho, rho * u, rho * v, rho * w, rhoE], axis=-1)
 
 
 def euler_physical_flux_gpu(Q):
     """GPU 版欧拉物理通量张量 F_i(Q)。
 
-    与 core/fr_operators/flux_kernels/euler.py::euler_physical_flux_batch 公式一致。
+    与 core/fr_operators/flux_kernels/euler.py 公式一致（不含除法的多项式，见该模块文档）。
 
     Args:
         Q: CuPy 数组 (N, 5)，(rho, u, v, w, p)
@@ -73,12 +70,7 @@ def euler_physical_flux_gpu(Q):
     v = Q[..., 2]
     w = Q[..., 3]
     p = Q[..., 4]
-    rho_safe = cp.maximum(rho, 1e-10)
-
-    ke = 0.5 * (u**2 + v**2 + w**2)
-    e_internal = p / ((GAMMA - 1.0) * rho_safe)
-    rhoE = rho * (e_internal + ke)
-    H = (rhoE + p) / rho_safe
+    rho_H = GAMMA / (GAMMA - 1.0) * p + 0.5 * rho * (u**2 + v**2 + w**2)     # rho * 总焓
 
     # 质量通量
     mf0 = rho * u
@@ -93,21 +85,21 @@ def euler_physical_flux_gpu(Q):
     F[:, 0, 1] = mf0 * u + p
     F[:, 0, 2] = mf0 * v
     F[:, 0, 3] = mf0 * w
-    F[:, 0, 4] = rho * H * u
+    F[:, 0, 4] = rho_H * u
 
     # y-direction
     F[:, 1, 0] = mf1
     F[:, 1, 1] = mf1 * u
     F[:, 1, 2] = mf1 * v + p
     F[:, 1, 3] = mf1 * w
-    F[:, 1, 4] = rho * H * v
+    F[:, 1, 4] = rho_H * v
 
     # z-direction
     F[:, 2, 0] = mf2
     F[:, 2, 1] = mf2 * u
     F[:, 2, 2] = mf2 * v
     F[:, 2, 3] = mf2 * w + p
-    F[:, 2, 4] = rho * H * w
+    F[:, 2, 4] = rho_H * w
 
     return F
 

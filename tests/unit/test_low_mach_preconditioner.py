@@ -25,6 +25,7 @@ import pytest
 
 from autoflowcfd.core.utils.preconditioning import (
     apply_low_mach_preconditioner,
+    low_mach_preconditioner_state_jacobian,
     preconditioned_acoustic_eigs,
     preconditioned_sound_speed,
     _precond_beta2,
@@ -369,3 +370,26 @@ class TestPseudoTimeStepPairsWithGamma:
         assert bound_bad < rho_spec, (
             f"按 un 取 beta^2 在本状态下恰好也是上界 (mach={mach})，本测试"
             f"失去判别力：谱半径={rho_spec:.6e} 估计={bound_bad:.6e}")
+
+
+@pytest.mark.parametrize("speed,mach_ref", [(30.0, 0.05), (30.0, 0.3), (3.0, 0.05), (400.0, 0.05)])
+def test_state_jacobian_matches_central_difference(speed, mach_ref):
+    """`d(Gamma(Q) R)/dQ`（R 固定）的解析核对四阶中心差分：beta^2 未钳制（M=0.09 > 下限）、被下限钳制
+    （mach_ref 0.3 / 低速 3 m/s）与被上限 1 钳制（超声速）三种分支。平均流解析 Jacobian 用它（2026-10-22 I-25 以前
+    在 jacobian/assemble.py 里对原始变量前向差分，`Gamma R - R` 远小于 `R` 时相对误差达 1e-5 量级）。"""
+    rng = np.random.default_rng(int(speed))
+    n = 16
+    Q = np.column_stack([rng.uniform(0.8, 1.4, n), *(speed * rng.uniform(-1, 1, (3, n))), rng.uniform(9e4, 1.1e5, n)])
+    Q = Q.reshape(n, 1, 5)
+    R = rng.normal(size=(n, 1, 5)) * np.array([1.0, 30.0, 30.0, 30.0, 2.5e5])
+    J = low_mach_preconditioner_state_jacobian(R, Q, mach_ref)
+    for v in range(5):
+        h = 1e-4 * (np.abs(Q[:, :, v]) + (speed if 1 <= v <= 3 else 0.0))[..., None]
+        d = np.zeros_like(R)
+        for c, s in ((8.0, 1.0), (-8.0, -1.0), (-1.0, 2.0), (1.0, -2.0)):
+            Qs = Q.copy()
+            Qs[:, :, v] += s * h[..., 0]
+            d += c * apply_low_mach_preconditioner(R, Qs, mach_ref)
+        ref = d / (12.0 * h)
+        scale = np.abs(ref).max() + 1e-300
+        np.testing.assert_allclose(J[:, :, :, v], ref, rtol=1e-7, atol=1e-7 * scale)

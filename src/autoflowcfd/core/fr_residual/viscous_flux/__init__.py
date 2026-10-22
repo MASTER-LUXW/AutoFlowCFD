@@ -23,7 +23,6 @@ AutoFlowCFD V2.0 - FR 粘性物理通量与界面耦合（S-03）。
 
 from .pointwise import (  # noqa: F401
     compute_temperature,
-    viscous_physical_flux,
 )
 from .overintegration import (  # noqa: F401
     viscous_volume_term,
@@ -36,5 +35,4 @@ __all__ = [
     "compute_temperature",
     "compute_viscous_residual_fr",
     "viscous_volume_term",
-    "viscous_physical_flux",
 ]

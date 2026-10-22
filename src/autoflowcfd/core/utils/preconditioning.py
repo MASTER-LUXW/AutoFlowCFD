@@ -3,7 +3,7 @@
 在低马赫数下，一个未做预处理的可压缩格式必须解析声波（速度
 ~ sqrt(gamma*p/rho)，标况空气中约 340 m/s），即便真正关心的物理流动
 速度慢得多（例如典型汽车外流场约 30 m/s，M~0.09）。这会让一个人为
-极小的伪时间步长（CFL 被声波而非慢得多的对流波限制）与 HLLC 迎风
+极小的伪时间步长（CFL 被声波而非慢得多的对流波限制）与迎风
 格式带来的过量数值耗散（其数值粘性同样按声速量级缩放）耦合在一起，
 同时拖慢收敛速度并削弱解的稳健性——在驻点附近以及回流/分离区域尤为
 严重，因为即便整体流场 M~0.1，局部马赫数也可能接近零（曾直接观测到：
@@ -11,9 +11,9 @@
 稳定——是后来单独发现并修复的）。
 
 预处理把物理声学特征值 (un +/- a) 替换成一对经过重新缩放的值，其分布
-范围由一个局部截断的马赫数 beta 控制，从而把伪时间推进（以及 HLLC
+范围由一个局部截断的马赫数 beta 控制，从而把伪时间推进（以及迎风
 通量的数值耗散）与真实声速解耦。这在数学上不改变收敛后的稳态残差
-（R=0）：无论 SL/SR 波速估计怎么算，HLLC 的通量始终保持严格一致性
+（R=0）：无论波速估计怎么算，AUSM+up 的通量始终保持严格一致性
 （对任意 U 都有 F(U,U)=F(U)），所以收敛时得到的答案完全相同——只是
 经过了一条条件数好得多的伪时间路径。
 
@@ -221,6 +221,79 @@ def _apply_low_mach_precond_kernel(R, Q, mach_ref, k, out) -> None:
             out[c, s, 2] = r2 - coef * v
             out[c, s, 3] = r3 - coef * w
             out[c, s, 4] = r4 - coef * H
+
+
+@njit(cache=True, parallel=True)
+def _precond_state_jacobian_kernel(R, Q, mach_ref, k, out) -> None:
+    """`out[c, s, m, v] = d(Gamma(Q) R)_m / dQ_v`（`R` 固定），逐分支与 `_apply_low_mach_precond_kernel` 对应。
+
+    `Gamma R = R - coef (1, u, v, w, H)`，`coef = (1 - beta^2)/a^2 * dp(R)`；`a^2 = gamma p/rho`，`H = a^2/(gamma-1)
+    + q^2/2`，`beta^2 = q^2/a^2`（未被钳制时；被下限 `k mach_ref^2` / 1e-10 或上限 1 钳制时对状态导数为零），
+    `dp(R)` 只经速度依赖状态。非物理点原样透传，导数为零。
+    """
+    n_cells, n_sps = R.shape[0], R.shape[1]
+    gm1 = GAMMA - 1.0
+    floor2 = k * mach_ref * mach_ref
+    for c in prange(n_cells):
+        for s in range(n_sps):
+            for m in range(5):
+                for v in range(5):
+                    out[c, s, m, v] = 0.0
+            rho = Q[c, s, 0]
+            p = Q[c, s, 4]
+            if rho < 1e-30 or p <= 0.0:
+                continue
+            vel = Q[c, s, 1:4]
+            a2 = GAMMA * p / rho
+            q2 = vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]
+            m2 = q2 / a2
+            beta2 = m2 if m2 > floor2 else floor2
+            free = m2 > floor2
+            if beta2 > 1.0:
+                beta2 = 1.0
+                free = False
+            elif beta2 < 1e-10:
+                beta2 = 1e-10
+                free = False
+            dp = gm1 * (0.5 * q2 * R[c, s, 0] - vel[0] * R[c, s, 1] - vel[1] * R[c, s, 2] - vel[2] * R[c, s, 3]
+                        + R[c, s, 4])
+            sc = (1.0 - beta2) / a2
+            coef = sc * dp
+            H = a2 / gm1 + 0.5 * q2
+            # 对 (rho, u, v, w, p) 的导数：a^2、beta^2、s、dp(R)
+            da2 = np.zeros(5)
+            da2[0] = -a2 / rho
+            da2[4] = GAMMA / rho
+            dbeta2 = np.zeros(5)
+            if free:
+                for v in range(5):
+                    dbeta2[v] = -q2 / (a2 * a2) * da2[v]
+                for j in range(3):
+                    dbeta2[1 + j] = 2.0 * vel[j] / a2
+            ddp = np.zeros(5)
+            for j in range(3):
+                ddp[1 + j] = gm1 * (vel[j] * R[c, s, 0] - R[c, s, 1 + j])
+            for v in range(5):
+                dcoef = (-dbeta2[v] / a2 - (1.0 - beta2) / (a2 * a2) * da2[v]) * dp + sc * ddp[v]
+                out[c, s, 0, v] = -dcoef
+                for j in range(3):
+                    out[c, s, 1 + j, v] = -dcoef * vel[j]
+                out[c, s, 4, v] = -dcoef * H - coef * da2[v] / gm1
+            for j in range(3):
+                out[c, s, 1 + j, 1 + j] -= coef
+                out[c, s, 4, 1 + j] -= coef * vel[j]
+
+
+def low_mach_preconditioner_state_jacobian(residual: np.ndarray, Q: np.ndarray, mach_ref: float,
+                                           k: float = 1.1) -> np.ndarray:
+    """`d(Gamma(Q) R)/dQ`（`R` 固定）：`residual` (n_cells, n_sps, 5) 与原始变量 `Q` -> (n_cells, n_sps, 5, 5)，
+    `[..., 守恒分量, 原始变量]`。解析式（`_precond_state_jacobian_kernel`），供平均流解析 Jacobian
+    （`core/fr_residual/jacobian/assemble.py`）使用；`k` 与 `apply_low_mach_preconditioner` 同义同默认值。"""
+    R5 = np.ascontiguousarray(residual[..., :5], dtype=np.float64)
+    out = np.empty(R5.shape + (5,))
+    _precond_state_jacobian_kernel(R5, np.ascontiguousarray(Q[..., :5], dtype=np.float64), float(mach_ref), float(k),
+                                   out)
+    return out
 
 
 def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,

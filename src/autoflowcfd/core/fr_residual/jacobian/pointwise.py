@@ -5,11 +5,12 @@
 
 * `primitive_jacobian`：`dQ/dU`，`Q=(rho,u,v,w,p)`，解析式；
 * `temperature_gradient_row`：`dT/dQ`，`T = p/(rho R)`，解析式；
-* `euler_flux_jacobian` / `viscous_flux_jacobian`：对**残差实际调用的那个逐点
-  通量函数**做前向差分。不写解析式是刻意的：通量函数若日后修改（正性保护、
-  常数），差分自动跟着变，Jacobian 不会与残差脱节（通量对梯度是线性的，差分
-  在舍入误差内精确；对 Q 的非线性部分误差 `O(sqrt(eps))`，远小于预处理子
-  需要的精度）。
+* `euler_flux_jacobian`：`dF/dQ`，解析式。欧拉通量对原始变量是多项式（`flux_kernels/euler.py` 模块文档），
+  导数精确；与逐点通量核的一致性由 `tests/unit/test_euler_flux_jacobian.py` 对中心差分把关。2026-10-22（I-25）
+  以前对通量做前向差分，而当时的通量经 `H = (rho E + p)/rho` 求能量分量：能量通量以压力项为主（约 1e7），
+  对密度的导数只有 `u |V|^2/2`（约 1e4），先除后乘的舍入使该导数的相对误差达 1e-5 量级；
+* `viscous_flux_jacobian`：对**残差实际调用的那个逐点通量函数**做前向差分。粘性通量对梯度与速度都是线性的
+  （`tau(grad u) . u`，热流 `k grad T`），前向差分在舍入误差内精确，且被求导的量本身就是主项，没有上面的抵消。
 
 ## 差分步长
 
@@ -21,9 +22,7 @@
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.fr_operators.flux_kernels import (
-    euler_physical_flux_point, viscous_physical_flux_point,
-)
+from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point
 from autoflowcfd.core.thermo import GAMMA, R_AIR
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
@@ -83,19 +82,35 @@ def temperature_gradient_row(Q):
 
 @njit(cache=True, parallel=True)
 def euler_flux_jacobian(Q):
-    """`dF_i/dQ`，Q `(N, 5)` -> `(N, 3, 5, 5)`，`[k, i, out, in]`。"""
+    """`dF_i/dQ`，Q `(N, 5)` 原始变量 -> `(N, 3, 5, 5)`，`[k, i, out, in]`（解析式，见模块文档）。
+
+    F_i = (rho u_i, rho u_i u_j + p delta_ij, u_i rho_H)，rho_H = gamma/(gamma-1) p + rho |V|^2 / 2：
+
+        d(rho u_i)/d(rho, u_m)            = u_i,  rho delta_im
+        d(rho u_i u_j + p delta_ij)/d(...) = u_i u_j,  rho (delta_im u_j + u_i delta_jm),  delta_ij
+        d(u_i rho_H)/d(...)                = u_i |V|^2 / 2,  delta_im rho_H + rho u_i u_m,  gamma/(gamma-1) u_i
+    """
     n = Q.shape[0]
-    out = np.empty((n, 3, 5, 5))
+    g = GAMMA / (GAMMA - 1.0)
+    out = np.zeros((n, 3, 5, 5))
     for k in prange(n):
-        f0 = euler_physical_flux_point(Q[k])
-        for v in range(5):
-            h = primitive_step(Q[k], v)
-            q = Q[k].copy()
-            q[v] += h
-            f1 = euler_physical_flux_point(q)
-            for i in range(3):
-                for o in range(5):
-                    out[k, i, o, v] = (f1[i, o] - f0[i, o]) / h
+        rho = Q[k, 0]
+        v2 = Q[k, 1] * Q[k, 1] + Q[k, 2] * Q[k, 2] + Q[k, 3] * Q[k, 3]
+        rho_H = g * Q[k, 4] + 0.5 * rho * v2
+        for i in range(3):
+            ui = Q[k, 1 + i]
+            out[k, i, 0, 0] = ui
+            out[k, i, 0, 1 + i] = rho
+            for j in range(3):
+                uj = Q[k, 1 + j]
+                out[k, i, 1 + j, 0] = ui * uj
+                out[k, i, 1 + j, 1 + i] += rho * uj
+                out[k, i, 1 + j, 1 + j] += rho * ui
+                out[k, i, 4, 1 + j] = rho * ui * uj
+            out[k, i, 1 + i, 4] = 1.0
+            out[k, i, 4, 0] = 0.5 * v2 * ui
+            out[k, i, 4, 1 + i] += rho_H
+            out[k, i, 4, 4] = g * ui
     return out
 
 

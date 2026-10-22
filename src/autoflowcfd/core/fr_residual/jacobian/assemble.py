@@ -263,12 +263,14 @@ def _transform_arrays(U5, Q, gamma_R, ctx):
 def _gamma_matrices(Q, gamma_R, TQ, mach_ref):
     """逐解点 `Gamma` 矩阵与 `d(Gamma R_raw)/dU|_{R_raw}`（均为 `(n_cells, n_sps, 5, 5)`）。
 
-    `Gamma` 对残差线性：对单位残差作用即得各列；`R_raw = Gamma^{-1} (Gamma R_raw)`
-    逐解点解出；状态导数对原始变量做前向差分再乘 `dQ/dU`
-    （`apply_low_mach_preconditioner` 就是残差用的那一个函数；`beta^2` 的上下限
-    钳制是拐点，前向差分与块 Jacobi 差分装配取同一侧导数）。
+    `Gamma` 对残差线性：对单位残差作用即得各列（`apply_low_mach_preconditioner` 就是残差用的那一个函数）；
+    `R_raw = Gamma^{-1} (Gamma R_raw)` 逐解点解出；状态导数取解析式
+    （`preconditioning.py::low_mach_preconditioner_state_jacobian`）再乘 `dQ/dU`。2026-10-22（I-25）以前对原始
+    变量做前向差分：`Gamma R - R` 远小于 `R` 时舍入误差 `eps |R| / h` 使该项相对误差达 1e-5 量级。
     """
-    from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+    from autoflowcfd.core.utils.preconditioning import (
+        apply_low_mach_preconditioner, low_mach_preconditioner_state_jacobian,
+    )
 
     shape = Q.shape[:2]
     gamma = np.empty(shape + (5, 5))
@@ -277,14 +279,5 @@ def _gamma_matrices(Q, gamma_R, TQ, mach_ref):
         e[..., v] = 1.0
         gamma[..., :, v] = apply_low_mach_preconditioner(e, Q, mach_ref)
     R_raw = np.linalg.solve(gamma, gamma_R[..., None])[..., 0]
-    dq = np.empty(shape + (5, 5))
-    rho, vel, p = Q[..., 0], Q[..., 1:4], Q[..., 4]
-    c = np.sqrt(np.maximum(GAMMA * p / np.maximum(rho, 1e-300), 0.0))
-    ref = np.stack([np.abs(rho), *(np.linalg.norm(vel, axis=-1) + c,) * 3, np.abs(p)], axis=-1)
-    base = apply_low_mach_preconditioner(R_raw, Q, mach_ref)
-    for v in range(5):
-        h = _SQRT_EPS * (np.abs(Q[..., v]) + ref[..., v]) if v in (1, 2, 3) else _SQRT_EPS * ref[..., v]
-        Qp = Q.copy()
-        Qp[..., v] += h
-        dq[..., :, v] = (apply_low_mach_preconditioner(R_raw, Qp, mach_ref) - base) / h[..., None]
+    dq = low_mach_preconditioner_state_jacobian(R_raw, Q, mach_ref)
     return gamma, np.einsum("csav,csvb->csab", dq, TQ)

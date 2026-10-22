@@ -64,38 +64,8 @@ def _conserved_to_primitive_rows(U, Q):
 def primitive_to_conserved(Q: np.ndarray) -> np.ndarray:
     """Q=(rho,u,v,w,p) -> U=(rho,rho*u,rho*v,rho*w,rho*E)。"""
     rho, u, v, w, p = Q[..., 0], Q[..., 1], Q[..., 2], Q[..., 3], Q[..., 4]
-    ke = 0.5 * (u**2 + v**2 + w**2)
-    e_internal = p / ((GAMMA - 1.0) * np.maximum(rho, 1e-10))
-    E = e_internal + ke
-    return np.stack([rho, rho * u, rho * v, rho * w, rho * E], axis=-1)
-
-
-def euler_physical_flux(Q: np.ndarray) -> np.ndarray:
-    """计算物理通量张量 F_i(Q)，i=x,y,z。
-
-    Args:
-        Q: 形状 (..., 5)，(rho,u,v,w,p)
-
-    Returns:
-        F: 形状 (..., 3, 5)，F[...,i,:] 是方向 i 的通量向量
-    """
-    rho, u, v, w, p = Q[..., 0], Q[..., 1], Q[..., 2], Q[..., 3], Q[..., 4]
-    ke = 0.5 * (u**2 + v**2 + w**2)
-    e_internal = p / ((GAMMA - 1.0) * np.maximum(rho, 1e-10))
-    rhoE = rho * (e_internal + ke)
-    H = (rhoE + p) / np.maximum(rho, 1e-10)  # 总焓
-
-    vel = np.stack([u, v, w], axis=-1)  # (...,3)
-    mass_flux = rho[..., None] * vel  # (...,3) = rho*u_i
-
-    F = np.zeros(Q.shape[:-1] + (3, 5))
-    F[..., :, 0] = mass_flux
-    for i in range(3):
-        F[..., i, 1] = mass_flux[..., i] * u + (p if i == 0 else 0.0)
-        F[..., i, 2] = mass_flux[..., i] * v + (p if i == 1 else 0.0)
-        F[..., i, 3] = mass_flux[..., i] * w + (p if i == 2 else 0.0)
-        F[..., i, 4] = rho * H * vel[..., i]
-    return F
+    rhoE = p / (GAMMA - 1.0) + 0.5 * rho * (u**2 + v**2 + w**2)
+    return np.stack([rho, rho * u, rho * v, rho * w, rhoE], axis=-1)
 
 
 class MeanFlowPrimitives(NamedTuple):

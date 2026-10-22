@@ -10,12 +10,10 @@ from autoflowcfd.core.fr_residual.inviscid import (
 )
 from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.core.fr_residual.viscous_flux import viscous_physical_flux
 
 __all__ = [
     'compute_inviscid_residual_fr',
     'conserved_to_primitive',
     'DefaultGhostProvider',
     'compute_viscous_residual_fr',
-    'viscous_physical_flux',
 ]

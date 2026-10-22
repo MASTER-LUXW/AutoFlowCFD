@@ -1,29 +1,16 @@
-"""欧拉/粘性物理通量的逐点标量 numba 版本 (性能优化配套)。
+"""欧拉 / 粘性物理通量的逐点 numba 核：残差体积项、界面项与隐式 Jacobian 共用（GPU 版
+`core/gpu/residual/gpu_flux.py` 公式相同）。
 
-`core/fr_residual/inviscid.py::euler_physical_flux` 和
-`core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux` 是向量化 numpy 实现
-（`np.stack`/`np.zeros`/`np.swapaxes`/`np.eye`/`einsum`），在
-`core/fr_residual/inviscid_kernel.py`/`core/fr_residual/viscous_flux_kernel.py` 的逐点
-numba `@njit` 主循环里会被反复调用（每个 Flux Point 调一次）——numba
-nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须重新写
-逐点标量版。这是整个性能优化里除了 AUSM+up 之外风险最高的新代码
-（尤其 `viscous_physical_flux_point` 涉及真实物理：Boussinesq 假设下
-`mu_total=mu+mu_t` 统一处理应力张量、`k_cond` 混合分子/湍流普朗特数、
-`work=vel·tau` 粘性功）——因此单独在这里、用随机输入与现有向量化实现
-逐位对比验证（见 `tests/unit/test_fr_flux_kernels_pointwise.py`），不
-把这一步的验证并入端到端残差对比，出问题能立刻定位到这里而不是别处。
-
-两个函数的公式必须与 `core/fr_residual/inviscid.py::euler_physical_flux`/
-`core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux` 严格一致，改动前者时必须
-同步检查后者是否也要改。
+逐点核与测试里独立写出的参考公式逐位对比（`tests/unit/test_fr_flux_kernels_pointwise.py`）。2026-10-22（I-25）
+以前 `core/fr_residual/` 另有一份向量化 numpy 实现（`inviscid.py::euler_physical_flux`、
+`viscous_flux/pointwise.py::viscous_physical_flux`）作为"公式来源"，src 里已无调用方，删除，参考公式移入该测试。
 
 ## 文件分工
 
-    euler.py             欧拉物理通量与熵稳定体积散度
-    viscous.py           粘性物理通量与 IP 罚项
+    constants.py         粘性 IP 罚项常数
+    euler.py             欧拉物理通量（逐点 / 批量）
+    viscous.py           粘性物理通量（逐点 / 批量 / 有效涡粘）、光滑非负截断与 IP 罚项
     viscous_bc.py        粘性边界种类与边界"另一侧"梯度镜像
-
-本 `__init__.py` re-export 各子模块的公开名。
 """
 
 from .constants import (  # noqa: F401

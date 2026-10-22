@@ -1,4 +1,12 @@
-"""AutoFlowCFD V2.0 - 欧拉物理通量与熵稳定体积散度"""
+"""AutoFlowCFD V2.0 - 欧拉物理通量（逐点 / 批量 numba 核；GPU 版 `core/gpu/residual/gpu_flux.py` 公式相同）。
+
+按原始变量 Q = (rho, u, v, w, p) 写成不含除法的多项式：
+
+    F_i = (rho u_i,  rho u_i u_j + p delta_ij,  u_i (gamma/(gamma-1) p + rho |V|^2 / 2))
+
+能量分量即 rho H u_i（rho H = rho E + p）。2026-10-22（I-25）以前经 H = (rho E + p) / max(rho, 1e-10) 求得：代数上
+相同，只多一次除法和一个密度下限（正性限制器保证解点密度为正，下限不起作用；解失去正性时它只会掩盖问题）。
+"""
 
 import numpy as np
 
@@ -8,21 +16,13 @@ from autoflowcfd.core.thermo import GAMMA
 
 @njit(cache=True)
 def euler_physical_flux_point(Q: np.ndarray) -> np.ndarray:
-    """欧拉物理通量，单点版。Q=(rho,u,v,w,p) -> F，形状 (3,5)。
-
-    与 core/fr_residual/inviscid.py::euler_physical_flux 的公式逐一对应。
-    """
+    """欧拉物理通量，单点版。Q=(rho,u,v,w,p) -> F，形状 (3,5)（公式见模块文档）。"""
     rho = Q[0]
     u = Q[1]
     v = Q[2]
     w = Q[3]
     p = Q[4]
-    rho_safe = max(rho, 1e-10)
-
-    ke = 0.5 * (u * u + v * v + w * w)
-    e_internal = p / ((GAMMA - 1.0) * rho_safe)
-    rhoE = rho * (e_internal + ke)
-    H = (rhoE + p) / rho_safe
+    rho_H = GAMMA / (GAMMA - 1.0) * p + 0.5 * rho * (u * u + v * v + w * w)     # rho * 总焓
 
     mf0 = rho * u
     mf1 = rho * v
@@ -33,19 +33,19 @@ def euler_physical_flux_point(Q: np.ndarray) -> np.ndarray:
     F[0, 1] = mf0 * u + p
     F[0, 2] = mf0 * v
     F[0, 3] = mf0 * w
-    F[0, 4] = rho * H * u
+    F[0, 4] = rho_H * u
 
     F[1, 0] = mf1
     F[1, 1] = mf1 * u
     F[1, 2] = mf1 * v + p
     F[1, 3] = mf1 * w
-    F[1, 4] = rho * H * v
+    F[1, 4] = rho_H * v
 
     F[2, 0] = mf2
     F[2, 1] = mf2 * u
     F[2, 2] = mf2 * v
     F[2, 3] = mf2 * w + p
-    F[2, 4] = rho * H * w
+    F[2, 4] = rho_H * w
     return F
 
 
@@ -53,18 +53,8 @@ def euler_physical_flux_point(Q: np.ndarray) -> np.ndarray:
 def euler_physical_flux_batch(Q: np.ndarray) -> np.ndarray:
     """`euler_physical_flux_point` 的批量版：Q (N,5) -> F (N,3,5)。
 
-    体积项用（向量化的 `core/fr_residual/inviscid.py::euler_physical_flux` 逐点重复分配 `np.zeros`
-    大数组 + `np.stack`，在生产网格上是热点）。直接复用已经逐位验证过的 `euler_physical_flux_point`，
-    不是新公式，只是换一种循环方式；调用方负责把任意形状的
-    `(...,5)` 输入展平成 `(N,5)` 再调用，输出展平成 `(N,3,5)` 后自行
-    reshape 回原始前导维度。
-
-    多核并行（阶段二）：这是纯 gather——每次迭代 i 只写自己的输出行
-    `F[i]`，不同 i 之间零索引冲突，`prange` 直接安全，不需要像两个
-    界面 kernel（core/fr_residual/inviscid_kernel.py、viscous_flux_kernel.py）
-    那样用私有缓冲区+归约处理 scatter-add。线程数由 numba 运行时环境
-    （`numba.set_num_threads`，求解器启动时设置一次）决定，这里不接收
-    也不查询线程数参数。
+    调用方把 `(...,5)` 展平成 `(N,5)`、输出 reshape 回原前导维度。逐点 `prange`：每次迭代只写自己的输出行，
+    无写冲突；线程数由 numba 运行时（求解器启动时 `numba.set_num_threads`）决定。
     """
     n = Q.shape[0]
     F = np.zeros((n, 3, 5))

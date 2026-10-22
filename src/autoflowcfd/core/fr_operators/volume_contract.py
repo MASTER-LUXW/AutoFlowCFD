@@ -1,41 +1,19 @@
-"""体积项/梯度里"共享算子 (不依赖 cell) 张量收缩"的高效实现 (性能优化配套)。
+"""体积项 / 梯度里"共享算子 x 逐单元场"张量收缩与逆变通量的 numba 并行核。
 
-`core/fr_residual/inviscid.py`（体积项过积分）、`core/fr_residual/viscous_flux/`（体积项散度）、
-`core/fr_operators/gradients.py`（物理空间梯度）
-里大量出现形如::
+`core/fr_residual/`（体积项过积分、粘性体积散度）与 `core/fr_operators/gradients.py`（物理梯度）大量出现::
 
-    np.einsum("fs,csv->cfv", D, X)      # D 不依赖 cell，只收缩 1 个轴
-    np.einsum("fjm,cjmv->cfv", D, X)    # D 不依赖 cell，收缩 2 个轴 (j,m)
+    out[c, f, v] = sum_s   D[f, s]    X[c, s, v]       # contract_shared_operator_1axis
+    out[c, f, v] = sum_j,m D[f, j, m] X[c, j, m, v]    # contract_shared_operator_2axis（(j, m) 合并成一个轴）
 
-的调用——`D`（微分/插值/限制算子）对所有 cell 共享、完全相同，只有 `X`
-随 cell 变化。这类收缩在数学上等价于"共享矩阵 @ 逐 cell 展平后的大矩阵"，
-应当归约成一次 BLAS gemm；但 `np.einsum` 不传 `optimize=True` 时走的是
-通用逐元素求和路径，不会自动识别并利用这个结构——在 545,597 cell 的
-生产网格上实测是体积项的主要热点（py-spy 对 P2 阶数残差求值的采样，
-`euler_physical_flux`/`einsum` 相关帧占据几乎全部采样）。
+`D`（微分 / 插值 / 限制算子）对所有单元相同，只有 `X` 随单元变化。两种形状共用一个按单元 `prange` 的核
+（`_contract_shared_kernel` -> `contract_local`，4 路累加器），逐单元融合核（`fused_volume/`、`gradients.py`）也
+经过同一个 `contract_local`，求和顺序处处相同。逆变通量 `adj(J) F` 由 `contravariant_flux_from_metric` 融合求值，
+`adj(J) = det(J) J^{-1}` 不落内存。
 
-`np.tensordot` 对两个操作数的收缩，内部本身就是"reshape 成 2D + 调用
-`np.dot`（BLAS gemm）+ reshape 回去"（numpy 自己的实现，非本项目新写的
-数值算法）——用它替换这些 einsum 调用，是完全等价的同一个求和公式，
-只是换一条计算路径，不改变数学结果（只有浮点重结合误差，已用相对容差验证）。
-
-两个小函数只处理"D 在前、X 在后，D 的收缩轴固定是紧跟在输出轴之后的
-1 或 2 个轴"这一种调用形状——这正是本代码库里所有出现该模式的调用点
-的共同结构，不做成通用任意轴收缩工具。
-
-实现选 `np.matmul` 广播、不用 `np.tensordot`：`tensordot(D, X, ...)` 把
-不依赖 cell 的小算子 `D` 当作 `a`、逐 cell 的大数组 `X` 当作 `b`，内部
-按 `newaxes_b = contract轴 + notcontract轴` 转置 `b`——X 的 cell 轴不在
-被收缩的轴里，会被搬到中间，产生一份完整的转置副本（`.reshape` 无法
-把这种转置合并成 no-copy view）。在 364,555 cell 的生产网格上 P2 阶数
-实测触发过 `Unable to allocate 1.10 GiB`（cell 轴 153,950 个 prism 撞上
-J×M×V 的转置副本）——`X` 的 cell 轴原本就在最前面（数组按 cell 存储，
-下游按 cell 消费），不应该为了凑 tensordot 的轴序被搬到别处再搬回来。
-`np.matmul(D_flat, X_flat)`（`D_flat`: (F,K)，`X_flat`: (C,K,V)）走
-批量矩阵乘广播语义，把 (C,K,V) 当作 C 个 (K,V) 矩阵、循环与共享的
-(F,K) 做 gemm，全程不触碰、不转置 X 的 cell 轴，不产生这份大副本；
-数学上与 `tensordot`+`moveaxis` 完全等价（已用随机张量数值验证，
-两者输出最大绝对误差在 float64 机器精度量级）。
+为什么不交给 BLAS（2026-09-13 实测）：逐单元的 gemm 只有 (8,24)@(24,5)（P1）~ (27,81)@(81,5)（P2），几百到几千
+FLOPs，79 万单元的批量循环几乎全是调用开销，且 numpy 不在批量维度上并行（加核不提速）；`np.tensordot` 还会把
+`X` 的单元轴转置出一份完整副本（364,555 单元 P2 实测 `Unable to allocate 1.10 GiB`）。按单元 `prange` 后 P1 形状
+4.7 倍、P2 形状 3.5 倍，1 -> 8 线程 7.7 倍扩展。
 """
 
 import numpy as np
@@ -223,25 +201,7 @@ def cell_blocks(n_cells: int) -> int:
 
 
 def _contract_shared(D_flat: np.ndarray, X_flat: np.ndarray) -> np.ndarray:
-    """`_contract_shared_kernel` 的分配 + 连续性包装。
-
-    性能优化（2026-09-13，用户反馈"每步耗时过长、且计算效率对 CPU 核数
-    不敏感"后的真实剖析结论）：此前两个公开入口都用 `np.matmul(D, X)` 的
-    批量矩阵乘广播语义。数学上正确，但在本项目的真实形状上是最坏情况：
-    P1 是逐 cell 的 (8,24)@(24,5)、P2 是 (27,81)@(81,5)——单次 gemm 只有
-    几百到几千 FLOPs，79万个 cell 的批量循环几乎全是 BLAS 调用开销，且
-    **numpy 对批量维度不做任何并行**（OpenBLAS 只会在单个 gemm 内部尝试
-    多线程，这种尺寸下线程化只会更慢），所以整条体积项/梯度链路的耗时
-    与 numba 线程数、与 CPU 核数完全无关——这正是用户观察到"加核不提速"
-    的直接原因之一。
-    换成按 cell `prange` 的显式三重循环后：79万单元 P1 形状实测
-    163.5ms -> 34.6ms（4.7x）、P2 形状 1166ms -> 334ms（3.5x），且
-    1->8 线程有 7.7 倍真实扩展性（277.9ms -> 35.9ms，16 线程 34.3ms 起
-    受内存带宽限制）。数值上 P1 形状与原 `np.matmul` 路径**逐位完全相同**
-    （随机张量实测最大误差 0.0），P2 形状 7.7e-16 相对误差（求和顺序不同
-    导致的浮点重结合，与本模块文档记载的 einsum->matmul 那次替换是同一
-    类、同一量级的现象）。
-    """
+    """`_contract_shared_kernel` 的分配 + 连续性包装（为什么不用 BLAS 见模块文档）。"""
     D_c = np.ascontiguousarray(D_flat)
     X_c = np.ascontiguousarray(X_flat)
     out = np.empty((X_c.shape[0], D_c.shape[0], X_c.shape[2]))

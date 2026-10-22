@@ -136,7 +136,7 @@ def viscous_physical_flux_point_effective(
         mu_t, Pr_t: 湍流涡粘度/湍流普朗特数（标量，层流传 0.0/任意值）
 
     Returns:
-        G: (3,5)，与 core/fr_residual/viscous_flux/pointwise.py::viscous_physical_flux 的公式
+        G: (3,5)，与 tests/unit/test_fr_flux_kernels_pointwise.py 的参考公式
         逐一对应（质量分量恒为0；G[i,1+j]=tau[i,j]（对称）；
         G[i,4]=work[i]-q[i]）。
 

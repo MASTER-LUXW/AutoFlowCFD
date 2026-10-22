@@ -36,6 +36,11 @@ LX, H, LZ = 0.4, 0.1, 0.08
 MU = 1.8e-5
 MACH_REF = U_INF / np.sqrt(1.4 * P_INF / RHO)
 SCALES = np.array([RHO, RHO * U_INF, RHO * U_INF, RHO * U_INF, P_INF / 0.4])
+#: 参考着色差分的步长尺度（`CellBlockJacobian` 的 `scales`）取变量尺度的 10 倍。解析块精确之后（2026-10-22 I-25：
+#: 欧拉通量与低马赫 `d(Gamma R)/dQ` 改为解析式），块级差异就是参考差分自身的误差，实测 tet P1 判据比值随步长
+#: x0.1 / x1 / x10 / x30 / x100 为 1.49 / 0.75 / 0.21 / 0.13~0.23 / 0.34~0.39：x10 以下按 1/h 变化（舍入主导），
+#: x100 起截断误差回升。按变量尺度本身取步长时舍入误差就已占到判据的 0.6~0.75。
+FD_SCALES = 10.0 * SCALES
 
 
 def _channel(kind, order, wall_model=False, bottom_velocity=(0.0, 0.0, 0.0)):
@@ -109,7 +114,7 @@ def _compare(mesh, ops, provider, U, *, mu_t=None, low_mach=True, flat=None, nu_
     fl = flat if flat is not None else get_flat_face_geometry(mesh, ops)
     colors = greedy_cell_coloring(fl.owner_cell, fl.neighbor_cell, mesh.n_cells)
     cell_is_prism = np.arange(mesh.n_cells) < mesh.n_prism_cells
-    fd = CellBlockJacobian(res, u0, r0, SCALES, n_sps=mesh.n_sps_per_cell, cell_is_prism=cell_is_prism,
+    fd = CellBlockJacobian(res, u0, r0, FD_SCALES, n_sps=mesh.n_sps_per_cell, cell_is_prism=cell_is_prism,
                            n_real_prism=npr, n_real_tet=nte, colors=colors)
     ctx = MeanFlowLinearization(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
                                 low_mach=low_mach, mu_t=mu_t, flat=flat,

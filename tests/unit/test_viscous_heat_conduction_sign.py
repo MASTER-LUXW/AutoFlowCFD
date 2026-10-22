@@ -17,7 +17,7 @@ import pytest
 
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point
 from autoflowcfd.core.thermo import CP_AIR
-from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr, viscous_physical_flux
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.validation._channel_mesh import (
@@ -35,9 +35,6 @@ def test_pointwise_energy_flux_follows_fourier_law():
     G = viscous_physical_flux_point(Q, np.zeros((3, 3)), gT, MU, PR, mu_t, 0.9)
     k = MU * CP_AIR / PR + mu_t * CP_AIR / 0.9
     np.testing.assert_allclose(G[:, 4], k * gT, rtol=1e-14)
-    # numpy 向量化版本同一公式
-    Gv = viscous_physical_flux(Q[None], np.zeros((1, 3, 3)), gT[None], MU, PR, np.array([mu_t]), 0.9)[0]
-    np.testing.assert_allclose(Gv[:, 4], k * gT, rtol=1e-14)
 
 
 def _channel(kind, order):
