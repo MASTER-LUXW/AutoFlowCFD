@@ -232,19 +232,21 @@ class TestWallShearPreservesTheAnalyticSolution:
     类）：解析解是真解，偏离只能来自离散本身。实测 cf/cf_exact 中位
     坍缩 0.993->0.987、原生 0.993->0.981（400 步），最差点 0.967。
 
-    ## 这是一条**短窗口**判据，不要读成"该算例永远保持解析解"
+    ## 长窗口：漂移已不复现（长窗口判据见 `TestLongWindowNoDrift`）
 
-    F3 的长程实测（原生棱柱基、同一算例、4000 步）显示解会从真解
-    **系统性地走开**：
+    F3 时期的长程实测（原生棱柱基、同一算例、4000 步）显示解会从真解系统性地走开、约 3000 步 tau 反号：
 
         步数      0      500     1000    1500    2000    2500    3000    4000
         cf 中位  0.993   0.976   0.945   0.883   0.758   0.499  -0.015  -3.239
 
-    第 3000 步附近 tau 穿过零并反号，而同期残差只在 3.3e5~4.9e5 之间徘徊
-    （不收敛、也不发散）。所以本判据钉住的是"离散在**几百步**的窗口内
-    保持住了真解"，长程漂移是一条独立的、尚未查清的开放问题（成因排查
-    见 `ProjectFiles/V2.0` 的 24 号文档"仍未完成"一节）。窗口取得短不是
-    为了让判据通过，而是因为长窗口那件事本身还没有结论。
+    2026-10-23（I-229）在当前代码上原样重测（同一构造、同一步数）：
+
+        步数      0      500     1000    1500    2000    2500    3000    4000
+        cf 中位  0.993   0.996   0.997   0.997   0.996   0.995   1.010   1.014
+
+    tau 处处为正，展向 max|w| 稳定在来流的 0.24%（当时 4~5%）。其间修过的缺陷包括界面法向对齐兜底（219c036）、
+    热传导符号（反扩散，5376d92）、粘性边界通量按边界种类分派（d70f38c）等，没有逐一二分定位是哪一项消除了漂移。
+    本类保留 400 步的短窗口精度判据，长窗口的不漂移由 `TestLongWindowNoDrift` 钉住。
     """
 
     N_STEPS = 400
@@ -287,6 +289,40 @@ class TestWallShearPreservesTheAnalyticSolution:
         assert cf[m][-1] < 0.9 * cf[m][0], (
             f"cf 沿流向没有按 Blasius 衰减：首 {cf[m][0]:.4e} "
             f"末 {cf[m][-1]:.4e}")
+
+
+class TestLongWindowNoDrift:
+    """从解析初场出发推进 4000 步（约 8.5 分钟），解不从真解走开（I-229，2026-10-23）。
+
+    F3 时期同一构造 4000 步 cf 中位降到 -3.239、约 3000 步 tau 反号（见 `TestWallShearPreservesTheAnalyticSolution`
+    文档）；当前代码实测 cf 中位全程在 0.995~1.014、cf 最差点 >= 0.990、展向 max|w|/U <= 2.6e-3。判据按实测留余量：
+    cf 中位偏离 < 3%、tau 处处为正、max|w|/U < 1e-2。
+    """
+
+    N_STEPS = 4000
+
+    @pytest.fixture(scope="class")
+    def run_long(self):
+        solver, meta = build_blasius_solver(nx=16, cells_in_delta=4.0, cfl=0.10, le_offset=0.5)
+        set_blasius_exact_state(solver, meta)
+        for i in range(self.N_STEPS):
+            if not np.isfinite(solver.step(1e-4)):
+                raise AssertionError(f"第 {i + 1} 步发散")
+        return solver, meta
+
+    def test_wall_shear_does_not_drift_from_blasius(self, run_long):
+        solver, meta = run_long
+        x, cf, tau, _y1 = wall_shear_profile(solver, solver.mesh)
+        cf_ex = blasius_cf(x + meta["x_virtual_origin"], meta["nu"])
+        m = x > 0.2 * L_PLATE
+        assert np.all(tau[m] > 0.0), f"长窗口后壁面剪应力出现非正值：{tau[m]}"
+        med = float(np.median(cf[m] / cf_ex[m]))
+        assert abs(med - 1.0) < 0.03, f"4000 步后 cf 中位比值 {med:.4f} 偏离解析值超过 3%（实测 1.014）"
+
+    def test_spanwise_crossflow_stays_small(self, run_long):
+        solver, _meta = run_long
+        w = float(np.abs(solver.state.Q[:, :, 3]).max()) / float(solver.freestream["vel_inf"])
+        assert w < 1e-2, f"4000 步后展向 max|w|/U = {w:.3e}（实测 2.4e-3）"
 
 
 class TestExactCriteriaOnAShortRun:
