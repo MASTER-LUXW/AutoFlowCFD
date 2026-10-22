@@ -106,13 +106,13 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
     names = getattr(turb_model, "TRANSPORTED_FIELDS", ())
     if turb_model is None or not names:
         return False
-    needed = tuple(names) + (("nu_t",) if hasattr(turb_model, "nu_t") else ())
-    missing = tuple(name for name in needed if name not in fields)
+    from autoflowcfd.core.utils.checkpoint_turbulence import missing_turbulence_fields, report_missing_turbulence
+
+    missing, incomplete = missing_turbulence_fields(tuple(names), hasattr(turb_model, "nu_t"), fields)
     solver._missing_turbulence_fields = missing
-    if any(name in missing for name in names):
+    report_missing_turbulence(missing, incomplete)
+    if incomplete:
         # 输运场不全：涡粘也不恢复（它是另一个模型或层流的量，与留在来流初值的输运场不一致）
-        print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(missing)}（层流、另一个湍流模型或旧版本）："
-              "湍流场保持来流初值，与已恢复的平均流场不连续。")
         return False
     for name, current in zip(names, turb_model.transported_fields()):
         if fields[name].shape != current.shape:
@@ -135,8 +135,6 @@ def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool
                     f"nu_t 形状 {turb_model.nu_t.shape} 不匹配，拒绝恢复。"
                 )
             turb_model.nu_t = nu_t_restored
-        else:
-            print("   ⚠️  Checkpoint 缺少 nu_t（旧版本）：涡粘保持初值，第一步粘性应力可能突变。")
     return True
 
 

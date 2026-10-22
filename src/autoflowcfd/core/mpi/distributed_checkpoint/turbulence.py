@@ -89,6 +89,7 @@ def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, sou
     来流初值并返回 False。"""
     from autoflowcfd.core.fr_solver.turbulence.init import restore_production_ramp
     from autoflowcfd.core.mpi import is_root
+    from autoflowcfd.core.utils.checkpoint_turbulence import missing_turbulence_fields, report_missing_turbulence
 
     model, is_gpu = transported_model(solver)
     if model is None:
@@ -96,12 +97,11 @@ def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, sou
     names = model.TRANSPORTED_FIELDS
     # 与单机恢复端同一约定（`checkpoint_io/restore.py::restore_turbulence_from_fields`）：缺少的字段记在
     # `solver._missing_turbulence_fields`，续算时由 `check_resumed_turbulence` 拒绝（除非 --reset-turbulence）
-    missing = tuple(name for name in (*names, "nu_t") if name not in local_fields)
+    missing, incomplete = missing_turbulence_fields(tuple(names), hasattr(model, "nu_t"), local_fields)
     solver._missing_turbulence_fields = missing
-    if any(name in missing for name in names):
-        if is_root():
-            print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(missing)}（层流、另一个湍流模型或旧版本）："
-                  "湍流场保持来流初值，与已恢复的平均流场不连续。")
+    if is_root():
+        report_missing_turbulence(missing, incomplete)
+    if incomplete:
         return False
     expect = (int(solver.partition.n_local_cells), int(solver.state.n_sps))
     local = []
@@ -118,7 +118,5 @@ def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, sou
     model.restore_transported(local[:len(names)], source=source)
     if len(local) > len(names):
         model.nu_t = local[len(names)]
-    elif is_root():
-        print("   ⚠️  Checkpoint 缺少 nu_t（旧版本）：涡粘保持初值，第一步粘性应力可能突变。")
     restore_production_ramp(solver, model, metadata)
     return True
