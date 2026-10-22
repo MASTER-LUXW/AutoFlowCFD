@@ -34,6 +34,7 @@
 import numpy as np
 
 from autoflowcfd.core.fr_solver import FRSolver
+from autoflowcfd.core.fr_solver.cfl import FROM_CURRENT_STATE
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 from ._tgv_mesh import build_triply_periodic_tet_mesh
@@ -66,7 +67,7 @@ def _build_tgv_solver():
 
     orig_local_dt = solver._compute_local_time_step
 
-    def _global_dt(return_physical_too: bool = False):
+    def _global_dt(return_physical_too: bool = False, nu_av=FROM_CURRENT_STATE):
         """全局最小 dt（TGV 要求所有单元同步推进，见本函数下方说明）。
 
         `return_physical_too` 是生产 `step()` 的契约（2026-09-14 低马赫数
@@ -97,7 +98,7 @@ def _build_tgv_solver():
         dt = np.minimum(dt_adv, dt_visc)
         # 叠加原函数的几何/度量 CFL 限制（原函数同样接受这个 kwarg，
         # 取它的平均流那一份）
-        dt = np.minimum(dt, orig_local_dt())
+        dt = np.minimum(dt, orig_local_dt(nu_av=nu_av))
         dt_global = np.full_like(dt, dt.min())
         if return_physical_too:
             return dt_global, dt_global
