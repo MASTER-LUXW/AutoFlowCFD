@@ -32,12 +32,14 @@ from autoflowcfd.core.turbulence.transported import TransportedTurbulence
 from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
 from .constants import chi_for_viscosity_ratio
-from .pointwise import sa_eddy_viscosity, sa_source_terms, vorticity_magnitude
+from autoflowcfd.core.turbulence.sst.kernels import compute_strain_and_vorticity_magnitude
+
+from .pointwise import sa_eddy_viscosity, sa_source_terms
 
 
-def _pointwise_source(nu_tilde, nu, d_wall, grad_vel, production_factor, xp):
+def _pointwise_source(nu_tilde, nu, d_wall, omega_mag, production_factor, xp):
     """源项、点隐式阻尼系数与涡粘（`SAModel.compute_source_terms` 的逐点部分）。"""
-    source, damping = sa_source_terms(nu_tilde, nu, d_wall, vorticity_magnitude(grad_vel, xp), production_factor, xp)
+    source, damping = sa_source_terms(nu_tilde, nu, d_wall, omega_mag, production_factor, xp)
     return source, damping, sa_eddy_viscosity(nu_tilde, nu, xp)
 
 
@@ -141,9 +143,11 @@ class SAModel(TransportedTurbulence):
         xp = self.xp
         rho = Q[:, :, 0]
         nu = mu / xp.maximum(rho, 1e-10)
-        # 逐点函数按单元分块并行（numpy 下；同一份定义、结果逐位相同，`core/utils/pointwise_threads.py`）
+        # 涡量模与 SST 同一个定义（`sst/kernels.py`，并行核，在分块之外整场算一次）；逐点函数按单元分块并行
+        # （numpy 下；同一份定义、结果逐位相同，`core/utils/pointwise_threads.py`）
+        omega_mag = compute_strain_and_vorticity_magnitude(grad_vel)[1]
         source, damping, self.nu_t = map_cell_chunks(
-            _pointwise_source, (self.nu_tilde_field, nu, d_wall, grad_vel), self.production_factor, xp, xp=xp)
+            _pointwise_source, (self.nu_tilde_field, nu, d_wall, omega_mag), self.production_factor, xp, xp=xp)
         self._last_damping = damping
         return replace_nonfinite(self, rho * source, "SA 源项", xp)
 

@@ -12,7 +12,9 @@ import numpy as np
 
 from autoflowcfd.core.utils.array_module import to_host
 
-from .pointwise import sa_diffusivity, sa_gradient_source, sa_source_terms, vorticity_magnitude
+from autoflowcfd.core.turbulence.sst.kernels import compute_strain_and_vorticity_magnitude
+
+from .pointwise import sa_diffusivity, sa_gradient_source, sa_source_terms
 
 
 class SAPointwise:
@@ -28,7 +30,7 @@ class SAPointwise:
         self.mu = float(mu)
         self.nu = self.mu / self.rho
         self.d_wall = d_wall
-        self.omega_mag = vorticity_magnitude(grad_vel, xp)
+        self.omega_mag = compute_strain_and_vorticity_magnitude(grad_vel)[1]
         self.grad_rho = grad_rho
         self.production_factor = float(model.production_factor)
 

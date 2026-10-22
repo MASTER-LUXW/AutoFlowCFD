@@ -16,8 +16,9 @@ from autoflowcfd.core.turbulence.sa.constants import (
     chi_for_viscosity_ratio, eddy_viscosity_ratio,
 )
 from autoflowcfd.core.turbulence.sa.linearization import SAPointwise
+from autoflowcfd.core.turbulence.sst.kernels import compute_strain_and_vorticity_magnitude
 from autoflowcfd.core.turbulence.sa.pointwise import (
-    sa_diffusivity, sa_eddy_viscosity, sa_gradient_source, sa_source_terms, vorticity_magnitude,
+    sa_diffusivity, sa_eddy_viscosity, sa_gradient_source, sa_source_terms,
 )
 
 NU = 1.5e-5
@@ -133,12 +134,16 @@ def test_gradient_source_formula():
         assert out[i] == pytest.approx(ref, rel=1e-13)
 
 
-def test_vorticity_magnitude_is_curl_norm():
+def test_vorticity_magnitude_is_curl_norm_and_shared_with_sst():
+    """SA 的涡量模用 SST 同一个定义（I-49；此前 SA 另有一份旋度写法）：`sqrt(2 W:W)` 等于旋度的模。"""
+    import autoflowcfd.core.turbulence.sa.pointwise as sa_pointwise
+
     rng = np.random.default_rng(0)
-    G = rng.normal(size=(7, 3, 3))
-    W = 0.5 * (G - np.swapaxes(G, -1, -2))
-    ref = np.sqrt(2.0 * np.sum(W * W, axis=(-1, -2)))
-    np.testing.assert_allclose(vorticity_magnitude(G, np), ref, rtol=1e-14)
+    G = rng.normal(size=(7, 2, 3, 3))
+    curl = np.stack([G[..., 2, 1] - G[..., 1, 2], G[..., 0, 2] - G[..., 2, 0], G[..., 1, 0] - G[..., 0, 1]], axis=-1)
+    np.testing.assert_allclose(compute_strain_and_vorticity_magnitude(G)[1], np.linalg.norm(curl, axis=-1),
+                               rtol=1e-14)
+    assert not hasattr(sa_pointwise, "vorticity_magnitude")
 
 
 def test_model_interface_roundtrip_and_limiter():

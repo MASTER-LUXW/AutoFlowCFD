@@ -46,15 +46,6 @@ _CV1_3 = C_V1 ** 3
 _CW3_6 = C_W3 ** 6
 
 
-def vorticity_magnitude(grad_vel, xp):
-    """`|Omega| = sqrt(2 Omega_ij Omega_ij)`，`Omega_ij` 为速度梯度的反对称部分（即旋度的模）。"""
-    g = grad_vel
-    c1 = g[..., 2, 1] - g[..., 1, 2]
-    c2 = g[..., 0, 2] - g[..., 2, 0]
-    c3 = g[..., 1, 0] - g[..., 0, 1]
-    return xp.sqrt(c1 * c1 + c2 * c2 + c3 * c3)
-
-
 def _safe(x, xp):
     """除法分母：零替换为 1（被 `where` 屏蔽的分支不产生 inf/nan 警告）。"""
     return xp.where(x != 0.0, x, 1.0)
