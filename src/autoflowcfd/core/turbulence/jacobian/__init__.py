@@ -3,7 +3,7 @@
     pointwise.py    源项与有效扩散系数的逐点导数（对模型函数差分）
     cell_blocks.py  源项 + 对流/扩散体积项
     faces.py        对流/扩散界面项
-    assemble.py     组装、取负除 rho、omega 壁面强约束行、耦合块
+    assemble.py     组装、取负除 rho、强 Dirichlet 行（SA 壁面解点）、耦合块
     backend.py      单机 / 分布式装配器
 """
 
