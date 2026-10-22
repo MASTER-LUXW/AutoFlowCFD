@@ -36,8 +36,8 @@ to_sps` 的最终 gather 处才真正报错——这正是此前排查止步的�
 cupy 替身完整构造真实 `GPUFRSolver`（含真正的 `compute_inviscid_
 residual_gpu()` 调用，走到修复的确切代码路径），与 CPU 参考实现
 `compute_inviscid_residual_fr` 逐位交叉验证——不是重新验证 AUSM+up
-本身的物理正确性（`test_gpu_p1_inviscid_interface_crosscheck.py`已经
-覆盖，只是从未在本机跑过），而是决定性证明"修复后的 GPU 代码路径在
+本身的物理正确性（那份只能在真实 CuPy 上运行的测试与本文件用例相同，已于 2026-10-22 删除，
+本文件即现行覆盖），而是决定性证明"修复后的 GPU 代码路径在
 本机可执行的意义下与 CPU 参考实现一致"，容差沿用该文件已经确立的
 判据（均匀流场 `rel_diff = max_diff/p_inf < 1e-6`；非均匀扰动流场
 `max_diff < max(1e-6, scale*1e-6)`）。

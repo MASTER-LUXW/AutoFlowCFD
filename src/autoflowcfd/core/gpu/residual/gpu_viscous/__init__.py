@@ -12,10 +12,9 @@ AutoFlowCFD V2.0 - GPU 版粘性残差计算
   通量都缺一整项。修复对照 CPU 端 viscous_flux_kernel.py 的
   `compute_viscous_interface_correction_kernel` 逐字移植数学公式，
   按图着色分色 + owner_is_primary/neighbor_is_primary 分组去重（与
-  gpu_inviscid/interface.py::_compute_interface_correction_gpu 不同——那里没有
-  这层过滤，本文件新增代码保留过滤是为了不重蹈这次 resume 调查里
-  P0 端棱柱四边形侧面重复计数的同一类 bug，即便当前 FlatFaceGeometry
-  的图着色分组是否真的需要它尚未确认，这层过滤本身零代价）。
+  gpu_inviscid/interface.py::_compute_interface_correction_gpu 同一结构：非 primary 记录的跨单元来源 src0 不写入、
+  不过滤就会用全零假邻居态并把 owner 侧贡献计两次，见该函数文档）。与 CPU 的逐位交叉验证在 numpy 替身下运行
+  （`tests/unit/test_gpu_viscous_residual_crosscheck.py`）。
 - 体积项散度（张量收缩 + 度量项）
 
 公式与 CPU 版完全一致，见 core/fr_residual/viscous_flux/ 和

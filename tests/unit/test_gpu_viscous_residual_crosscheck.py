@@ -1,9 +1,9 @@
 """GPU 粘性残差（`compute_viscous_residual_fr_gpu`）与 CPU 参考实现
 （`compute_viscous_residual`）的完整 crosscheck（2026-09-03）。
 
-背景：既有的 `test_gpu_viscous_interface_crosscheck.py` 整个文件
+背景：当时既有的 `test_gpu_viscous_interface_crosscheck.py` 整个文件
 `pytest.importorskip("cupy")`，本机没有真实 CuPy，从未在本机实际
-执行过。用户报告"均匀自由流场下 GPU 粘性残差本应精确为零，实测非零
+执行过（其用例本文件全部覆盖，该文件已于 2026-10-22 删除）。用户报告"均匀自由流场下 GPU 粘性残差本应精确为零，实测非零
 （~0.43，CPU 给出~2e-12）"后排查，用 numpy-as-cupy 替身 + 真实含
 多源/混合拆分面合成网格，决定性定位到**三个独立的真实 bug**（均与
 问题清单 #5 的 AUSM+up shape bug/`viscous_physical_flux_gpu` 批量维
@@ -170,8 +170,8 @@ class TestGpuViscousResidualMatchesCpu:
     @pytest.mark.parametrize("order", [1, 2])
     def test_nonuniform_perturbed_flow_matches_cpu(self, order):
         """非均匀密度/速度/温度扰动流场——真正触发全部三处 bug 的路径
-        （问题二的 grad_T 非零、问题三的非均匀密度）。容差与既有
-        `test_gpu_p1_inviscid_interface_crosscheck.py` 同一判据风格
+        （问题二的 grad_T 非零、问题三的非均匀密度）。容差与无粘交叉检查
+        （`test_gpu_inviscid_ausm_mixed_face_crosscheck.py`）同一判据风格
         （相对 CPU 残差幅值的量级，不是绝对机器精度——numpy-as-cupy
         替身路径本身就是逐位相同的浮点运算，实测可以到 ~1e-16 相对
         误差，这里用更宽松的 1e-6 留出余量，判据本身不因为"恰好是同

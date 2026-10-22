@@ -133,12 +133,9 @@ def _compute_interface_correction_gpu(
     对应角色 primary 时读取有意义）；两侧各自独立调用一次批量 AUSM+up；
     accumulate 时统一带负号。
 
-    本机没有 CUDA/cupy，这处修复无法在本地实际执行验证（全仓库此前
-    也没有任何 `compute_inviscid_residual_fr_gpu` 的 crosscheck 测试，
-    见 test_gpu_p1_inviscid_interface_crosscheck.py 模块文档——这是
-    这次连带发现的又一个"从未被验证过"的 GPU 生产路径），只能靠对照
-    已经过详细验证的 CPU kernel 逐字核对；请在有真实 GPU 的环境上跑
-    该新增测试文件做最终确认。
+    与 CPU 参考实现的逐位交叉验证在 numpy 替身（`tests/unit/_numpy_as_cupy.py`）下实际运行：
+    `tests/unit/test_gpu_inviscid_ausm_mixed_face_crosscheck.py`（均匀 / 扰动流场、棱柱四边形拆分面不重复计数）。
+    2026-10-22（I-226）以前另有一份依赖真实 CuPy、在无 CUDA 的机器上整体跳过的同内容测试，已删除。
     """
 
     cp = get_cupy()
