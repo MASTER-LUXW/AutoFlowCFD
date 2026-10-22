@@ -1,15 +1,13 @@
-"""伪时间稳态求解器与瞬态计算的时间积分格式。
+"""时间积分格式：格式枚举、显式 SSP Runge-Kutta 积分器（`TimeIntegrator`）与各格式共用的常量。
 
-稳态求解器在伪时间上推进解，直到残差趋于 0。为此我们采用显式的
-强稳定性保持 Runge-Kutta 格式（SSP-RK2 / SSP-RK3）——这是有限体积
-CFD 里标准、可证明正确的显式积分器，配合按对流+声速+粘性 CFL 条件
-确定的**局部（逐单元）时间步长**。
+* 显式：前向 Euler / SSP-RK2 / SSP-RK3（Shu-Osher 形式），按对流 + 声速 + 粘性 CFL 条件确定的**局部（逐单元）**
+  步长推进伪时间（稳态），或在时间精确模式下以全场统一步长推进物理时间（`time_accurate.py`）。
+* 隐式稳态：`NEWTON_KRYLOV`，矩阵自由 Newton-Krylov + 伪瞬态延拓（`implicit/newton/`）。
+* 双时间步（瞬态）：`DUAL_TIME`，每个物理步解带 BDF 物理时间项的方程，内迭代是同一个 Newton-Krylov
+  （`implicit/newton/physical_time.py`），不经过本模块的显式积分器入口。
 
-这套实现取代了之前的版本，那个版本：(a) 自称"backward Euler"，实际
-做的却是显式前向欧拉步；(b) RK2/AB3 用的是占位的残差历史；(c) 通过对
-密度/速度/通量做硬幅值限幅来掩盖发散。现在物理正定性只在数学上确实
-需要的地方（rho>0，p>0）才强制施加，用一个保持速度不变的*压力下限*
-实现，发散会被报告出来，而不是被掩盖。
+每个 RK stage 之后施加守恒的 Zhang–Shu 正性限制器（`positivity/`，由求解器按网格构建）；发散报告出来，不靠
+对密度 / 速度 / 通量的硬限幅掩盖。
 """
 
 from __future__ import annotations
