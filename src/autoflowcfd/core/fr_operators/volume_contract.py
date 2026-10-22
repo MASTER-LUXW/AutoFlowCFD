@@ -6,8 +6,10 @@
     out[c, f, v] = sum_j,m D[f, j, m] X[c, j, m, v]    # contract_shared_operator_2axis（(j, m) 合并成一个轴）
 
 `D`（微分 / 插值 / 限制算子）对所有单元相同，只有 `X` 随单元变化。两种形状共用一个按单元 `prange` 的核
-（`_contract_shared_kernel` -> `contract_local`，4 路累加器），逐单元融合核（`fused_volume/`、`gradients.py`）也
-经过同一个 `contract_local`，求和顺序处处相同。逆变通量 `adj(J) F` 由 `contravariant_flux_from_metric` 融合求值，
+（`_contract_shared_kernel` -> `contract_local`，4 路累加器）。逐单元融合核也经过同一个 `contract_local`，求和顺序
+处处相同；融合核在无粘 / 粘性体积项（`fr_residual/inviscid.py`、
+`fr_residual/viscous_flux/overintegration.py`）、湍流对流 / 扩散体积项（`turbulence/transport/convection.py`、
+`diffusion.py`）与物理梯度（`gradients.py`）里。逆变通量 `adj(J) F` 由 `contravariant_flux_from_metric` 融合求值，
 `adj(J) = det(J) J^{-1}` 不落内存。
 
 为什么不交给 BLAS（2026-09-13 实测）：逐单元的 gemm 只有 (8,24)@(24,5)（P1）~ (27,81)@(81,5)（P2），几百到几千
@@ -60,7 +62,7 @@ def compute_adj_j(det_jacs: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
 def contravariant_point(d, inv, F, out) -> None:
     """单点逆变通量 `out[i, v] = sum_j (d * inv[i, j]) * F[j, v]`（`inv`: (3, 3)，`F`/`out`: (3, V)）。
 
-    批量核 `_contravariant_flux_kernel` 与逐单元融合核（`fused_volume/`）共用这一个定义，乘加顺序因此
+    批量核 `_contravariant_flux_kernel` 与逐单元融合核（所在文件见模块文档）共用这一个定义，乘加顺序因此
     处处相同（融合前后逐位一致的前提）。
     """
     for i in range(3):
@@ -167,7 +169,7 @@ def _contract_shared_kernel(D_flat: np.ndarray, X_flat: np.ndarray, out: np.ndar
 def contract_local(D, X, out) -> None:
     """`out[f, v] = sum_k D[f, k] * X[k, v]`（`X`: (K, V)），4 路累加器（见 `_contract_shared_kernel` 文档）。
 
-    共享算子收缩、逐单元算子收缩与逐单元融合核（`fused_volume/`、`gradients.py`）都经过这一个定义，求和
+    共享算子收缩、逐单元算子收缩与逐单元融合核（所在文件见模块文档）都经过这一个定义，求和
     顺序处处相同。`X` 可以是非连续视图（逐元素读取）。
     """
     K = X.shape[0]

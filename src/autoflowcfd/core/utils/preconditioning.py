@@ -353,7 +353,7 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     低马赫数伪时间预处理（2026-09-14 新增，用户提出"收敛需要数万步"
     后的根本性优化）。完整推导/正确性论证见
     `core/utils/preconditioning.py` 模块末尾"伪时间预处理矩阵 Gamma"
-    一节；接入点见 `step.py::mean_flow_residual`（残差侧）与
+    一节；接入点见 `time_integration/step_orchestration.py::advance_step` 的 `precondition`（残差侧）与
     `cfl.py::compute_local_time_step`（步长侧）——两者**必须成对启用**。
 
     为什么默认开：本项目的目标工况是汽车外流场，M~0.09（33m/s vs

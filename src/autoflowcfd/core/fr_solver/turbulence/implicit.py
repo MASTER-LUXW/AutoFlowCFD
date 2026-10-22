@@ -196,7 +196,7 @@ class CpuCoupledBackend(SingleNodeCoupledBackend):
         return get_turbulent_viscosity_field(self.solver)
 
     def mean_residual(self, mu_t):
-        """平均流 `Gamma R`（`fr_solver/step.py::mean_flow_residual` 同一约定，`dU/dt = -R`）。"""
+        """平均流 `Gamma R`（`time_integration/step_orchestration.py::advance_step` 的残差闭包同一约定，`dU/dt = -R`）。"""
         s = self.solver
         res = s.compute_mean_flow_residual(mu_t_turb=mu_t, nu_av=self._nu_av)
         if s.low_mach_precond_enabled:

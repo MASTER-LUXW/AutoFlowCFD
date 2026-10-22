@@ -128,7 +128,7 @@ class GpuCoupledBackend(SingleNodeCoupledBackend):
         return self.solver._turbulent_mu_t_gpu()
 
     def mean_residual(self, mu_t):
-        """平均流 `Gamma R`（`gpu_solver/step.py::mean_flow_residual` 同一约定，`dU/dt = -R`）。"""
+        """平均流 `Gamma R`（`time_integration/step_orchestration.py::advance_step` 的残差闭包同一约定，`dU/dt = -R`）。"""
         s = self.solver
         U = s.U_gpu
         res = s.compute_viscous_residual_gpu(U, mu_t_field=mu_t, nu_av=self._nu_av)

@@ -321,7 +321,7 @@ class DistributedCoupledBackend(CoupledBackend):
         return self.turb.trial_mu_t_compact()
 
     def mean_residual(self, mu_t):
-        """平均流 `Gamma R`（`distributed_solver/step.py::residual_func` 同一约定，`dU/dt = -R`）。"""
+        """平均流 `Gamma R`（`time_integration/step_orchestration.py::advance_step` 的残差闭包同一约定，`dU/dt = -R`）。"""
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
         s = self.solver

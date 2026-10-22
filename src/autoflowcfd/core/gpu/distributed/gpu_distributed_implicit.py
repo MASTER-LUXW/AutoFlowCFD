@@ -178,7 +178,7 @@ class MultiGpuCoupledBackend(CoupledBackend):
         return self.turb.trial_mu_t_compact()
 
     def mean_residual(self, mu_t):
-        """平均流 `Gamma R`（`gpu_distributed/stepping.py::_residual` 同一约定，`dU/dt = -R`）。"""
+        """平均流 `Gamma R`（`time_integration/step_orchestration.py::advance_step` 的残差闭包同一约定，`dU/dt = -R`）。"""
         s = self.solver
         res = -s._compute_total_residual_gpu(mu_t_field=mu_t,
                                              nu_av_compact=self._nu_av)
