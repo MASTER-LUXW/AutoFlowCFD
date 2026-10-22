@@ -22,12 +22,33 @@ import numpy as np
 from numba import njit
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
+from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.thermo import CP_AIR
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_DIRICHLET, VBC_INTERIOR,
     effective_eddy_viscosity, viscous_physical_flux_point, viscous_physical_flux_point_effective,
     viscous_ip_penalty_tilde,
 )
+
+
+@njit(cache=True, inline='always')
+def lift_into_cell(correction, cell, lift, ref_area_weight, face_values, det_jacs, sign):
+    """DG 提升并累加：`correction[cell, s] += sign * (lift @ (ref_area_weight * face_values))[s] / det_jacs[cell, s]`。
+
+    `face_values` (n_fp, 5) 是本侧各面通量点上的量（无粘公共通量、粘性跳量），`lift` 是该面算子的提升矩阵
+    `(n_sps, n_fp)`（P0 为 `(1, n_fp)`）。无粘 / 粘性界面核与 P0 粘性核共用（2026-10-22 I-11 以前六处各写一份）。
+    """
+    n_fp = face_values.shape[0]
+    weighted = np.empty((n_fp, 5))
+    for i in range(n_fp):
+        w = ref_area_weight[i]
+        for v in range(5):
+            weighted[i, v] = w * face_values[i, v]
+    contrib = matmul_small(lift, weighted)
+    for s in range(contrib.shape[0]):
+        dj = det_jacs[cell, s]
+        for v in range(5):
+            correction[cell, s, v] += sign * contrib[s, v] / dj
 
 
 @njit(cache=True, inline='always')

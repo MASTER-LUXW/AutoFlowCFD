@@ -19,7 +19,7 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
-from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point, lift_into_cell
 
 
 @njit(cache=True, inline='always')
@@ -128,16 +128,7 @@ def compute_inviscid_interface_correction_kernel(
                         Q_n = Q_ghost[mp, i]
                 flux_owner[i] = inviscid_common_flux_point(Q_o[i], Q_n, adjrow_o[i], mach_ref)
 
-            weighted_flux_o = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_flux_o[i, v] = w_area * flux_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_op], weighted_flux_o)
-            for s in range(n_sps):
-                dj = det_jacs[oc, s]
-                for v in range(5):
-                    correction[oc, s, v] += -contrib_owner[s, v] / dj
+            lift_into_cell(correction, oc, lift_native[oc_op], ref_area_weight, flux_owner, det_jacs, -1.0)
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
@@ -175,16 +166,7 @@ def compute_inviscid_interface_correction_kernel(
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
                 flux_neighbor[i] = inviscid_common_flux_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref)
 
-            weighted_flux_n = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_flux_n[i, v] = w_area * flux_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_flux_n)
-            for s in range(n_sps):
-                dj = det_jacs[nc, s]
-                for v in range(5):
-                    correction[nc, s, v] += -contrib_neighbor[s, v] / dj
+            lift_into_cell(correction, nc, lift_native[nc_op], ref_area_weight, flux_neighbor, det_jacs, -1.0)
 
 
 def boundary_ghost_faces(flat) -> np.ndarray:

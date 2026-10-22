@@ -1,47 +1,25 @@
 """
-AutoFlowCFD V2.0 - P0 专用粘性界面校正 numba kernel
+AutoFlowCFD V2.0 - P0 粘性界面校正 numba kernel（n_sps = 1，Order Continuation 的 P0 阶段）
 
-从 viscous_flux_kernel.py 拆出。当 n_sps=1（P0 order continuation 阶段）
-时使用本 kernel 替代通用 kernel，消除所有 SP 循环（编译期常量 n_sps=1），
-把外插矩阵乘写成标量乘。
+与通用核（viscous_flux_kernel.py）共用逐点公共通量、边界"另一侧"梯度与 DG 提升（`face_point_jumps.py`），
+外插写成标量乘（n_sps = 1 时 `E (n_fp,1) @ field (1,k)` 就是 `E[i,0] * field[0]`，同一个乘法）。不并入通用核
+（2026-10-22 I-11 核实）：P0 每面只有一个通量点，两处语义与 P>=1 不同——
+  * 本侧法向通量在这里直接减（P>=1 并进体积算子 K，`fr/face_flux_trace.py`）；
+  * 混合拆分面与真多源面（棱柱四边形侧面两个半区各挨不同单元）按面积占比 `p0_second_half_frac` 加权两个
+    半区的公共通量（P>=1 按逐通量点掩码与源插值矩阵取各点所在半区）。
+合并后这两处都要按阶数分支，并不能少写什么。
 
-**用词更正（2026-09-14）**：本文件多处把这种写法称为「简化」，那个说法
-不准确——n_sps=1 时 `E (n_fp,1) @ field (1,k)` 与 `E[i,0]*field[0,...]`
-是**同一个矩阵乘**（求和只有一项），不是任何形式的近似。本 kernel 相对
-通用 kernel 是 n_sps=1 的**特化**（specialization）：去掉编译期已知为 1
-的循环、把单项求和写成乘法，数学上逐项等价，只有浮点运算顺序不同。
-现已把各处「简化」改为「特化」/「n_sps=1 恒等式」这类准确表述。
-
-性能收益（791K 单元 / 188 万面网格，P0 阶段）：
-- 消除 for s in range(n_sps) 循环（n_sps=1 时仍有一次迭代开销）
-- 外插 E@field 写成 E[i,0]*field[0]（n_sps=1 下的同一个乘法，避免矩阵乘调用开销）
-- 输出 correction 形状 (n_cells, 1, 5) 而非 (n_cells, n_sps, 5)
-
-算法与通用 viscous_flux_kernel.py 完全一致（n_sps=1 的特化），
-数学等价，仅浮点重排顺序不同。
-
-确认不受棱柱四边形侧面重复计数问题影响（2026-08-23 核实，交叉引用
-fr_residual/inviscid_p0.py::p0_face_geometry 文档记录的那次
-回归/修复）：本 kernel 的两处 scatter-add 累加块本来就用
-`owner_is_primary[f]`/`neighbor_is_primary[f]` 门控（见下方
-`compute_viscous_interface_correction_p0_kernel` 的 owner/neighbor
-两段累加代码），对棱柱四边形侧面被三角化拆分出的非 primary 重复记录
-天然贡献为零；multi-source（~5% 拆分面两条记录指向 2 个不同真实
-相邻单元）情形也已经通过 `owner_src0_cell`/`owner_src1_idx` 等插值
-权重机制在 primary 记录内部正确混合，不需要像 inviscid_p0.py 那样
-额外回退到三角化半面几何。P0 无粘 kernel 修复前唯一遗漏的正是这个
-primary 门控，本 kernel 从一开始就没有这个问题，不需要改动。
+非 primary 记录（棱柱四边形侧面三角化拆出的重复记录）由 `owner_is_primary` / `neighbor_is_primary` 门控，贡献为零。
 """
 
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_INTERIOR, boundary_other_gradients,
 )
 from autoflowcfd.core.fr_residual.face_point_jumps import (
-    viscous_common_flux_point, viscous_self_normal_flux_point,
+    lift_into_cell, viscous_common_flux_point, viscous_self_normal_flux_point,
 )
 
 
@@ -207,17 +185,7 @@ def compute_viscous_interface_correction_p0_kernel(
                         common[v] = (1.0 - bfrac) * common[v] + bfrac * common_2[v]
                 jump_owner[i] = common - self_flux
 
-            dj = det_jacs[oc, 0]
-            # DG 提升算子：`lift_native[op]` 形状 (1,n_fp)，@ 之后直接
-            # 得到 (1,5)——本身已经是 P0 需要的标量化形式。
-            weighted_jump_o = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)  # (1,5)
-            for v in range(5):
-                correction[oc, 0, v] += contrib_owner[0, v] / dj
+            lift_into_cell(correction, oc, lift_native[oc_op], ref_area_weight, jump_owner, det_jacs, 1.0)
 
         # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 特化）
         if (not is_boundary[f]) and neighbor_is_primary[f]:
@@ -283,12 +251,4 @@ def compute_viscous_interface_correction_p0_kernel(
                         common_n[v] = (1.0 - bfrac) * common_n[v] + bfrac * common_n2[v]
                 jump_neighbor[i] = common_n - self_flux_n
 
-            dj = det_jacs[nc, 0]
-            weighted_jump_n = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)  # (1,5)
-            for v in range(5):
-                correction[nc, 0, v] += contrib_neighbor[0, v] / dj
+            lift_into_cell(correction, nc, lift_native[nc_op], ref_area_weight, jump_neighbor, det_jacs, 1.0)

@@ -20,11 +20,11 @@ boundary_other_gradients`），种类数组 `vbc_kind` 由
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_small, matvec_small
+from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matvec_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_INTERIOR, boundary_other_gradients,
 )
-from autoflowcfd.core.fr_residual.face_point_jumps import viscous_common_flux_point
+from autoflowcfd.core.fr_residual.face_point_jumps import lift_into_cell, viscous_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -162,16 +162,7 @@ def compute_viscous_interface_correction_kernel(
                     Q_o[i], gv_o[i], gT_o[i], mut_o[i], Q_n, gv_n, gT_n, mut_n,
                     adjrow_o[i], ip_length[f], bk, mu, Pr, Pr_t, c_ip)
 
-            weighted_jump_o = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)
-            for s in range(n_sps):
-                dj = det_jacs[oc, s]
-                for v in range(5):
-                    correction[oc, s, v] += contrib_owner[s, v] / dj
+            lift_into_cell(correction, oc, lift_native[oc_op], ref_area_weight, jump_owner, det_jacs, 1.0)
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
@@ -238,13 +229,4 @@ def compute_viscous_interface_correction_kernel(
                     Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n_native[i], ip_length[f],
                     bk_n, mu, Pr, Pr_t, c_ip)
 
-            weighted_jump_n = np.empty((n_fp, 5))
-            for i in range(n_fp):
-                w_area = ref_area_weight[i]
-                for v in range(5):
-                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)
-            for s in range(n_sps):
-                dj = det_jacs[nc, s]
-                for v in range(5):
-                    correction[nc, s, v] += contrib_neighbor[s, v] / dj
+            lift_into_cell(correction, nc, lift_native[nc_op], ref_area_weight, jump_neighbor, det_jacs, 1.0)
