@@ -2,7 +2,7 @@
 
 ## 这份测试钉的是一个真实生产缺陷
 
-`core/utils/order_continuation.py::interpolate_to_new_order` 一直用一维
+`core/utils/order_continuation/interp.py::interpolate_to_new_order` 一直用一维
 Gauss 点的张量积 Lagrange 插值，而那个矩阵只对**坍缩棱柱基**的解点成立。
 native 四面体（自 2026-09-03 起是四面体唯一实现）与 native 棱柱
 （2026-09-20 起是默认）的解点都不在那个张量积网格上。

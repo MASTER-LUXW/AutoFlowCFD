@@ -3,7 +3,7 @@
 背景：`DistributedFRSolver` 之前完全没有 Order Continuation 机制——
 `solve steady --order 2 --n-ranks>1` 会直接在目标阶数（P2）从均匀
 自由流场开始求解，跳过单机路径自动执行的 P0->P1->P2 逐步爬坡（见
-`core/mpi/distributed_order_continuation.py` 模块文档）。本文件验证：
+`core/mpi/distributed_order_continuation/` 模块文档）。本文件验证：
 
 1. `DistributedFRSolver.solve()` 在 `order>=2` 时真正自动分派到
    `run_order_continuation`（四个后端共用的循环；不是仍然走原来的单一阶数

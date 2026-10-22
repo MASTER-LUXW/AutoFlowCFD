@@ -13,7 +13,7 @@ cupy 替身完整构造 `GPUFRSolver` 并真正调用 `step()`，在这份被跳
 形状广播不匹配（`(4,8,1) vs (4,8,4,5)`），当时如实记录为"发现但未
 修复的独立真实缺口"。
 
-真实根因（本次排查确认，见 `gpu_inviscid.py::_ausm_up_flux_batch_gpu`
+真实根因（本次排查确认，见 `gpu_inviscid/flux.py::_ausm_up_flux_batch_gpu`
 文档"真实 bug 修复"一节的完整推导）：该函数把 `normal` 参数当作
 `(N,3)`（逐面一个法向，`nx=normal[...,0:1]` 故意保留末尾长度 1 维度
 以便广播到 `(N,n_fp)` 的其余物理量），但两个真实调用点

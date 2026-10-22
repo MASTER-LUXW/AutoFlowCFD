@@ -1,7 +1,7 @@
 """CPU"完全分布式加载"（`DistributedFRSolver.from_fully_distributed_
 package`）Order Continuation 决定性验证（2026-09-02）。
 
-背景：见 `core/mpi/distributed_order_continuation.py`/
+背景：见 `core/mpi/distributed_order_continuation/`/
 `core/mpi/distributed_mesh_loader.py::redistribute_fully_distributed_
 for_new_order` 模块文档——"完全分布式加载"模式下本 rank 从未持有完整
 全局网格，阶数切换需要 root（通过 `root_context`，`distributed_mesh_

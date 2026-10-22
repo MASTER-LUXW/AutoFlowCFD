@@ -131,7 +131,7 @@ class TestRealDofReductionHelpers:
         这不是防御性冗余：Order Continuation 期间网格几何量的 `n_sps` 可以
         短暂地属于另一个阶数，按错的 `n_native` 切片会**静默**把真实解点
         当填充丢掉（或反过来）。本项目在跨阶数缓存上已经复现过同一类真实
-        bug（见 `gpu_solver.py::_compute_local_time_step_gpu` 里
+        bug（见 `gpu_solver/timestep.py::_compute_local_time_step_gpu` 里
         metric_flux_scale 缓存那段注释）。
         """
         f = np.zeros((3, 6))  # n_sps=6 -> 只能是 order=1

@@ -17,7 +17,7 @@ inviscid_interface_crosscheck.py` 等既有 crosscheck 测试全部
 严重性：这不是"多源混合面"专属的边缘情况——体积项调用点对**任意**
 网格、任意阶数都是无条件按 `(n_cells,n_sps,5)` 传参（不像两处界面
 校正调用点会先显式 `.reshape` 压平），意味着单 GPU（`GPUFRSolver`）/
-多 GPU 分布式（`gpu_distributed.py`）后端的粘性残差体积项，此前只要
+多 GPU 分布式（`gpu_distributed/`）后端的粘性残差体积项，此前只要
 真正被调用就必然崩溃——从未被任何测试捕捉到，是因为所有既有 GPU
 测试要么只测 2D 展平后的输入（凑巧绕开），要么整个文件被
 `pytest.importorskip("cupy")` 跳过，从未有测试真正走到"完整构造+真正

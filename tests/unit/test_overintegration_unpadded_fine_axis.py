@@ -345,7 +345,7 @@ class TestContextContract:
         必须报错而不是取其中一个。
 
         （历史：这两处的一致性此前只靠两个文件各自的注释互相提醒"必须
-        逐字一致"，阶数公式在 `fr/operators.py` 与
+        逐字一致"，阶数公式在 `fr/operators/` 与
         `high_order_mesh_order.py` 里各写一遍。现在公式合并到
         `overintegration_order.py` 唯一入口，这条是运行期的第二道闸。）
         """

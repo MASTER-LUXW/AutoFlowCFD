@@ -12,7 +12,7 @@ mesh/solver 适配器构造、复用单机 `compute_turbulence_source`/
 `SSTModelFR.compute_source_terms`/`update_fields` 的真实数值计算。
 
 DDES/IDDES 扩展沿用完全相同的判据，唯一的额外复杂度是 IDDES 需要
-`des.py::compute_h_max_and_h_wn` 算出的逐单元几何量按 compact 索引空间
+`des/grid_scale.py::compute_h_max_and_h_wn` 算出的逐单元几何量按 compact 索引空间
 切片（纯逐单元局部量，见该函数文档，不需要新的跨 rank 几何交换）。
 """
 

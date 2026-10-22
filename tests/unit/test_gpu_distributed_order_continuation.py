@@ -19,8 +19,8 @@ Continuation 本身无关的既有障碍——因此本文件不测试完整
 `gpu_interpolate_to_new_order` 真正读取/写入的属性的最小 stub，
 决定性验证这个函数本身的插值数学与重建时序（阶数切换前后 n_sps
 是否正确、`current_order` 是否正确更新、插值矩阵的精确 Lagrange
-延拓性质——与单机 `order_continuation.py` 同一份验证方式，见
-`test_order_continuation.py`）。
+延拓性质——与单机 `order_continuation/` 同一份验证方式，见
+`test_order_interp_basis_aware.py`）。
 """
 
 import types

@@ -95,7 +95,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
             # IP 罚项的几何量与按阶数解析的常数（2026-09-23 新增形参，
             # 见 `flux_kernels.viscous_ip_penalty_tilde` /
             # `resolve_viscous_ip_constant`）——必须与生产调用方
-            # `fr_residual/viscous_flux.py` 传的完全一致，否则这条交叉验证
+            # `fr_residual/viscous_flux/` 传的完全一致，否则这条交叉验证
             # 比的就不是同一个格式了。
             flat.ip_length,
             resolve_viscous_ip_constant(int(mesh.order)),

@@ -21,15 +21,15 @@ celltype_o, oax, oside_idx]`（自身面外插矩阵）、(2)
 "`boundary_extrap_native` 空数组 + `cp.clip(x,0,-1)`"是同一类"提前
 无条件求值导致越界"问题，只是这里是另外两张表）。`gpu_viscous.py::
 _self_extrap_side`（新增于同日排查单GPU AUSM+up shape bug 时）从
-`gpu_inviscid.py` 抄来的同一套自身外插逻辑，继承了同一个 bug。
+`gpu_inviscid/` 抄来的同一套自身外插逻辑，继承了同一个 bug。
 
 修复：owner/neighbor 两侧都在使用 `oax`/`nax` 索引 `boundary_extrap`/
 `dist_fp_of_sp`/`dist_axis_coord_of_sp` 之前，先用 `is_native`（由
 `owner_cube_face`/`neighbor_cube_face >= 6` 判定）把 native 面的
 `oax`/`nax` clip 到一个恒安全的哑值 0（结果本来就会被下游的 `is_
 native` 掩码丢弃，不影响 collapsed 面的真实行为）。四处：
-`gpu_inviscid.py` 的 owner/neighbor 自身外插各一处 + 面校正分配各
-一处；`gpu_viscous.py::_self_extrap_side` 一处（owner/neighbor 共用）。
+`gpu_inviscid/` 的 owner/neighbor 自身外插各一处 + 面校正分配各
+一处；`gpu_viscous/extrap.py::_self_extrap_side` 一处（owner/neighbor 共用）。
 
 修复后用真实含 native 四面体的合成网格，`compute_inviscid_residual_
 fr_gpu` 与 CPU 参考实现 `compute_inviscid_residual_fr` 交叉验证到

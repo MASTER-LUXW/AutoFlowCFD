@@ -102,7 +102,7 @@ def test_wrapper_object_rejected_by_gpu_flat_face_constructor(dist_fc_native):
     """回归测试：直接把 DistributedFlatFaceGeometry 包装对象传给
     build_gpu_flat_face（此前的真实 bug 现场）必须失败——如果这个测试
     开始失败（不再抛 AttributeError），说明 DistributedFlatFaceGeometry
-    已经代理了全部所需字段，`gpu_distributed_init.py` 里的 `.base_flat`
+    已经代理了全部所需字段，`gpu_distributed_init/` 里的 `.base_flat`
     变通方案可能不再需要，但在改回来之前必须先确认全部字段都已代理。"""
     from autoflowcfd.core.gpu import gpu_face_geometry as gfg_module
 

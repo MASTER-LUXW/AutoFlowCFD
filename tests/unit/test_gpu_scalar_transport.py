@@ -2,12 +2,12 @@
 端到端一致性测试。
 
 本机没有 CuPy/真实 CUDA 设备，无法真正执行 CuPy kernel；但
-`gpu_scalar_transport.py` 的实现只使用了 numpy 与 CuPy 共同支持的 API
+`gpu_scalar_transport/` 的实现只使用了 numpy 与 CuPy 共同支持的 API
 子集（`where`/`einsum`/`matmul`/`maximum`/`clip`/`linalg.norm`/
 `isfinite`/`zeros` 等，均语义完全一致，`scatter_add` 用 `np.add.at`
 等价代替）——用一个把 `get_cupy()` 替换成"返回 numpy 模块（外加
 scatter_add 方法）"的 monkeypatch，直接跑*生产函数本身*（不是重新
-实现一份），对照已验证的 CPU `core/turbulence/transport.py` 在同一个
+实现一份），对照已验证的 CPU `core/turbulence/transport/` 在同一个
 真实混合棱柱+四面体合成网格上的输出——数值要求逐位精确相等（同一套
 公式的两种数值后端只做了张量库替换，不是近似关系）。
 """

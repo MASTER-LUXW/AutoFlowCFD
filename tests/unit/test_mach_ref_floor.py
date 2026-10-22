@@ -29,7 +29,7 @@ from autoflowcfd.core.time_integration import TimeIntegrationScheme
 _MEASURED_MARGIN_AT_FLOOR = {0.05: 3.55, 0.04: 2.96, 0.03: 2.32}
 
 #: 要求的最小裕度。为什么要这么多：越界一次之后 CFL 收缩救不回来，且失稳
-#: 特征滞后 8~17 步（`core/time_integration/adaptive_cfl.py` 模块文档第 12
+#: 特征滞后 8~17 步（`core/time_integration/adaptive_cfl/` 模块文档第 12
 #: 条）——所以稳定性相关的默认值一律留 3 倍以上裕度。
 _REQUIRED_MARGIN = 3.0
 

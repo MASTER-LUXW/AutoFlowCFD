@@ -32,7 +32,7 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
     通量自身一致性、`D_native` 消灭常数场等多个环节各自的普通浮点截断
     共同作用的结果，与本项目其它 AUSM+up 相关测试同一量级）。历史决定性
     对照（坍缩坐标四面体基已于 2026-09-03 删除，不再能重新构造对照
-    网格，见 `fr/operators.py` 模块文档）：同一份网格切到当时的
+    网格，见 `fr/operators/` 模块文档）：同一份网格切到当时的
     `tet_basis_mode="collapsed"` 时，这两个四面体单元的残差分别是
     0.073、1.31（即本项目 Part1~6 文档反复记录的坍缩坐标 P1/P2 发散
     问题本身），native 分支把残差压低了 5~7 个数量级，是当初这次接入

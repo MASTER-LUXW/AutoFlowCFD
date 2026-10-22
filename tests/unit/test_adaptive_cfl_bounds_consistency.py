@@ -1,4 +1,4 @@
-"""自适应 CFL 三个边界参数的自洽性（`adaptive_cfl.py` 模块文档第 11 条）。
+"""自适应 CFL 三个边界参数的自洽性（`adaptive_cfl/` 模块文档第 11 条）。
 
 ## 修的是什么
 
@@ -204,7 +204,7 @@ class TestEveryBackendConstructsAController:
          ——而那个值高于真 P1 在 79 万单元 cube_demo 上实测稳定的 0.03，
          使一个已验证可用的工作点通过 CLI/API 根本到不了；
       2. 多 GPU **完全分布式**路径根本没有控制器
-         （`gpu_distributed_fully_distributed.py` 只设
+         （`gpu_distributed_fully_distributed/` 只设
          `GPUTimeIntegrator(cfl=1.0)`，而 `_current_cfl()` 的回退正是
          `time_integrator.cfl`），于是它以 CFL=1.0 运行——远超 P>=1 的
          SSP-RK3 稳定极限；同一个类的"传统模式"一直是有控制器的。
@@ -303,7 +303,7 @@ class TestConfigLayerCflDefaultsAreConsistent:
 
     2026-09-15 发现：`SteadyConfig.cfl_max` 的默认值是 **10.0**，而 CLI
     `--cfl-max` 的默认是 0.5——差 20 倍。2026-09-17 两边一起重定为
-    **0.06**，依据是三类实测（见 `cli/solve/steady.py` 的
+    **0.06**，依据是三类实测（见 `cli/solve/steady/` 的
     --cfl-max 帮助）：直接谱测量给出线性极限约 0.117、真实网格
     plate_demo 0.30 第 13 步发散、平板边界层通道 0.10 第 3187 步发散。
 

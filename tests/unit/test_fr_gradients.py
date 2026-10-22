@@ -113,7 +113,7 @@ def test_multi_variable_field_gradient_matches_scalar_case():
 #
 # 但那条类比不成立。去混叠要解决的是"**先混叠再求导**"——把一个真实次数
 # 高于 order 的乘积投影到 degree-order 空间之后再对它微分，投影误差被
-# 微分算子放大（`fr/collapsed_basis.py::build_overintegration_operators`
+# 微分算子放大（`core/fr_residual/inviscid.py` 模块文档
 # 记录的实测：不去混叠的 P2 体积项对解析残差恒为 0 的线性剪切场算出的
 # 残差是真值的 43~62 倍）。本算子里 `D · field` 在 field 自身的多项式
 # 空间内是**精确**的，之后乘 `inv_jac` 只是**逐点求值**、不再求导，

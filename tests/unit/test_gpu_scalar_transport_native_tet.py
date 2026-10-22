@@ -28,7 +28,7 @@
    tet']`（坍缩坐标微分算子），与 `gpu_gradients.py::compute_physical_
    gradient_gpu` 同一类遗漏（该处已于同日早些时候修复）。
 
-全部 5 处已按 CPU 参考 `core/turbulence/transport.py`/
+全部 5 处已按 CPU 参考 `core/turbulence/transport/`/
 `transport_kernel.py` 逐字补齐，本文件用真实含 native 四面体的合成
 网格 + numpy-as-cupy 替身决定性验证（不是代码走查）。
 """

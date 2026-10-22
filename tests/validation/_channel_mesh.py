@@ -97,7 +97,7 @@ class ProfileInletGhostProvider(GhostStateProvider):
     按通量点物理坐标求值的粘合层。
 
     通量点的物理坐标复用生产代码里那一份唯一实现
-    （`core/fr_solver/boundary.py::_compute_inlet_fp_positions`：用体积
+    （`core/fr_solver/boundary/ghost.py::_compute_inlet_fp_positions`：用体积
     到面的外插矩阵作用在 `mesh.sps_coords` 上 —— 外插是线性的，对坐标
     分量和对流场分量是同一个矩阵运算），不在测试里另写一套参考坐标到
     物理坐标的映射。

@@ -1,5 +1,5 @@
 """AutoFlowCFD V2.0 - 真正的"完全分布式网格加载"端到端验证
-（2026-09-02，见 `distributed_mesh_loader.py::PrecompactedMeshData`/
+（2026-09-02，见 `distributed_mesh_loader/package.py::PrecompactedMeshData`/
 `build_fully_distributed_rank_package` 模块文档）。
 
 背景：只有 root 持有完整网格时，各 rank 的局部网格既没有全局面连接关系，也没法按

@@ -10,12 +10,12 @@
 
 | 位置 | 触发 |
 |---|---|
-| `core/utils/order_continuation.py` | 单机 CPU，目标阶数 >= 2 的全新算例降 P0 重建（必经） |
+| `core/utils/order_continuation/` | 单机 CPU，目标阶数 >= 2 的全新算例降 P0 重建（必经） |
 | `mpi/distributed_order_continuation/rebuild.py` | CPU MPI 阶数切换 |
 | `mpi/distributed_mesh_loader/fully_distributed.py` | CPU 完全分布式阶数切换重分发 |
 | `gpu/solver/gpu_solver/core.py` | 单机 GPU **初场**（与阶数无关） |
 | `gpu/solver/gpu_solver_order_continuation.py` | 单机 GPU 阶数切换 |
-| `gpu/distributed/gpu_distributed.py` | 多 GPU 传统模式**初场** |
+| `gpu/distributed/gpu_distributed/` | 多 GPU 传统模式**初场** |
 | `gpu/distributed/gpu_distributed_order_continuation.py` | 多 GPU 阶数切换 |
 | `gpu_distributed_fully_distributed/build.py` | 多 GPU 完全分布式**初场** |
 | `gpu_distributed_fully_distributed/redistribute.py` | 同上，阶数切换 |

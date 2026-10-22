@@ -15,8 +15,8 @@ AutoFlowCFD V2.0 - GPU 模块单元测试
 
 验证限制说明（2026-08-23）：本机没有 CuPy/真实 CUDA 设备（`pytest.
 importorskip("cupy")` 会让本文件在这台机器上整体跳过），2026-08-23
-这一轮对 `gpu_p0_inviscid.py`/`gpu_solver.py`/`gpu_distributed.py` 的
-调用签名崩溃修复、以及后续对 `gpu_viscous.py` 缺失界面项的修复，都
+这一轮对 `gpu_p0_inviscid.py`/`gpu_solver/`/`gpu_distributed/` 的
+调用签名崩溃修复、以及后续对 `gpu_viscous/` 缺失界面项的修复，都
 只能靠代码走查确认正确，无法在本机实际执行验证——本文件测试的 CuPy
 `RawKernel`/向量化路径没有纯 CPU 模拟方式，依赖真实 CUDA 编译器/驱动
 （向量化路径的数值另由 numpy 替身测试覆盖，见 tests/unit/_gpu_cupy_shim.py）。

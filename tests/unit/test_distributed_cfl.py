@@ -15,7 +15,7 @@
 （"棱柱在前"）、面归属（分区边界面必须按内部面两侧累加）、halo 对齐、
 几何量抽取（按 compact_global_ids 重排 jacobians/volumes）上的任何错误。
 而这几处恰好是本项目分布式代码反复出过真实 bug 的地方（见
-`distributed_flat_face.py` 与 `distributed_compute.py` 的 bug 记录）。
+`distributed_flat_face/` 与 `distributed_compute.py` 的 bug 记录）。
 
 ## 为什么可以在本机跑
 

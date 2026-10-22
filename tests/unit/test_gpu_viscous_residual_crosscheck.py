@@ -18,7 +18,7 @@ shape bug 相互独立，是同一轮排查中在粘性残差路径上连续发�
    新增的 `_self_extrap_side`（`boundary_extrap`/native 自身外插表，
    与 CPU 版 `E_o=boundary_extrap[celltype_o,oax,oside_idx]` 逐字
    对应），neighbor-primary 块的 `Q_n_native` 同一处修复。见
-   `gpu_viscous.py::_self_extrap_side` 文档完整推导。
+   `gpu_viscous/extrap.py::_self_extrap_side` 文档完整推导。
 
 2. **热传导项符号搞反**（`gpu_flux.py::viscous_physical_flux_gpu`）：
    Fourier 定律 `q=-k*grad(T)`（热流方向与温度梯度相反），此前这里
@@ -31,7 +31,7 @@ shape bug 相互独立，是同一轮排查中在粘性残差路径上连续发�
    （rho, rho*u, rho*v, rho*w, rho*E）求梯度，直接把 `grad_U[...,
    1:4,:]` 当"速度梯度"用——但 `grad(rho*u)=rho*grad(u)+u*grad(rho)`，
    不是 `grad(u)`，只有密度处处均匀时两者才相等。CPU 版
-   `viscous_flux.py::compute_viscous_residual_fr` 一直是对**原始
+   `viscous_flux/residual.py::compute_viscous_residual_fr` 一直是对**原始
    变量** `Q`（`grad_Q=compute_physical_gradient(Q,...)`,
    `grad_vel=grad_Q[:,:,1:4,:]`）求梯度。已改为对 `Q` 求梯度，与
    CPU 一致。密度均匀/近似均匀的流场（本项目大量既有测试用的正是

@@ -3,7 +3,7 @@
 
 背景：`MultiGPUDistributedSolver` 此前只支持"传统模式"（每个 rank 独立
 加载完整全局网格），完全没有"完全分布式加载"（只有 root 加载完整网格）
-构造入口——见 `gpu_distributed_fully_distributed.py` 模块文档。
+构造入口——见 `gpu_distributed_fully_distributed/` 模块文档。
 
 方法论（与本项目一贯的"无法本地验证"原则一致，本机没有真实 CUDA/MPI
 环境）：

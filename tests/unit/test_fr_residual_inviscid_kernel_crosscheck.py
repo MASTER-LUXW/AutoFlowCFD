@@ -1,7 +1,7 @@
 """无粘残差新旧界面项实现逐位对比 (性能优化验证阶段一)。
 
-在把 `fr_residual_inviscid.py` 里的纯 Python 逐面循环真正换成
-`fr_residual_inviscid_kernel.py` 的 numba kernel 之前，先用同一个网格、
+在把 `core/fr_residual/inviscid.py` 里的纯 Python 逐面循环真正换成
+`core/fr_residual/inviscid_kernel.py` 的 numba kernel 之前，先用同一个网格、
 同一个（含非均匀扰动的）状态场，新旧两版分别算一遍完整无粘残差，断言
 逐位最大误差 < 1e-12（只允许浮点结合律带来的最后几位差异）——这比
 物理判据（自由流场应为零等）更直接，专门证明"新代码算的和旧代码是

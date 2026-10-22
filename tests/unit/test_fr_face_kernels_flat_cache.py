@@ -6,9 +6,8 @@
 `id()`），导致缓存把旧 mesh 的展平几何错误地返回给新 mesh（连续跑全量
 测试套件时抓到过一次因此触发的 `ValueError: incompatible array sizes
 for np.dot`；同样的全量套件另一次完全没触发——形状恰好兼容时不会崩溃，
-是静默算错，比崩溃更危险）。修复为持有 `mesh.face_flux_points` 的强
-引用本身当键、用 `is` 做身份比较，见 `fr_face_kernels_flat.py` 模块
-文档"缓存键危险陷阱"一节。
+是静默算错，比崩溃更危险）。现在展平几何直接挂在 `mesh.face_flux_points` 对象自己身上（`_flat_geometry`，
+`core/fr_operators/face_kernels.py::get_flat_face_geometry`），不再有跨 mesh 的键。
 
 这里不追求确定性复现真实的 CPython 内存复用（依赖分配器内部实现，
 环境相关），而是直接验证修复后的不变量：无论创建/销毁多少个不同的

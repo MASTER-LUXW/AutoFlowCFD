@@ -220,83 +220,42 @@ class TestTurbulenceComponentsUntouched:
         np.testing.assert_array_equal(out[0, 0], np.ones(5))
 
 
-class TestTrialStatePrimitivesContract:
-    """钉住 `step.py::mean_flow_residual` 依赖的那个隐式契约。
+class TestGammaUsesTrialStatePrimitives:
+    """Gamma 必须按试探态的原始变量构造，不能用基态的。
 
-    `mean_flow_residual_raw` 把 `solver.state.U` 临时换成 RK 子迭代的
-    试探态 `U_trial` 求残差，在 `finally` 里恢复 `state.U`，但**故意不**
-    恢复 `state.Q`——于是它返回后 `state.Q` 仍是 `U_trial` 对应的原始
-    变量，`mean_flow_residual` 正是靠这一点把 `Gamma(Q_trial)` 作用在
-    `R(U_trial)` 上，不需要再做一次全场原始变量转换（P2 规模下那是
-    1.2GiB 的额外分配 + 一次完整转换）。
-
-    为什么必须有这个测试：这个依赖只写在注释里。如果以后有人出于
-    "对称清理"的直觉在 `finally` 里补上 `state.Q` 的恢复，预处理就会
-    静默地用**基态**的 Q 去构造 Gamma——Gamma 仍可逆、残差仍趋零、
-    所有现有测试仍通过，但每个 RK 子步的预处理矩阵都对应错误的状态，
-    只会表现为收敛变慢/失稳这种极难溯源的症状。这里让那个改动直接
-    在单元测试里失败。
-
-    同时也是"Gamma 必须用 Q_trial 而不是基态 Q"这条要求的可执行文档。
+    单步编排（`time_integration/step_orchestration.py::advance_step` 的 `precondition`）按
+    `backend.primitives(rows)` 取原始变量，只由传入的试探态 `rows` 决定。2026-10-22（I-112）以前 CPU 单机靠一条
+    隐式契约省掉这次转换：残差求值把 `state.U` 临时换成试探态、`finally` 里只恢复 `U` 而**不**恢复 `state.Q`，
+    预处理再读 `state.Q`——有人"对称清理"补上 `Q` 的恢复，Gamma 就会静默地按基态构造（残差仍趋零、只表现为收敛
+    变慢）。现在显式由 `rows` 转换（P2 cube 粗网格一次 0.023 s，相对一次矩阵向量乘约 5.5 s 可忽略），这里钉住
+    "只取决于 rows、与求解器当前状态无关"。
     """
 
-    def test_state_q_follows_trial_u_after_residual_eval(self):
-        from tests.validation._channel_mesh import (
-            build_channel_mesh_prism, build_face_exact_ghost_provider)
+    def test_primitives_depend_only_on_the_rows_passed_in(self):
+        from tests.validation._channel_mesh import build_channel_mesh_prism
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
         from autoflowcfd.core.fr_solver import FRSolver
+        from autoflowcfd.core.fr_solver.step import CpuStepBackend
         from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
-        H, Lx, Lz = 1.0e-2, 2.0e-2, 2.5e-3
-        bc = {
-            "wall_bottom": {"type": "WALL", "is_no_slip": True,
-                            "wall_velocity": [0.0, 0.0, 0.0]},
-            "wall_top": {"type": "WALL", "is_no_slip": True,
-                         "wall_velocity": [5.0, 0.0, 0.0]},
-            "z_min": {"type": "SYMMETRY"}, "z_max": {"type": "SYMMETRY"},
-            "x_min": {"type": "OUTLET", "p_outlet": 101325.0},
-            "x_max": {"type": "OUTLET", "p_outlet": 101325.0},
-        }
-        mesh = build_channel_mesh_prism(1, nx=4, ny=4, nz=1, Lx=Lx, H=H, Lz=Lz)
+        mesh = build_channel_mesh_prism(1, nx=4, ny=4, nz=1, Lx=2.0e-2, H=1.0e-2, Lz=2.5e-3)
         solver = FRSolver(
-            mesh=mesh, order=1, turb_model_name="NONE",
-            time_scheme=TimeIntegrationScheme.SSP_RK3,
-            rho_inf=1.225, vel_inf=5.0, p_inf=101325.0, mu_molecular=1.8e-5,
-            bc_overrides=bc, n_threads=1,
+            mesh=mesh, order=1, turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3,
+            rho_inf=1.225, vel_inf=5.0, p_inf=101325.0, mu_molecular=1.8e-5, n_threads=1,
         )
-        solver.order_continuation_enabled = False
-        solver.boundary_ghost_provider = build_face_exact_ghost_provider(
-            mesh, Lx, H, Lz, bc)
-
+        backend = CpuStepBackend(solver)
         base_U = solver.state.U.copy()
-        # 试探态：与基态明确不同（动量整体抬 30%，能量随之改变）
         U_trial = base_U.copy()
         U_trial[:, :, 1] += 0.3 * abs(base_U[:, :, 0]).max() * 5.0
+        rows = U_trial.reshape(-1, base_U.shape[-1])
 
-        saved = solver.state.U
-        solver.state.U = U_trial
-        try:
-            solver.compute_inviscid_residual()
-        finally:
-            solver.state.U = saved
-
-        # 契约：U 已恢复为基态，而 Q 必须仍是试探态的原始变量
-        np.testing.assert_array_equal(solver.state.U, base_U)
-        q_after = solver.state.Q.copy()
-
-        # 参照值：把 U_trial 真正装进 state 再转换一次，取得"正确的 Q_trial"
-        solver.state.U = U_trial
-        solver.state._update_primitives()
-        q_trial_ref = solver.state.Q.copy()
-        solver.state.U = base_U
-        solver.state._update_primitives()
-        q_base_ref = solver.state.Q.copy()
-
-        np.testing.assert_allclose(
-            q_after, q_trial_ref, rtol=0.0, atol=0.0,
-            err_msg="残差求值后 state.Q 不再对应试探态——step.py 里的低马赫数"
-                    "预处理会用基态 Q 构造 Gamma（静默错误），见本类文档")
-        assert not np.allclose(q_trial_ref[:, :, 1], q_base_ref[:, :, 1]), (
-            "试探态与基态的速度场没有区别，本测试失去判别力（请调整扰动幅度）")
+        backend.residual_raw(rows, None, None)
+        solver.state._update_primitives()             # 求解器状态里的原始变量回到基态
+        got = backend.primitives(rows)
+        np.testing.assert_array_equal(got, conserved_to_primitive(U_trial[..., :5]))
+        np.testing.assert_array_equal(solver.state.U, base_U)        # 残差求值后状态仍是基态
+        assert not np.allclose(got[..., 1], conserved_to_primitive(base_U[..., :5])[..., 1]), \
+            "试探态与基态的速度场没有区别，本测试失去判别力（请调整扰动幅度）"
 
 
 class TestPseudoTimeStepPairsWithGamma:

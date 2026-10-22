@@ -2,9 +2,9 @@
 
 ## 修的是什么
 
-去混叠机制（`fr/collapsed_basis.py::build_overintegration_operators` 有
+去混叠机制（`core/fr_residual/inviscid.py` 模块文档有
 完整动机与实测数字）一直**只接在平均流的无粘体积项**上。粘性项完全没有
-（grep 确认 `fr_residual/viscous_flux.py` 里 overint/jacobians_fine 零
+（grep 确认 `fr_residual/viscous_flux/` 里 overint/jacobians_fine 零
 命中），而粘性通量里有 `tau`、`u·tau`、`k_cond*grad_T` 这些乘积，再乘
 `adj(J)`，真实多项式次数远高于 order。
 

@@ -375,7 +375,7 @@ class TestEndToEndOnRealSolver:
         """边界自由来流态的速度分量必须与来流方向一致。
 
         直接用生产路径读出来的 freestream 字典算方向（与
-        `core/fr_solver/boundary.py` 里 Q_free 的构造同一个调用），
+        `core/fr_solver/boundary/` 里 Q_free 的构造同一个调用），
         避免把"测试自己重算一遍"当成验证。
         """
         for aoa, aos in ((0.0, 0.0), (10.0, 0.0), (6.0, 4.0)):

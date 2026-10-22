@@ -95,7 +95,7 @@ def mixed_mesh_and_ops_native():
     """native 四面体（路径C）MPI 分布式移植（2026-09-02）验证用——与
     `mixed_mesh_and_ops` 同一份合成网格，唯一区别是 tet_basis_mode="native"。
 
-    背景：`distributed_flat_face.py` 此前的模块文档一直写"分布式/MPI 路径
+    背景：`distributed_flat_face/` 此前的模块文档一直写"分布式/MPI 路径
     明确不支持 native 模式"，只把 native 相关字段原样透传、不引入分派。
     本次移植前先决定性验证这个"不支持"的说法是否仍然成立——用本文件已经
     建立的"分布式残差必须与单机路径逐位一致"判据直接测（见下方

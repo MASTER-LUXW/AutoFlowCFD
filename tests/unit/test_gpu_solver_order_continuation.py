@@ -10,7 +10,7 @@ gpu_solver_order_continuation.py 模块文档。
 
 验证方式（用 numpy-as-cupy 替身完整构造真实 `GPUFRSolver` 并调用
 `_interpolate_to_new_order`，比此前任何单 GPU 测试都走得更远）：
-过程中真实发现并修复了 `gpu_inviscid.py::_native_self_extrap`/
+过程中真实发现并修复了 `gpu_inviscid/interface.py::_native_self_extrap`/
 `_native_or_collapsed_contrib` 的一个独立真实 bug——`tet_basis_mode=
 "collapsed"`（CLI 默认值）时 `boundary_extrap_native`/`lift_native`
 是空数组，`cp.clip(x, 0, -1)` 病态区间 + `cp.where` 两个分支被提前
@@ -29,7 +29,7 @@ Continuation）时同样复现——这是单 GPU 无粘残差 kernel 对这类�
 多源混合面网格拓扑的一个更深、独立的既有缺口（此前从未有任何测试
 用完整构造+真正 step() 走到这一步，因为既有 native/collapsed
 crosscheck 测试恒用 `tet_basis_mode="native"`），修复它需要审计
-`gpu_inviscid.py`/`gpu_inviscid_volume.py` 全部涉及法向量/修正函数
+`gpu_inviscid/`/`gpu_inviscid_volume.py` 全部涉及法向量/修正函数
 形状的调用约定，是一个独立于本次 Order Continuation 任务、工作量
 相当的单独课题，本次不在范围内解决。因此本文件的决定性测试止步于
 `_interpolate_to_new_order` 本身（阶数切换的几何/数组重建逻辑，即
@@ -198,7 +198,7 @@ class TestGpuSolverStoresTurbulenceIntensityAndViscosityRatio:
     参数、只用它们算一次初始 k_inf/omega_inf，却从不存成
     `self._turbulence_intensity`/`self._viscosity_ratio`——CPU 版
     `DistributedFRSolver`/`MultiGPUDistributedSolver` 都会存这两个
-    属性（见 `core/fr_solver/turbulence.py::_set_freestream_turbulence`
+    属性（见 `core/fr_solver/turbulence/init.py::_set_freestream_turbulence`
     文档：`getattr(solver, '_turbulence_intensity', 0.01)`）。任何后续
     需要重新推导来流湍流值的调用点（`_interpolate_to_new_order` 降阶
     重置分支、`distributed_order_continuation.py::_reset_turbulence_

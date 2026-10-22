@@ -18,8 +18,8 @@ plate_demo_volume_les（179,237 单元）上一条 AUSM+up 预处理档对照运
    并在收尾时用 NaN 覆盖 `final_state.pkl`——本来磁盘上那几个正常的
    中间 checkpoint 是唯一可用的残骸。
 
-排查后发现这是**路径不对等**而非有意设计：GPU 单机（`gpu_solver.py`）与
-多 GPU（`gpu_distributed.py`）本来就有 `np.isfinite(res)` 检查，而
+排查后发现这是**路径不对等**而非有意设计：GPU 单机（`gpu_solver/`）与
+多 GPU（`gpu_distributed/`）本来就有 `np.isfinite(res)` 检查，而
 三条 CPU 路径
 
     core/fr_solver/solver.py::FRSolver.solve                （P0/P1 常规循环）
@@ -142,7 +142,7 @@ class TestAllSolveLoopsAreGuarded:
         多 GPU 路径此前就是顺序错了（先保存再检查），检查在也没用。
 
         判定从循环体里那条 `res = advance(..., dt)` 起算，而不是从文件开头
-        ——`gpu_distributed.py` 的 `solve` **文档字符串**里就提到了
+        ——`gpu_distributed/` 的 `solve` **文档字符串**里就提到了
         `checkpoint_callback(solver, iteration)` 这个回调约定，按文件
         开头找首次出现会命中文档而不是调用（第一版判据就踩了这个，
         报了一个不存在的顺序错误）。
