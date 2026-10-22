@@ -1,58 +1,19 @@
 """mesh_domain_classify.classify_boundary_groups 用到的底层几何原语。
 
-从 mesh_domain_classify.py 拆分出来：面/边连通分量分析、射线-三角形相交
+从 mesh_domain_classify.py 拆分出来（面 / 边连通分量在 `mesh_utils.face_edge_incidence` / `face_components`）：射线-三角形相交
 奇偶（用于内外判定）、封闭壳体内部点查找（tetgen hole 种子 用）、带符号
 体积、以及包围盒接触面判定。这些都是纯几何计算，和"怎么分类边界组"这个
 上层策略无关。
 """
 
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
 
 from .mesh_utils import compute_face_normals
 
 # _bbox_touch_fraction 判定"这批节点是否主要贴在包围盒某一面上"的多数阈值。
 _BBOX_TOUCH_MAJORITY = 0.9
-
-
-def _face_edges(faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """返回（每次面-棱出现对应的棱编号、每条唯一棱的出现次数、每次出现所属的面编号）。"""
-    n_faces = len(faces)
-    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    face_of_edge = np.tile(np.arange(n_faces), 3)
-    edges_sorted = np.sort(edges, axis=1)
-    edge_dtype = np.dtype((np.void, edges_sorted.dtype.itemsize * 2))
-    edge_voids = np.ascontiguousarray(edges_sorted).view(edge_dtype).reshape(-1)
-    _, inverse, counts = np.unique(edge_voids, return_inverse=True, return_counts=True)
-    return inverse, counts, face_of_edge
-
-
-def _connected_components(faces: np.ndarray, inverse: np.ndarray, face_of_edge: np.ndarray) -> np.ndarray:
-    """给每个面标上连通分量编号（按共享棱相邻）。"""
-    n_faces = len(faces)
-    order = np.argsort(inverse, kind='stable')
-    sorted_edge_id = inverse[order]
-    sorted_face_idx = face_of_edge[order]
-    splits = np.flatnonzero(np.diff(sorted_edge_id)) + 1
-    groups = np.split(sorted_face_idx, splits)
-
-    rows: List[int] = []
-    cols: List[int] = []
-    for group in groups:
-        if len(group) >= 2:
-            anchor = group[0]
-            rows.extend([anchor] * (len(group) - 1))
-            cols.extend(group[1:])
-
-    adjacency = coo_matrix(
-        (np.ones(len(rows), dtype=bool), (rows, cols)),
-        shape=(n_faces, n_faces)
-    )
-    _, labels = connected_components(adjacency, directed=False)
-    return labels
 
 
 # 射线判内外的退化容差（全部无量纲）：重心坐标离 0 不到它（射线擦过边 / 顶点）、射线方向与三角形平面夹角的

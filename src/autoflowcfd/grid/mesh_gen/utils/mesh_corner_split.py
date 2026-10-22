@@ -48,8 +48,8 @@ import numpy as np
 from typing import Tuple
 from loguru import logger
 
-from .mesh_corner_split_geometry import _implied_edge_radius, _unique_edges
-from .mesh_utils import compute_face_normals
+from .mesh_corner_split_geometry import implied_edge_radius
+from .mesh_utils import compute_face_normals, face_components, face_edge_incidence, two_sided_edges
 
 FEATURE_ANGLE_THRESHOLD_RAD = np.deg2rad(20.0)
 
@@ -73,7 +73,7 @@ def split_sharp_corners(
             其两侧面被视为不同补丁，除非以其他方式连接
         min_feature_radius: 二面角超过 `threshold` 的边如果其自身
             几何暗示的局部曲率半径大于等于此值（米），则仍不视为硬边——
-            见 _implied_edge_radius 的文档字符串了解为何这能区分
+            见 implied_edge_radius 的文档字符串了解为何这能区分
             真正的尖锐（近零半径）CAD 折痕与普通曲面（圆角、
             圆角拐角），后者只是相对于自身真实半径欠细分。
             刻意是单边启发式，非保证：真正精细的输入网格会让
@@ -111,56 +111,27 @@ def split_sharp_corners(
 
     face_normals = compute_face_normals(nodes, faces)
 
-    parent = np.arange(n_faces)
+    # 每条边按相邻面数分类：1 = 补丁边界边；2 = 内部边，按二面角（与隐含曲率半径）判定硬 / 平滑；> 2 = 非流形边，
+    # 两侧各自独立（最安全：视为硬边、不加倒角）。平滑边连接的面组成一个补丁（连通分量，编号按分量内最小面号）。
+    # 2026-10-22（I-152）以前逐边 Python 循环（每边 np.dot + arccos）加 Python 并查集，10 万量级面网格上是秒级。
+    edge_vertices, edge_of_slot, face_of_slot, counts = face_edge_incidence(faces)
+    edge_ids, fa, fb = two_sided_edges(edge_of_slot, face_of_slot, counts)
+    angle = np.arccos(np.clip(np.einsum("ij,ij->i", face_normals[fa], face_normals[fb]), -1.0, 1.0))
+    is_hard = angle > threshold
+    if min_feature_radius > 0.0:
+        # 超过角度阈值、但自身几何暗示的局部曲率半径达到 min_feature_radius 的边仍是平滑边（见该参数文档）
+        lengths = np.linalg.norm(nodes[edge_vertices[edge_ids, 0]] - nodes[edge_vertices[edge_ids, 1]], axis=1)
+        is_hard &= implied_edge_radius(lengths, angle) < min_feature_radius
+    smooth = np.zeros(len(counts), dtype=bool)
+    smooth[edge_ids[~is_hard]] = True
+    patch_id = face_components(n_faces, edge_of_slot, face_of_slot, edge_mask=smooth).astype(np.int64)
+    n_patches = int(patch_id.max()) + 1
 
-    def find(x: int) -> int:
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:
-            parent[x], x = root, parent[x]
-        return root
+    is_boundary_vertex = np.zeros(n_nodes, dtype=bool)
+    is_boundary_vertex[edge_vertices[counts == 1].ravel()] = True
 
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    boundary_edge_verts = []  # (v0, v1)，只有 1 个相邻面
-    hard_edge_list = []  # (v0, v1, fa, fb)，2 个相邻面，夹角 > threshold
-
-    for v0, v1, fidx in _unique_edges(faces):
-        if len(fidx) == 1:
-            boundary_edge_verts.append((int(v0), int(v1)))
-            continue
-        if len(fidx) != 2:
-            continue  # 非流形边——保持各自独立（最安全：视为硬边，不加倒角）
-        fa, fb = int(fidx[0]), int(fidx[1])
-        cosang = np.clip(np.dot(face_normals[fa], face_normals[fb]), -1.0, 1.0)
-        angle = np.arccos(cosang)
-        is_hard = angle > threshold
-        # 一条超过普通角度阈值的边，若其自身几何暗示的局部曲率半径
-        # 达到或超过 min_feature_radius，仍视为普通平滑边——原因（及
-        # 已记录的局限）见本函数自己的 min_feature_radius 文档字符串。
-        if is_hard and min_feature_radius > 0.0:
-            edge_length = float(np.linalg.norm(nodes[v0] - nodes[v1]))
-            implied_radius = _implied_edge_radius(edge_length, angle)
-            if implied_radius >= min_feature_radius:
-                is_hard = False
-        if is_hard:
-            hard_edge_list.append((v0, v1, fa, fb))
-        else:
-            union(fa, fb)
-
-    patch_id_raw = np.array([find(f) for f in range(n_faces)], dtype=np.int64)
-    _, patch_id = np.unique(patch_id_raw, return_inverse=True)
-    n_patches = int(patch_id.max()) + 1 if n_faces else 0
-
-    boundary_verts = set()
-    for v0, v1 in boundary_edge_verts:
-        boundary_verts.add(v0)
-        boundary_verts.add(v1)
-
+    hard = edge_ids[is_hard]
+    hard_edge_list = np.column_stack([edge_vertices[hard], fa[is_hard], fb[is_hard]])
     hard_edges = np.array(hard_edge_list, dtype=np.int64).reshape(-1, 4)
     he_pa = patch_id[hard_edges[:, 2]] if len(hard_edges) else np.zeros(0, dtype=np.int64)
     he_pb = patch_id[hard_edges[:, 3]] if len(hard_edges) else np.zeros(0, dtype=np.int64)
@@ -197,7 +168,7 @@ def split_sharp_corners(
         if k < 3:
             continue
         v = int(uk0_vertex[gs])
-        if v in boundary_verts:
+        if is_boundary_vertex[v]:
             continue  # 开放扇形——拆分没问题，只是永远不加帽盖（见下方）
         patches_here = uk0_patch[gs:ge].tolist()
         patches_set = set(patches_here)

@@ -19,9 +19,8 @@ from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from loguru import logger
 
+from .mesh_utils import face_edge_incidence, face_components
 from .mesh_domain_classify_geometry import (
-    _face_edges,
-    _connected_components,
     find_point_inside_closed_shell,
     _signed_volume,
     _bbox_touch_fraction,
@@ -60,12 +59,12 @@ def _core_only_embedded_holes(nodes: np.ndarray, group_faces: np.ndarray, bbox_m
     实体：不标孔洞时 tetgen 把实体内部也填满四面体（实体表面成了内部面，生成末尾的外表面覆盖校验报错）。
     2026-10-21（I-209）以前只给挤出边界层的分量标孔洞。
     """
-    inverse, _, face_of_edge = _face_edges(group_faces)
-    labels = _connected_components(group_faces, inverse, face_of_edge)
+    _, edge_of_slot, face_of_slot, _ = face_edge_incidence(group_faces)
+    labels = face_components(len(group_faces), edge_of_slot, face_of_slot)
     holes = []
     for comp_id in np.unique(labels):
         comp_faces = group_faces[labels == comp_id]
-        _, sub_counts, _ = _face_edges(comp_faces)
+        sub_counts = face_edge_incidence(comp_faces)[3]
         if np.count_nonzero(sub_counts == 1) / max(len(sub_counts), 1) >= _CLOSED_OPEN_EDGE_FRACTION:
             continue
         pts = nodes[np.unique(comp_faces)]
@@ -143,8 +142,8 @@ def classify_boundary_groups(
             hole_points.extend(_core_only_embedded_holes(nodes, group_faces, bbox_min, bbox_max, tol, name, bc_type))
             continue
 
-        inverse, counts, face_of_edge = _face_edges(group_faces)
-        labels = _connected_components(group_faces, inverse, face_of_edge)
+        _, edge_of_slot, face_of_slot, _ = face_edge_incidence(group_faces)
+        labels = face_components(len(group_faces), edge_of_slot, face_of_slot)
 
         any_extruded_in_group = False
 
@@ -181,7 +180,7 @@ def classify_boundary_groups(
 
             # 不主要贴合单一 bbox 面。重新在该子分量范围内单独统计边信息，
             # 让开放边比例只反映它自身的边界，而不是整个分组的边界。
-            _, sub_counts, _ = _face_edges(comp_faces)
+            sub_counts = face_edge_incidence(comp_faces)[3]
             n_unique_edges = len(sub_counts)
             n_open_edges = int(np.count_nonzero(sub_counts == 1))
             open_fraction = n_open_edges / max(n_unique_edges, 1)

@@ -16,7 +16,8 @@ from typing import List
 import numpy as np
 from loguru import logger
 
-from ..utils.mesh_corner_split_geometry import _implied_edge_radius
+from ..utils.mesh_corner_split_geometry import implied_edge_radius
+from ..utils.mesh_utils import compute_face_normals, face_edge_incidence, two_sided_edges
 from ..tetgen.mesh_tetgen_seam import _smooth_thickness_limit
 
 SHARP_DIHEDRAL_THRESHOLD_DEG = 150.0
@@ -41,36 +42,28 @@ def compute_vertex_corner_thickness_limit(
     if len(extrude_faces) == 0:
         return limit
 
-    v0 = nodes[extrude_faces[:, 0]]
-    v1 = nodes[extrude_faces[:, 1]]
-    v2 = nodes[extrude_faces[:, 2]]
-    face_normals = np.cross(v1 - v0, v2 - v0)
-    face_normals = face_normals / np.maximum(
-        np.linalg.norm(face_normals, axis=1, keepdims=True), 1e-300
-    )
-
-    edge_map: dict = {}
-    for i, face in enumerate(extrude_faces):
-        for j in range(3):
-            a, b = int(face[j]), int(face[(j + 1) % 3])
-            key = (min(a, b), max(a, b))
-            edge_map.setdefault(key, []).append(i)
+    face_normals = compute_face_normals(nodes, extrude_faces)
+    edge_vertices, edge_of_slot, face_of_slot, counts = face_edge_incidence(extrude_faces)
+    edge_ids, fa, fb = two_sided_edges(edge_of_slot, face_of_slot, counts)
+    normal_angle = np.arccos(np.clip(np.einsum("ij,ij->i", face_normals[fa], face_normals[fb]), -1.0, 1.0))
+    sharp = 180.0 - np.degrees(normal_angle) < sharp_angle_threshold_deg
+    # 按边在面表里首次出现的顺序（面号 x 3 + 面内边号）处理：下面的方向聚类是贪心的，结果与遍历顺序有关
+    n_faces = len(extrude_faces)
+    slot_rank = face_of_slot * 3 + np.arange(len(face_of_slot)) // n_faces
+    first_rank = np.full(len(counts), np.iinfo(np.int64).max)
+    np.minimum.at(first_rank, edge_of_slot, slot_rank)
+    sharp_edges = edge_ids[sharp]
+    sharp_angle = normal_angle[sharp]
+    by_appearance = np.argsort(first_rank[sharp_edges], kind="stable")
+    sharp_edges, sharp_angle = sharp_edges[by_appearance], sharp_angle[by_appearance]
 
     node_dirs: dict = defaultdict(list)
     node_min_radius: dict = {}
 
-    for (a, b), face_idx in edge_map.items():
-        if len(face_idx) != 2:
-            continue
-        fa, fb = face_idx
-        cosang = np.clip(np.dot(face_normals[fa], face_normals[fb]), -1.0, 1.0)
-        normal_angle_rad = np.arccos(cosang)
-        dihedral_deg = 180.0 - np.degrees(normal_angle_rad)
-        if dihedral_deg >= sharp_angle_threshold_deg:
-            continue
-
+    for e, normal_angle_rad in zip(sharp_edges, sharp_angle):
+        a, b = int(edge_vertices[e, 0]), int(edge_vertices[e, 1])
         edge_length = float(np.linalg.norm(nodes[a] - nodes[b]))
-        radius = _implied_edge_radius(edge_length, normal_angle_rad)
+        radius = implied_edge_radius(edge_length, float(normal_angle_rad))
         d = nodes[b] - nodes[a]
         d = d / max(float(np.linalg.norm(d)), 1e-12)
         node_dirs[a].append(d)
