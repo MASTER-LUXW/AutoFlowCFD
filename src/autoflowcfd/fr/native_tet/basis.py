@@ -339,13 +339,11 @@ def build_native_tet_lift(order: int, excluded_vertex: int, slot: int = 0) -> np
     `M_phys^{-1}=(1/det_j)*V@diag(1/N)@V^T`。
 
     弱形式提升定义（对每个体积节点基函数 Ψ_s 取矩）：
-    `M_phys@LiftedJump_nodal = ∮_face Ψ(x)*jump(x) dA`，右端离散化为
-    该面自己的物理面积权重求积（`w_p`=`fr/face_flux_points/exact_normal.py::
-    compute_exact_face_normals_and_weights` 已经算好并验证过的
-    `true_area_weight`，本函数只组装参考部分，物理面积权重在残差
-    kernel 消费时按面才知道，不在这里，`Lift_ref` 只依赖 `(order,
-    excluded_vertex)`，与 `build_native_tet_boundary_extrap` 同一个
-    "可预计算一次、全网格同阶数单元共享"的性质）：
+    `M_phys@LiftedJump_nodal = ∮_face Ψ(x)*jump(x) dA`。右端在参考面上求积：`w_p` 是参考面求积权重
+    （`face_kernels.FlatFaceGeometry.ref_area_weight`），面积度量由残差核传入的逆变通量 `|a| F`（`a` 为精确 adj
+    行）携带，所以 `Lift_ref` 只依赖 `(order, excluded_vertex)`，与 `build_native_tet_boundary_extrap` 同一个
+    "可预计算一次、全网格同阶数单元共享"的性质。（不能再乘物理面积权重 `true_area_weight`：面积度量会被计入
+    两次，2026-09-18 已证实那是缺陷。）
     `RHS=sum_p w_p*Ψ(FP_p)*jump[p]=V^{-T}@B^T@diag(w)@jump`
     （`B[p,m]=P_m(FP_p 参考坐标)`，即 `_native_face_value_vandermondes`
     已经算好的 `V_fp`）。代入并利用 `V^T@V^{-T}=I`（与是否正交归一
@@ -355,7 +353,7 @@ def build_native_tet_lift(order: int, excluded_vertex: int, slot: int = 0) -> np
     `Lift_ref=V@diag(1/N)@B^T`——本函数返回值。
 
     调用方（残差 kernel）消费方式：
-    `correction[s,v] = -Lift_ref[s,:]@(true_area_weight[:,None]*jump)[:,v] / det_j`
+    `correction[s,v] = -Lift_ref[s,:]@(ref_area_weight[:,None]*|a|*F_common)[:,v] / det_j`
     ——`dj=det_jacs[oc,s]` 在直边四面体处处相同，复用外层同一次 `/dj` 除法，不在这里预先乘 `1/det_j`。
 
     `slot`：坍缩顶点槽位（`fr/triangle_apex.py`），与 `build_native_tet_boundary_extrap`
