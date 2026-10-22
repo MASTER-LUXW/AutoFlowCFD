@@ -304,16 +304,10 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
         init_production_ramp(self, time_scheme)
 
-        logger.info(
-            f"GPUFRSolver initialized: {n_cells} cells, P{order}, "
-            f"device {device_id}, scheme={time_scheme}, CFL={self._current_cfl():g}"
-        )
-        print("✅ GPUFRSolver Ready:")
-        print(f"   Cells: {n_cells}, Order: P{order}")
-        print(f"   Device: {device_id} ({self.array_mgr._device_name})")
-        print(f"   Time Scheme: {time_scheme}")
         from autoflowcfd.core.time_integration.adaptive_cfl.policy import describe_cfl_policy
-        print("   " + describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
+
+        logger.info(f"GPUFRSolver 就绪：{n_cells} 个单元，P{order}，设备 {device_id}（{self.array_mgr._device_name}），"
+                    f"时间格式 {time_scheme}；{describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number)}")
         # 与 CPU 版 FRSolver 的启动日志对等（2026-09-16）：影响物理/数值
         # 的开关必须在日志里留痕，否则"这份日志是哪个配置跑出来的"只能
         # 靠翻进程命令行考古。GPU 侧此前完全没有这几行，而 CPU/GPU 交叉

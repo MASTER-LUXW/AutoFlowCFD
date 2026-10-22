@@ -194,8 +194,5 @@ class _MultiGPUSetupMixin:
         barrier()
         if is_root():
             n_local, n_halo = self.partition.n_local_cells, self.partition.n_halo
-            logger.info(f"MultiGPUDistributedSolver ({mode}) initialized: {self.n_ranks} ranks, "
-                        f"{n_local} local cells/rank (+{n_halo} halo)")
-            print(f"✅ MultiGPUDistributedSolver Ready ({mode}):")
-            print(f"   Ranks: {self.n_ranks}, Cells/rank: {n_local} (+{n_halo} halo)")
-            print(f"   GPU device: {self.device_id} per rank")
+            logger.info(f"MultiGPUDistributedSolver 就绪（{mode}）：{self.n_ranks} 个 rank，每 rank {n_local} 个本地单元"
+                        f"（+{n_halo} halo），本 rank GPU 设备 {self.device_id}")
