@@ -66,11 +66,6 @@ CUBE_FACE_NAMES: List[str] = [
     "prism_native_f3", "prism_native_f4",
 ]
 
-#: 原生编码的起点。判据统一写成 `code >= NATIVE_FACE_CODE_BASE`，不要
-#: 再散落 `code >= 6` 这种字面量 —— 加了棱柱编码之后那个字面量的含义
-#: 从"是 native 四面体面"变成了"是任意 native 面"，两者在需要分派到
-#: **不同**算子组的地方不能混用。
-NATIVE_FACE_CODE_BASE: int = CUBE_FACE_CODES["tet_native_v0"]
 #: 原生四面体面编码区间 `[6, 10)`，原生棱柱面编码区间 `[10, 15)`。
 NATIVE_TET_FACE_CODE_RANGE = (CUBE_FACE_CODES["tet_native_v0"],
                               CUBE_FACE_CODES["prism_native_f0"])

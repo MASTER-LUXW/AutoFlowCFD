@@ -11,7 +11,3 @@
 # 与入口大小、涡核尺度无关）。构造边界提供者时直接读求解器上的值、不兜底（2026-10-04：完全分布式加载的根桩缺
 # 这些属性，兜底让 CLI 设置被静默忽略）。
 _SEM_DEFAULT_NUM_EDDIES = None
-
-#: BJ 越界判据里"没有 Dirichlet 值"的标记。用 NaN 而不是哨兵数值：任何
-#: 有限哨兵都可能与真实边界值撞车，而 NaN 在 `xp.isfinite` 下是无歧义的。
-_NO_DIRICHLET = float("nan")

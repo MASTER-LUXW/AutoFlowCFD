@@ -84,12 +84,6 @@ CORE_TETGEN_OPT_ITERATIONS = 6  # tetgen 默认 3
 CORE_TETGEN_OPT_MAX_DIHEDRAL = 165.0
 
 
-# 从目标边长到 tetgen maxvolume 上限的粗略换算
-# （正四面体 volume/edge^3 ≈ 0.118；Delaunay 精化出的四面体更不规则，
-# tetgen 自身的区域上限实际也不严格——所以这里故意取宽一些，不求精确）。
-_VOLUME_SHAPE_FACTOR = 0.15
-
-
 # 注意：本模块早期版本用过嵌套二十面体区域（build_graded_regions/
 # _generate_icosphere）从壁面向外做 core 填充的分级网格。已废弃——
 # tetgen 的 per-region variable-volume 精化在多个区域共享一个 Steiner

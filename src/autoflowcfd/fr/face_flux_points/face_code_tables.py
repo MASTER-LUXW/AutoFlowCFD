@@ -7,7 +7,9 @@ import numpy as np
 
 from .data import _PRISM_QUAD_CODES
 from .geometry import CUBE_FACE_AXIS_SIDE
-from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_CODES
+from autoflowcfd.grid.connectivity.face_connectivity import (
+    CUBE_FACE_CODES, NATIVE_PRISM_FACE_CODE_RANGE, NATIVE_TET_FACE_CODE_RANGE,
+)
 
 
 # ============================================================================
@@ -52,14 +54,11 @@ del _name, _code, _ax, _sd
 #: 定义；这里只是把它变成 numba 能索引的有序数组）。
 _PQ_CODES = np.array(sorted(_PRISM_QUAD_CODES), dtype=np.int32)
 
-#: 原生面编码区间（与 `grid/connectivity/face_connectivity.py` 的
-#: `NATIVE_TET_FACE_CODE_RANGE`/`NATIVE_PRISM_FACE_CODE_RANGE` 同源）。
-#: numba 分支判据统一用这两个常量，不要再写 `code >= 6` 这种字面量 ——
-#: 加了棱柱编码之后那个字面量的含义从"是原生四面体面"变成了"是任意
-#: 原生面"，而两者要分派到**不同**的算子组。
-_NATIVE_TET_LO = 6
-_NATIVE_TET_HI = 10
-_NATIVE_PRISM_LO = 10
-_NATIVE_PRISM_HI = 15
-#: 原生棱柱的两个三角形封盖是 [10, 12)（坍缩顶点槽位只对它们与四面体面有意义）。
-_NATIVE_PRISM_CAP_HI = 12
+#: 原生面编码区间，取自 `grid/connectivity/face_connectivity.py` 的 `NATIVE_TET_FACE_CODE_RANGE` /
+#: `NATIVE_PRISM_FACE_CODE_RANGE`（唯一来源；numba 把模块级整数当编译期常量）。分支判据统一用这些常量，不要再写
+#: `code >= 6` 这种字面量——加了棱柱编码之后那个字面量的含义从"是原生四面体面"变成了"是任意原生面"，而两者要
+#: 分派到**不同**的算子组。2026-10-22（I-223）以前这里另写了一份字面量 6 / 10 / 10 / 12。
+_NATIVE_TET_LO, _NATIVE_TET_HI = NATIVE_TET_FACE_CODE_RANGE
+_NATIVE_PRISM_LO = NATIVE_PRISM_FACE_CODE_RANGE[0]
+#: 原生棱柱的两个三角形封盖（f0、f1）的编码上界（坍缩顶点槽位只对它们与四面体面有意义）。
+_NATIVE_PRISM_CAP_HI = CUBE_FACE_CODES["prism_native_f1"] + 1
