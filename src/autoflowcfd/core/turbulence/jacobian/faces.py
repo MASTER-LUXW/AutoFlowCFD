@@ -7,7 +7,8 @@
     扩散跳变量  Jd = diffusion_jump_point(ps, gs, dns, po, go, dno)   提升符号 +1
 
 `d(rho phi_v)/dt[s] += (1/det_s) lift[s,i] w_i (Jd - Jc)`，`w_i = ref_area_weight_i |adj_row_i|`。
-两个点函数与残差核共用（`face_frames.py`），导数对它们差分（双线性，差分在舍入内精确）。
+两个点函数与残差核共用（`face_frames.py`）。对流跳变量对两侧迹是线性的（`m (po - ps)`，导数 `-m`、`m` 直接写出）；
+扩散跳变量含扩散系数的取用函数（一阶导数连续），导数对点函数前向差分。
 
 迹对单元解点的线性链（`M` 为本侧外插或另一侧 sources 插值矩阵）：
 
@@ -25,7 +26,7 @@ Dirichlet 或齐次 Neumann，只依赖本侧迹。混合面配对边界面的 o
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.turbulence.transport.face_frames import convection_jump_point, diffusion_jump_point
+from autoflowcfd.core.turbulence.transport.face_frames import diffusion_jump_point
 from .cell_blocks import _gradient_operator, _pointwise_chain
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
@@ -114,21 +115,15 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, gamma_band, ghost_row, con
     for i in range(n_fp):
         m = m_side[i]
         for v in range(nv):
-            if ghost_row[i]:
-                a = conv_a[v, i]
-                p_other = a * ps[i, v]       # 常数部分不影响导数
-            else:
-                a = 0.0
-                p_other = po[i, v]
+            # 边界 / 混合面边界半区上另一侧迹是本侧的仿射函数 `po = a ps + b`（链式法则用 a）
+            a = conv_a[v, i] if ghost_row[i] else 0.0
             # 对流（m<0 时 Jc = m (po - ps)），经 J = -Jc
             dc_s = 0.0
             dc_o = 0.0
             if m < 0.0:
-                j0 = convection_jump_point(m, ps[i, v], p_other)
-                hq = _SQRT_EPS * (abs(ps[i, v]) + 1.0)
-                dc_s = (convection_jump_point(m, ps[i, v] + hq, p_other) - j0) / hq
-                hq = _SQRT_EPS * (abs(p_other) + 1.0)
-                dc_o = (convection_jump_point(m, ps[i, v], p_other + hq) - j0) / hq
+                # `convection_jump_point = m (po - ps)`（入流侧，m < 0）对两侧迹的导数是常数
+                dc_s = -m
+                dc_o = m
             dd = _diffusion_partials(ps[i, v], gs[i, v], dns[i, v], po[i, v], go[i, v], dno[i, v], h, c_ip,
                                      is_bnd_row[i], is_dir_row[v, i], target_row[v, i], gamma_band)
             if ghost_row[i]:
