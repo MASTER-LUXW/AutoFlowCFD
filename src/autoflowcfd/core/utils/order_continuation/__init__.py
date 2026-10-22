@@ -5,7 +5,8 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
 
 ## 文件分工
 
-    interp.py            阶数切换时解场/湍流场的插值（延拓）算子
+    order_switch.py      换阶中与后端无关的部分（场的延拓 / 来流重建、网格切阶、跨步状态复位），六条路径共用
+    interp.py            单机 CPU 升阶
     turbulence_reset.py  续算的湍流场被上界大面积截断时拒绝续算（或按 --reset-turbulence 重置），全部后端共用
     p0_reset.py          全新求解器在 Order Continuation 起步时重建到 P0
     run.py               顶层编排：P0 -> P1 -> ... -> 目标阶数（四个后端共用的唯一循环）
@@ -17,7 +18,6 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
 
 from .interp import (  # noqa: F401
     interpolate_to_new_order,
-    interpolate_to_new_order_checked,
 )
 from .turbulence_reset import (  # noqa: F401
     check_resumed_turbulence,
@@ -31,6 +31,5 @@ from .run import (  # noqa: F401
 
 __all__ = [
     "interpolate_to_new_order",
-    "interpolate_to_new_order_checked",
     "run_order_continuation",
 ]

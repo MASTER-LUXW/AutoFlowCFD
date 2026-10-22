@@ -125,7 +125,7 @@ def _fake_cpu_solver(aoa):
     return SimpleNamespace(
         state=state, freestream=_fs(aoa), turb_model=None, sgs_model=None,
         wall_distance=None, current_order=1, ops=None,
-        mesh=SimpleNamespace(set_order=lambda p: None),
+        mesh=SimpleNamespace(set_order=lambda p: None, _order_geometry_cache={}),
     )
 
 
@@ -135,7 +135,7 @@ class TestSingleCpuP0ResetKeepsTheDirection:
         from autoflowcfd.core.utils.order_continuation import _reset_state_to_p0
 
         solver = _fake_cpu_solver(aoa=10.0)
-        _reset_state_to_p0(solver, 1)
+        _reset_state_to_p0(solver)
         U = solver.state.U
         assert U.shape[1] == 1, "没有重建到 P0"
         mom = U[:, 0, 1:4] / U[:, 0, 0:1]
@@ -148,7 +148,7 @@ class TestSingleCpuP0ResetKeepsTheDirection:
         from autoflowcfd.core.utils.order_continuation import _reset_state_to_p0
 
         solver = _fake_cpu_solver(aoa=0.0)
-        _reset_state_to_p0(solver, 1)
+        _reset_state_to_p0(solver)
         ref = FRState(3, 1)
         ref.initialize_uniform(rho=_RHO, u=_VEL, v=0.0, w=0.0, p=_P)
         assert np.array_equal(solver.state.U, ref.U)
@@ -273,5 +273,5 @@ def test_p0_reset_also_resets_time_stepping_history():
                       time_scheme=TimeIntegrationScheme.SSP_RK3, rho_inf=1.2, vel_inf=10.0, p_inf=1e5,
                       mu_molecular=1.8e-5)
     solver._dual_time_U_prev = object()
-    _reset_state_to_p0(solver, 1)
+    _reset_state_to_p0(solver)
     assert solver._dual_time_U_prev is None

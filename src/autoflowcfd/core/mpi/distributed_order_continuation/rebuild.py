@@ -1,51 +1,10 @@
 """AutoFlowCFD V2.0 - 阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值"""
 
 import numpy as np
-from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
 
-
-def _interp_state_and_turbulence_local(solver, old_order: int,
-                                       target_p: int,
-                                       n_local: int) -> np.ndarray:
-    """对 local cells（不含 halo）的守恒变量 + 湍流场做精确延拓插值
-    （复用 `fr/order_interp.py::apply_order_interp` 这一份实现，只是作用
-    范围限定在 `[0, n_local)`——halo 部分在下面几何重建之后由 halo 交换
-    在下一步 `step()` 里重新获取，不需要在这里插值一份很快就会被覆盖
-    的值）。
-
-    `apply_order_interp` 按单元类型取各自原生基的精确延拓。local 索引空间同样是
-    "棱柱在前"（见 `distributed_mesh_loader` 里 `n_prism_cells` 的来源）。
-
-    Returns:
-        (n_local, new_n_sps, n_vars) 插值后的 local 守恒变量，湍流场
-        （若存在）直接原地写回 `solver.turb_model.k_field`/
-        `.omega_field`/`.nu_t`。
-    """
-    from autoflowcfd.fr.order_interp import apply_order_interp
-
-    n_prism_local = int(solver.mesh.n_prism_cells)
-
-    def _lift(field):
-        return apply_order_interp(field, n_prism_local, old_order, target_p)
-
-    old_local_U = solver.state.get_local_U()[:n_local]
-    new_local_U = _lift(old_local_U)
-
-    turb_model = getattr(solver, 'turb_model', None)
-    if turb_model is not None and hasattr(turb_model, 'transported_fields'):
-        # 输运场在未知量空间延拓（`TransportedTurbulence.mapped_fields`）
-        turb_model.set_transported_fields(turb_model.mapped_fields(
-            _lift, np, fields=[f[:n_local] for f in turb_model.transported_fields()]))
-        # nu_t：同 order_continuation/ 文档说明，只有形状匹配旧阶数时
-        # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
-        if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:
-            turb_model.nu_t = _lift(turb_model.nu_t[:n_local])
-
-    sgs_model = getattr(solver, 'sgs_model', None)
-    if sgs_model is not None and hasattr(sgs_model, 'nu_t'):
-        sgs_model.nu_t = None
-
-    return new_local_U
+from autoflowcfd.core.utils.order_continuation.order_switch import (
+    install_turbulence, reset_order_dependent_state, switch_mesh_order, switched_fields,
+)
 
 
 def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_local_U: np.ndarray) -> None:
@@ -82,7 +41,6 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
         new_local_U: (n_local, new_n_sps, n_vars)，调用方已经算好的
             新阶数 local 守恒变量（插值结果或均匀自由流场）。
     """
-    from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.mpi.partition import build_distributed_partition
     from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
@@ -99,11 +57,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     # 再 set_order，避免大网格同时驻留多份完整阶数几何 OOM，见该函数
     # 文档"性能说明"一节，同一个理由在分布式"传统模式"下依然成立，
     # 每个 rank 各自持有一份完整网格，OOM 风险不小于单机）。
-    stale_orders = [o for o in list(solver.mesh._order_geometry_cache) if o != target_p]
-    for o in stale_orders:
-        del solver.mesh._order_geometry_cache[o]
-    solver.mesh.set_order(target_p)
-    solver.ops = generate_fr_operators(target_p)
+    solver.ops = switch_mesh_order(solver.mesh, target_p)
 
     new_partition = build_distributed_partition(
         solver.mesh.face_connectivity, cell_partition, solver.rank, solver.n_ranks
@@ -163,15 +117,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     solver.solver_kwargs['order'] = target_p
     solver._local_solver = None
 
-    # DUAL_TIME 上一物理时间层历史随阶数切换失效（见
-    # order_continuation/interp.py::interpolate_to_new_order_checked 同名
-    # 处理文档——形状不再匹配，且严格来说也不再是同一离散空间下的解），
-    # 否则下一步 BDF2 会静默用一份形状不匹配的历史层。
-    reset_dual_time_history(solver)
-    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-    reset_newton_state(solver)
+    reset_order_dependent_state(solver, solver.sgs_model)
 
     solver.current_order = target_p
 
@@ -197,33 +143,13 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
         return
 
     n_local = solver.partition.n_local_cells
-    from autoflowcfd.fr.native_padding import sps_width
+    # 只换 local 单元（halo 由下一步 step() 的 halo 交换重新取得）；场在 `order_switch.switched_fields` 里换阶，与其余
+    # 后端同一份
+    turb = solver.turb_model
+    switched = switched_fields(
+        old_order, target_p, int(solver.mesh.n_prism_cells), solver.freestream, solver.state.get_local_U()[:n_local],
+        turb, turbulence=None if turb is None else [f[:n_local] for f in turb.transported_fields()],
+        nu_t=None if turb is None or turb.nu_t is None else turb.nu_t[:n_local])
+    install_turbulence(turb, switched)
 
-    new_n_sps = sps_width(target_p)
-
-    if target_p > old_order:
-        new_local_U = _interp_state_and_turbulence_local(
-            solver, old_order, target_p, n_local)
-    else:
-        from autoflowcfd.core.utils.flow_direction import (
-            freestream_conservative_state,
-        )
-
-        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
-        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
-        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
-        # 另外此前读的是 `solver_kwargs.get('vel_inf', 33.33)` —— 用户若依赖
-        # 构造函数默认值而没显式传，kwargs 里就没有这个键，于是静默用了一个
-        # 与 `solver.freestream`（求解器实际来流）可能不同的魔法值。
-        new_local_U = np.empty((n_local, new_n_sps, solver.state.n_vars))
-        new_local_U[:] = freestream_conservative_state(
-            solver.freestream, solver.state.n_vars)
-
-        if solver.turb_model is not None:
-            solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
-            if hasattr(solver.turb_model, 'nu_t'):
-                solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
-        if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
-            solver.sgs_model.nu_t = None
-
-    _rebuild_cpu_traditional_partition_and_state(solver, target_p, new_local_U)
+    _rebuild_cpu_traditional_partition_and_state(solver, target_p, switched.U)

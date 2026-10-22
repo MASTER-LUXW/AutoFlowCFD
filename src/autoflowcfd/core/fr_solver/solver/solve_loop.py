@@ -401,17 +401,13 @@ class _SolverSolveMixin(SolveLoopMixin):
         此前这串步骤内联在 CPU 单机自己的 Order Continuation 循环里，其余后端的同名方法各自完成同一件事。
         """
         from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
-        from autoflowcfd.fr.operators import generate_fr_operators
+        from autoflowcfd.core.utils.order_continuation.order_switch import switch_mesh_order
 
         if new_order == 0:
-            order_continuation._reset_state_to_p0(self, 1)
+            order_continuation._reset_state_to_p0(self)
         else:
-            order_continuation.interpolate_to_new_order_checked(self, new_order)
-            self.ops = generate_fr_operators(new_order)
-        for o in [o for o in list(self.mesh._order_geometry_cache) if o != new_order]:
-            del self.mesh._order_geometry_cache[o]
-        if new_order != 0:
-            self.mesh.set_order(new_order)
+            order_continuation.interpolate_to_new_order(self, new_order)
+            self.ops = switch_mesh_order(self.mesh, new_order)
             recompute_wall_distance_for_current_order(self)
         self.boundary_ghost_provider = self._build_boundary_ghost_provider(self.bc_overrides)
 

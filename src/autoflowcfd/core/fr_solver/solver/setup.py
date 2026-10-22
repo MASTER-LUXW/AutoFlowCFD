@@ -180,9 +180,7 @@ class _SolverSetupMixin:
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()
-        # 与 order_continuation.interpolate_to_new_order_checked（阶数
-        # 变化后 SPs 布局改变，必须让这份历史失效，否则形状不匹配/物理
-        # 上不连续的历史层会被静默用于 BDF2）。
+        # 与换阶时的复位（`order_continuation/order_switch.py::reset_order_dependent_state`）。
         reset_dual_time_history(self)
 
         # NEWTON_KRYLOV（隐式稳态）跨步状态：含义与换阶失效的理由见

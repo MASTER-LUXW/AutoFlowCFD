@@ -1,68 +1,28 @@
 """AutoFlowCFD V2.0 - 全新求解器在 Order Continuation 起步时重建到 P0"""
 
+from autoflowcfd.core.fr_solver.state import FRState
+from autoflowcfd.core.utils.order_continuation.order_switch import (
+    install_turbulence, reset_order_dependent_state, switch_mesh_order, switched_fields,
+)
 
-import numpy as np
 
-
-def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
+def _reset_state_to_p0(solver) -> None:
     """把一个**全新**（非 resume）求解器的状态重建到 P0。
 
     Order Continuation 从 P0 起步；全新求解器构造时按目标阶数分配了状态，这里用均匀自由来流（速度方向取自攻角 /
-    侧滑角）在 P0 上重建它，并把湍流场与涡粘、SGS 涡粘、壁面距离、算子、网格阶数、双时间步上一时间层与
-    Newton 跨步状态一并切到 P0（2026-10-22（I-90）以前后两项由调用方另行重置，同一件事分在两处）。
+    侧滑角）、模型的来流湍流值、零涡粘在 P0 上重建它（`order_switch.switched_fields` 降阶分支），并把算子、网格
+    阶数、壁面距离、SGS 涡粘、双时间步上一时间层与 Newton 跨步状态一并切到 P0。
     """
-    from autoflowcfd.core.fr_solver.state import FRState
-    from autoflowcfd.fr.operators import generate_fr_operators
-
-    print(f"[INFO] Current state has {solver.state.U.shape[1]} SPs/cell, reinitializing from P0...")
-
-    from autoflowcfd.core.utils.flow_direction import direction_from_freestream
-
-    p0_state = FRState(solver.state.n_cells, expected_p0_n_sps)
-    # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
-    # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
-    # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
-    # 这一处是**每个目标阶数 >= 1 的全新算例都必经**的（`uses_order_continuation`
-    # 为真才进 Order Continuation）：FRSolver.__init__
-    # 的初场本来是对的，随即被这次重建覆盖成零攻角。
-    _v0 = float(solver.freestream["vel_inf"]) * direction_from_freestream(solver.freestream)
-    p0_state.initialize_uniform(
-        rho=solver.freestream["rho_inf"],
-        u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
-        p=solver.freestream["p_inf"],
-    )
-    solver.state = p0_state
-
-    if solver.turb_model is not None:          # 输运模型（SST 族 / SA-neg）
-        # 重置为模型的来流值（构造时由 Tu/VR 推导，与 init_turbulence_models 同一组值）
-        solver.turb_model.set_transported_fields(
-            solver.turb_model.freestream_fields((solver.state.n_cells, expected_p0_n_sps), np))
-        # nu_t 同样必须重置到 P0 维度——理由同 interpolate_to_new_order
-        # 里的 nu_t 插值处理：它不会自动跟着输运场变形，
-        # 只在 compute_source_terms 被调用时才按当时的 k/omega 重新
-        # 算出，遗漏会让它保留重置前的形状，被 _compute_local_time_step
-        # 在 compute_turbulence_source 刷新它之前读取时引发同一类形状
-        # 不匹配问题。用 SSTModelFR.__init__ 同样的初值约定（零）。
-        solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
-        print("[INFO] Turbulence fields reset to P0 dimensions")
-
-    if solver.sgs_model is not None:
-        solver.sgs_model.nu_t = None
-
-    solver.current_order = 0
-    solver.ops = generate_fr_operators(0)
-    solver.mesh.set_order(0)
-
-    # 壁面距离是纯几何量：`set_order(0)` 之后 `sps_coords` 才是 P0 的解点，由来源重新查询
-    # （不取单元平均——见 `recompute_wall_distance_for_current_order` 文档）。
     from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
+
+    switched = switched_fields(solver.current_order, 0, 0, solver.freestream, solver.state.U, solver.turb_model)
+    state = FRState(switched.U.shape[0], switched.U.shape[1])
+    state.U = switched.U
+    state._update_primitives()
+    solver.state = state
+    install_turbulence(solver.turb_model, switched)
+    solver.current_order = 0
+    solver.ops = switch_mesh_order(solver.mesh, 0)
+    # 壁面距离是纯几何量：切到 P0 之后由来源在 P0 解点上重新查询（不取单元平均）
     recompute_wall_distance_for_current_order(solver)
-
-    # 双时间步上一时间层与 Newton 跨步状态随阶数失效（`reset_newton_state` 文档）
-    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-    from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
-
-    reset_dual_time_history(solver)
-    reset_newton_state(solver)
-
-    print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")
+    reset_order_dependent_state(solver, solver.sgs_model)

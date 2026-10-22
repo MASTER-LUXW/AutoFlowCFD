@@ -377,7 +377,6 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.device_id = 0
         solver.current_order = 0
         solver._root_context = root_context
-        solver._package_freestream = root_context['freestream']
         solver.freestream = {**root_context['freestream'], "mach_ref": root_context['mach_ref']}
         solver.mu_molecular = root_context['mu_molecular']
         n_local = mesh.n_cells  # 单 rank：全部 local
@@ -426,8 +425,8 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.n_ranks = 1
         solver.device_id = 0
         solver.current_order = 1
+        solver.mesh = mesh
         solver._root_context = root_context
-        solver._package_freestream = root_context['freestream']
         solver.freestream = {**root_context['freestream'], "mach_ref": root_context['mach_ref']}
         solver.mu_molecular = root_context['mu_molecular']
         n_sps_old = (1 + 1) ** 3

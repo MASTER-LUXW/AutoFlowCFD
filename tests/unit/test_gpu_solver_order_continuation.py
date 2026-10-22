@@ -170,6 +170,19 @@ class TestGpuSolverInterpolateToNewOrder:
         np.testing.assert_allclose(solver.U_gpu[:, :, 0], rho_inf)
         np.testing.assert_allclose(solver.U_gpu[:, :, 1], rho_inf * vel_inf)
 
+    def test_order_dependent_eddy_viscosities_follow_the_new_order(self):
+        """换阶后 SGS 涡粘失效（下一步按新维度重算），湍流涡粘随新阶数给出。2026-10-22（I-107）以前 GPU 路径不清
+        SGS 涡粘：P1 形状的涡粘与 P2 状态相乘广播失败（`gpu_solver/timestep.py` 的粘性步长项），P0 -> P1 被静默
+        广播成常数；湍流涡粘形状与旧阶数不符时原样保留旧数组。"""
+        from types import SimpleNamespace
+
+        solver = _make_solver(1, turb_model="sst")
+        solver.sgs_model_gpu = SimpleNamespace(nu_t=np.ones((solver.mesh.n_cells, 6)))
+        solver.turb_model_gpu.nu_t = np.ones((solver.mesh.n_cells, 3))     # 与 P1 的 6 个解点不符
+        solver._interpolate_to_new_order(2)
+        assert solver.sgs_model_gpu.nu_t is None
+        assert solver.turb_model_gpu.nu_t.shape == (solver.mesh.n_cells, 18)
+
     def test_same_order_is_noop(self):
         solver = _make_solver(2)
         mesh_data_before = solver.mesh_data

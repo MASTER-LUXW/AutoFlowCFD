@@ -2,8 +2,6 @@
 
 import types
 
-import numpy as np
-
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.mpi import get_rank
@@ -12,7 +10,9 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
-from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
+from autoflowcfd.core.utils.order_continuation.order_switch import (
+    install_turbulence, reset_order_dependent_state, switched_fields,
+)
 
 
 def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int) -> None:
@@ -58,55 +58,12 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
             "缺少这份上下文的实例继续爬坡（如实报告，不是假装能用）。"
         )
 
-    n_local = solver.partition.n_local_cells
-
-    # --- 1. 每个 rank 独立插值/重置自己的 local U + 湍流场（CPU 上做，
-    # 理由见函数文档）---
-    freestream = solver.freestream
-    # 不给兜底值，理由同 build.py 同名注释。
-
-    new_fields_np = new_nu_t_np = None
-    if target_p > old_order:
-        # 延拓算子按单元类型取各自原生基的精确延拓（`fr/order_interp.py`）。compact/local 索引空间同样是"棱柱在前"
-        # （见 `base_flat.n_prism` 文档），所以直接用局部棱柱数。
-        # 完整依据见 `fr/order_interp.py`。
-        from autoflowcfd.fr.order_interp import apply_order_interp
-
-        n_prism_local = int(solver.mesh.n_prism_cells)
-
-        def _lift(field):
-            return apply_order_interp(field, n_prism_local, old_order,
-                                      target_p)
-
-        old_U_np = cp.asnumpy(solver.U_gpu)
-        new_U_np = _lift(old_U_np)
-
-        if solver.turb_model_gpu is not None:
-            # 输运场在未知量空间延拓（主机副本，`TransportedTurbulence.mapped_fields`）
-            new_fields_np = solver.turb_model_gpu.mapped_fields(
-                _lift, np, fields=[cp.asnumpy(f) for f in solver.turb_model_gpu.transported_fields()])
-            old_nu_t = getattr(solver.turb_model_gpu, 'nu_t', None)
-            if old_nu_t is not None:
-                old_nu_t_np = cp.asnumpy(old_nu_t)
-                if old_nu_t_np.shape[1] == old_U_np.shape[1]:
-                    new_nu_t_np = _lift(old_nu_t_np)
-    else:
-        from autoflowcfd.core.utils.flow_direction import (
-            freestream_conservative_state,
-        )
-
-        from autoflowcfd.fr.native_padding import sps_width
-
-        new_n_sps = sps_width(target_p)
-        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
-        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
-        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
-        new_U_np = np.empty((n_local, new_n_sps, 5))
-        new_U_np[:] = freestream_conservative_state(freestream, 5)
-
-        if solver.turb_model_gpu is not None:
-            new_fields_np = solver.turb_model_gpu.freestream_fields((n_local, new_n_sps), np)
-            new_nu_t_np = np.zeros((n_local, new_n_sps))
+    # 场在主机上换阶（`order_switch.switched_fields`，与其余后端同一份）
+    turb = solver.turb_model_gpu
+    switched = switched_fields(
+        old_order, target_p, int(solver.mesh.n_prism_cells), solver.freestream, cp.asnumpy(solver.U_gpu), turb,
+        turbulence=None if turb is None else [cp.asnumpy(f) for f in turb.transported_fields()],
+        nu_t=None if turb is None or turb.nu_t is None else cp.asnumpy(turb.nu_t))
 
     # --- 2. Root 重新计算 + 分发新紧凑包（与 CPU 共用，见该函数文档）---
     from autoflowcfd.core.mpi.distributed_mesh_loader.fully_distributed import (
@@ -135,16 +92,14 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     with cp.cuda.Device(solver.device_id):
         solver._perm_gpu = cp.asarray(solver.dist_flat_face.perm)
         solver._inv_perm_gpu = cp.asarray(solver.dist_flat_face.inv_perm)
-        solver.U_gpu = cp.asarray(new_U_np)
+        solver.U_gpu = cp.asarray(switched.U)
 
     solver.gpu_halo = GPUHaloExchange(solver.partition, n_sps=new_n_sps, n_vars=5, device_id=solver.device_id)
     solver.state = DistributedFRState(solver.partition, new_n_sps)
 
-    if new_fields_np is not None:                 # 有湍流模型时上面两条分支都已给出
-        with cp.cuda.Device(solver.device_id):
-            solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
-            if new_nu_t_np is not None:
-                solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
+    with cp.cuda.Device(solver.device_id):
+        install_turbulence(turb, switched, cp.asarray)
+    if turb is not None:
         _upload_wall_geometry_compact(solver, my_package, cp, solver.device_id)
 
     solver.boundary_ghost_provider = my_package['boundary_ghost_provider']
@@ -164,10 +119,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     solver.mu_molecular = my_package['mu_molecular']
     solver.freestream = {**my_package['freestream'], "mach_ref": my_package['mach_ref']}
 
-    reset_dual_time_history(solver)
-    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-    reset_newton_state(solver)
+    reset_order_dependent_state(solver, solver.sgs_model_gpu)
 
     solver.current_order = target_p

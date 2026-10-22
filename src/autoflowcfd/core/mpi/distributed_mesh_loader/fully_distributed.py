@@ -1,6 +1,5 @@
 """AutoFlowCFD V2.0 - 完全分布式加载入口与跨阶数重分发。"""
 
-import numpy as np
 from typing import Any, Callable, Optional, Tuple
 
 from loguru import logger
@@ -11,7 +10,9 @@ from .package import RUN_OPTION_NAMES, build_fully_distributed_rank_package
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.wall_model.treatment import needs_wall_model
-from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
+from autoflowcfd.core.utils.order_continuation.order_switch import (
+    install_turbulence, reset_order_dependent_state, switch_mesh_order, switched_fields,
+)
 
 
 #: 初次加载分发紧凑包的消息标签（换阶分发由调用方给出自己的一对）
@@ -250,54 +251,14 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     n_local = solver.partition.n_local_cells
     n_vars = solver.state.n_vars
 
-    # --- 1. 每个 rank 独立插值/重置自己的 local U + 湍流场（纯本地，
-    # 数学与 CPU"传统模式"完全一致）---
-    #
-    # 自由来流：`solver.freestream` 对全部湍流模型无条件设置（`distributed_solver/assembly.py`），不给兜底
-    freestream = solver.freestream
-
-    if target_p > old_order:
-        # 延拓算子按基分派（2026-09-20，理由见 `fr/order_interp.py`）
-        from autoflowcfd.fr.order_interp import apply_order_interp
-
-        n_prism_local = int(solver.mesh.n_prism_cells)
-
-        def _lift(field):
-            return apply_order_interp(field, n_prism_local, old_order,
-                                      target_p)
-
-        old_local_U = solver.state.get_local_U()[:n_local]
-        new_local_U = _lift(old_local_U)
-
-        if solver.turb_model is not None and hasattr(solver.turb_model, 'transported_fields'):
-            # 输运场在未知量空间延拓（`TransportedTurbulence.mapped_fields`）
-            solver.turb_model.set_transported_fields(solver.turb_model.mapped_fields(
-                _lift, np, fields=[f[:n_local] for f in solver.turb_model.transported_fields()]))
-            old_nu_t = getattr(solver.turb_model, 'nu_t', None)
-            if old_nu_t is not None and old_nu_t.shape[1] == old_local_U.shape[1]:
-                solver.turb_model.nu_t = _lift(old_nu_t[:n_local])
-        if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
-            solver.sgs_model.nu_t = None
-    else:
-        from autoflowcfd.core.utils.flow_direction import (
-            freestream_conservative_state,
-        )
-
-        from autoflowcfd.fr.native_padding import sps_width
-
-        new_n_sps = sps_width(target_p)
-        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前写死 (vel_inf, 0, 0)，
-        # 而边界 Q_free 用的是正确方向。9 处同类写法已统一到
-        # `freestream_conservative_state`（见其文档）。
-        new_local_U = np.empty((n_local, new_n_sps, n_vars))
-        new_local_U[:] = freestream_conservative_state(freestream, n_vars)
-
-        if solver.turb_model is not None and hasattr(solver.turb_model, 'transported_fields'):
-            solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
-            if hasattr(solver.turb_model, 'nu_t'):
-                solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
-        if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
-            solver.sgs_model.nu_t = None
+    # 只换 local 单元（halo 由下一步 step() 的 halo 交换重新取得）；场在 `order_switch.switched_fields` 里换阶，与其余
+    # 后端同一份
+    turb = solver.turb_model
+    switched = switched_fields(
+        old_order, target_p, int(solver.mesh.n_prism_cells), solver.freestream, solver.state.get_local_U()[:n_local],
+        turb, turbulence=None if turb is None else [f[:n_local] for f in turb.transported_fields()],
+        nu_t=None if turb is None or turb.nu_t is None else turb.nu_t[:n_local])
+    install_turbulence(turb, switched)
 
     # --- 2. Root 重新计算 + 分发新紧凑包 ---
     my_package = exchange_packages_for_new_order(
@@ -312,8 +273,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
 
     new_n_sps = solver.mesh.n_sps_per_cell
     new_state = DistributedFRState(solver.partition, new_n_sps)
-    new_state.U[:n_local] = new_local_U
-    new_state.Q[:n_local] = conserved_to_primitive(new_local_U[..., :5])
+    new_state.U[:n_local] = switched.U
+    new_state.Q[:n_local] = conserved_to_primitive(switched.U[..., :5])
     solver.state = new_state
     solver.halo_exchange = HaloExchange(solver.partition, new_n_sps, n_vars)
 
@@ -339,11 +300,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         freestream={**my_package['freestream'], "mach_ref": my_package['mach_ref']},
     )
 
-    reset_dual_time_history(solver)
-    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
-    from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import reset_newton_state
-
-    reset_newton_state(solver)
+    reset_order_dependent_state(solver, solver.sgs_model)
 
     solver.current_order = target_p
 
@@ -358,13 +315,8 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
     那份漏了 cfl_start/cfl_max/cfl_min（升阶之后 CFL 边界静默退回默认值——CPU
     那份 2026-09-15 修过的同一个问题）。
     """
-    from autoflowcfd.fr.operators import generate_fr_operators
-
     if root_context is not None:
         mesh = root_context['mesh']
-        for o in [o for o in list(mesh._order_geometry_cache) if o != target_p]:
-            del mesh._order_geometry_cache[o]
-        mesh.set_order(target_p)
-        root_context['ops'] = generate_fr_operators(target_p)
+        root_context['ops'] = switch_mesh_order(mesh, target_p)
         root_context['boundary_ghost_provider_global'] = _root_boundary_provider(root_context)
     return _distribute_packages(root_context, target_p, n_ranks, tags)
