@@ -156,24 +156,6 @@ class BoundaryMap:
         """
         return self.parameters.get(boundary_name, {})
 
-    def update_parameters(self, boundary_name: str, **kwargs) -> None:
-        """更新边界参数
-
-        Args:
-            boundary_name: 边界名称
-            **kwargs: 要更新的参数键值对
-
-        抛出异常:
-            KeyError: 边界名称不存在
-        """
-        if boundary_name not in self.groups:
-            raise KeyError(f"Boundary '{boundary_name}' not found")
-
-        if boundary_name not in self.parameters:
-            self.parameters[boundary_name] = {}
-
-        self.parameters[boundary_name].update(kwargs)
-
     @property
     def boundary_names(self) -> List[str]:
         """获取所有边界名称"""
@@ -183,17 +165,6 @@ class BoundaryMap:
     def boundary_count(self) -> int:
         """获取边界数量"""
         return len(self.groups)
-
-    def has_boundary(self, boundary_name: str) -> bool:
-        """检查边界是否存在
-
-        Args:
-            boundary_name: 边界名称
-
-        Returns:
-            bool: 是否存在
-        """
-        return boundary_name in self.groups
 
     # `get_node_indices` 已于 2026-09-15 删除。它是 `get_cell_indices` 的
     # 错名"兼容旧接口"别名——返回的恒是**单元**索引（见本类 `groups`

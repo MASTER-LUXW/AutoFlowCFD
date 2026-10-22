@@ -19,11 +19,6 @@ class _GPUDistributedCheckpointMixin:
     partition: Any
     state: Any
 
-    def get_state_cpu(self):
-        """下载 GPU 状态到 CPU。"""
-        cp = get_cupy()
-        return {'U': cp.asnumpy(self.U_gpu)}
-
     def save_checkpoint_distributed(
         self, output_dir: str, iteration: int, input_file: str,
         order: int, turbulence_model: str,

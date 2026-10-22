@@ -72,7 +72,3 @@ class DistributedFRState:
     def get_local_U(self) -> np.ndarray:
         """返回 local cells 的守恒变量。"""
         return self.U[:self.n_local_cells].copy()
-
-    def get_local_Q(self) -> np.ndarray:
-        """返回 local cells 的原变量。"""
-        return self.Q[:self.n_local_cells].copy()

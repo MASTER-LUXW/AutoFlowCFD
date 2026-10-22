@@ -95,12 +95,3 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         self.a1 = 0.31
         self.kappa = 0.41  # Von Karman 常数
         self.beta_star = BETA_STAR
-
-    def get_turbulent_viscosity(self) -> np.ndarray:
-        """
-        获取当前的湍流涡粘系数。
-
-        Returns:
-            nu_t: 涡粘系数场
-        """
-        return self.nu_t.copy()

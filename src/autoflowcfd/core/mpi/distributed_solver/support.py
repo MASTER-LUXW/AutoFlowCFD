@@ -9,7 +9,6 @@
 from typing import Any, Optional
 
 import numpy as np
-from autoflowcfd.core.mpi.comm import allreduce_sum
 
 
 class _DistributedSupportMixin:
@@ -109,32 +108,3 @@ class _DistributedSupportMixin:
             redistribute_fully_distributed_for_new_order(self, target_p)
         else:
             cpu_traditional_interpolate_to_new_order(self, target_p)
-
-    def exchange_halo(self, U_local: np.ndarray) -> np.ndarray:
-        """执行 halo 交换。
-
-        Args:
-            U_local: (n_local_cells, n_sps, n_vars) local cell 数据
-
-        Returns:
-            U_extended: (n_total_cells, n_sps, n_vars) 含 halo 的扩展数据
-        """
-        return self.halo_exchange.exchange(U_local)
-
-    def get_load_balance_report(self) -> str:
-        """生成分区负载平衡报告。"""
-        n_local = self.partition.n_local_cells
-        n_halo = self.partition.n_halo
-        n_total_global = self.partition.n_global_cells
-        ideal = n_total_global / self.n_ranks
-        imbalance = abs(n_local - ideal) / ideal * 100
-
-        total_local = allreduce_sum(n_local)
-        total_halo = allreduce_sum(n_halo)
-
-        return (
-            f"Load balance: rank {self.rank} has {n_local} cells "
-            f"(ideal {ideal:.0f}, imbalance {imbalance:.1f}%), "
-            f"{n_halo} halo cells. "
-            f"Global total: {total_local} cells, {total_halo} halo."
-        )
