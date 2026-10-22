@@ -121,7 +121,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 显式拒绝，不会像此前那样静默退化成层流。
 
         Raises:
-            NotImplementedError: turb_model_name 是本方法支持集合之外的值
+            ValueError: turb_model_name 是本方法支持集合之外的值（`registry.require_supported`）
 
         GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
         NONE/SST/SA/DDES/IDDES/WMLES/LES 均已实现（SST 为 core/gpu/turbulence/gpu_turbulence_sst.py；

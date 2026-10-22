@@ -15,7 +15,8 @@ from autoflowcfd.core.mpi.distributed_flat_face import (
     build_distributed_flat_face,
 )
 from autoflowcfd.core.mpi.comm import barrier
-from .assembly import DistributedRunSettings, _DistributedAssemblyMixin, canonical_turbulence_model
+from autoflowcfd.core.turbulence.registry import require_supported
+from .assembly import DistributedRunSettings, _DistributedAssemblyMixin
 from .from_package import _DistributedFromPackageMixin
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 from .step import _DistributedStepMixin
@@ -77,7 +78,7 @@ def _settings_from_solver_kwargs(solver_kwargs: dict) -> DistributedRunSettings:
              'artificial_viscosity_alpha', 'wall_treatment', 'dual_time_inner_iter', 'time_accurate', 'adaptive_cfl',
              'cfl_start', 'cfl_max', 'cfl_min', 'low_mach_precond')
     return DistributedRunSettings(
-        turb_model_name=canonical_turbulence_model(solver_kwargs['turb_model_name']), freestream=freestream,
+        turb_model_name=require_supported(solver_kwargs['turb_model_name']), freestream=freestream,
         mu_molecular=solver_kwargs['mu_molecular'], time_scheme=solver_kwargs['time_scheme'],
         **{name: _kwarg(solver_kwargs, name) for name in names})
 
@@ -125,7 +126,7 @@ class DistributedFRSolver(_DistributedAssemblyMixin, _DistributedFromPackageMixi
             **solver_kwargs: 与单机 FRSolver 同名的构造参数
 
         Raises:
-            NotImplementedError: 湍流模型名无法识别（支持的模型见 `core/turbulence/registry.py`，
+            ValueError: 湍流模型名无法识别（支持的模型见 `core/turbulence/registry.py`，
                 与单机相同）
         """
         _check_solver_kwargs(solver_kwargs)

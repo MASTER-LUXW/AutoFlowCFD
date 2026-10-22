@@ -50,7 +50,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     is_root_rank = get_rank() == 0
     root_context = getattr(solver, '_root_context', None) if is_root_rank else None
     if is_root_rank and root_context is None:
-        raise NotImplementedError(
+        raise RuntimeError(
             "redistribute_multi_gpu_fully_distributed_for_new_order: root rank 没有 "
             "_root_context（本实例不是通过 distributed_mesh_load_v2 返回的 "
             "root_context 构造的）——Order Continuation 在'完全分布式加载' "

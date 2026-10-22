@@ -113,7 +113,7 @@ class TestFullyDistributedOrderContinuation:
         solver = DistributedFRSolver.from_fully_distributed_package(
             package, n_ranks=1, root_context=None,
         )
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="_root_context"):
             solver.solve(max_iter=5, dt=1e-9)
 
     def test_sst_order_continuation_keeps_turb_fields_consistent(self):

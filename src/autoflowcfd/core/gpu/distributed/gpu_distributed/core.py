@@ -23,7 +23,7 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器（主类与装配顺序）
 from typing import Optional
 
 from autoflowcfd.core.gpu.distributed.gpu_distributed_init import _GPUDistributedInitMixin
-from autoflowcfd.core.mpi.distributed_solver.assembly import DistributedRunSettings, canonical_turbulence_model
+from autoflowcfd.core.mpi.distributed_solver.assembly import DistributedRunSettings
 
 from .residual import _MultiGPUResidualMixin
 from .setup import _MultiGPUSetupMixin
@@ -33,6 +33,7 @@ from .timestep import _MultiGPUTimeStepMixin
 from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
+from autoflowcfd.core.turbulence.registry import require_supported
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 
 
@@ -114,7 +115,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
         settings = DistributedRunSettings(
-            turb_model_name=canonical_turbulence_model(turb_model_name),
+            turb_model_name=require_supported(turb_model_name),
             freestream={"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
                         "mach_ref": resolve_mach_ref(rho_inf, vel_inf, p_inf),
                         "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)},

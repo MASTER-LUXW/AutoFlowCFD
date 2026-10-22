@@ -450,7 +450,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             redistribute_multi_gpu_fully_distributed_for_new_order,
         )
         solver = types.SimpleNamespace(current_order=0, rank=0, _root_context=None)
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="_root_context"):
             redistribute_multi_gpu_fully_distributed_for_new_order(solver, 1)
 
 

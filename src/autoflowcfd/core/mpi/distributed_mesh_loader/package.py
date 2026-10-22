@@ -175,16 +175,12 @@ def build_fully_distributed_rank_package(
         'iddes_h_wn_compact', 'time_scheme', 'dual_time_inner_iter'}，
         全部可安全 pickle。
     """
-    # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/
-    # 未知的 turb_model_name，而不是静默产出一个 `wall_distance_
-    # compact=None`、但 `'turb_model_name'` 仍标记为该值的包（会被原样
-    # pickle 发给非 root rank，物理不完整地跑出结果而不报错）。在 root
-    # 侧构造期就拒绝，比等 MPI 分发之后再报错更早、更便宜。
+    # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/未知的 turb_model_name（ValueError），而不是
+    # 静默产出一个 `wall_distance_compact=None`、但 `'turb_model_name'` 仍标记为该值的包（会被原样 pickle 发给非
+    # root rank，物理不完整地跑出结果而不报错）。在 root 侧构造期就拒绝，比等 MPI 分发之后再报错更早、更便宜。
+    # 大小写与单机一致按规范化处理（2026-10-22 I-213 以前小写的合法名在这里被当成"无法识别"拒绝）。
     from autoflowcfd.core.turbulence.registry import has_transport_equations, require_supported
-    if turb_model_name != require_supported(turb_model_name):
-        raise NotImplementedError(
-            f"build_fully_distributed_rank_package: 无法识别的 turb_model_name '{turb_model_name}'"
-            f"（应为规范化的大写模型名）。")
+    turb_model_name = require_supported(turb_model_name)
 
     from autoflowcfd.core.mpi.partition import build_distributed_partition
     from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face

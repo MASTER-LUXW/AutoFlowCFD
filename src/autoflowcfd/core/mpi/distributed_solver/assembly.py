@@ -17,6 +17,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.time_integration.base import TimeIntegrator, require_distributed_scheme
 from autoflowcfd.core.time_integration.implicit.newton.physical_time import reset_dual_time_history
+from autoflowcfd.core.turbulence.registry import require_supported
 from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
 
 
@@ -41,16 +42,6 @@ class DistributedRunSettings(NamedTuple):
     low_mach_precond: bool
 
 
-def canonical_turbulence_model(name) -> str:
-    """规范化的大写湍流模型名；不是规范名（拼写错误、未知模型）时报错，而不是静默按层流运行。"""
-    from autoflowcfd.core.turbulence.registry import require_supported
-
-    upper = str(name).upper() if name is not None else "NONE"
-    if upper != require_supported(name):
-        raise NotImplementedError(f"分布式求解器收到无法识别的湍流模型 {name!r}（应为规范化的大写模型名）")
-    return upper
-
-
 def settings_from_package(package: dict) -> DistributedRunSettings:
     """完全分布式加载的运行设置：取自 root 打包的紧凑包（`distributed_mesh_loader/package.py`，键恒有；CPU 与多 GPU
     共用）。"""
@@ -59,7 +50,7 @@ def settings_from_package(package: dict) -> DistributedRunSettings:
              'dual_time_inner_iter', 'time_accurate', 'adaptive_cfl', 'cfl_start', 'cfl_max', 'cfl_min',
              'low_mach_precond')
     return DistributedRunSettings(
-        turb_model_name=canonical_turbulence_model(package['turb_model_name']),
+        turb_model_name=require_supported(package['turb_model_name']),
         freestream={**package['freestream'], "mach_ref": package['mach_ref']},
         **{name: package[name] for name in names})
 
