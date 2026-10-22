@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import autoflowcfd.cli.solve.mesh_loader  # noqa: F401  补丁 _GATE 之前导入（见 test_cfl_defaults_consistency::_factory_kwargs）
 from autoflowcfd import AutoFlowCFDAPI, create_api, get_version
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, TurbulenceModel
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as S

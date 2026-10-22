@@ -120,6 +120,10 @@ def _factory_kwargs(fn_name, config):
     from unittest.mock import MagicMock, patch
 
     from autoflowcfd.api import AutoFlowCFDAPI
+    # 先导入：`mesh_loader` 在模块导入时按名字绑定 `solve_gate.high_order_mesh_for_solver`。若它在下面的补丁生效期间
+    # 才第一次被导入（替身目标 `...mesh_loader.save_volume_mesh_cache` 就会触发），绑定到的是 MagicMock，补丁撤掉
+    # 后仍留在模块里，之后同一进程里所有走 `mesh_loader` 的测试（如 `utils benchmark`）拿到的网格都是替身
+    import autoflowcfd.cli.solve.mesh_loader  # noqa: F401
 
     solver = MagicMock()
     solver.solve.return_value = MagicMock(iterations=1)
