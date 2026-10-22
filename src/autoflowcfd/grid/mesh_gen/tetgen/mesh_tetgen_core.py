@@ -24,7 +24,7 @@ from .mesh_tetgen_seam import (
     compute_local_thickness_limit,
 )
 from .mesh_tetgen_postprocess import (
-    _dedupe_coincident_points,
+    dedupe_coincident_points,
     fill_without_oversized_tetrahedra,
     repair_nonmanifold_cells,
 )
@@ -287,7 +287,7 @@ def fill_core_volume(
             "(likely near-duplicate/degenerate input facets); "
             "falling back to coincident-point stitching"
         )
-        nodes, elems, _remap = _dedupe_coincident_points(nodes, elems)
+        nodes, elems, _remap = dedupe_coincident_points(nodes, elems)
 
     log(f"Core tetrahedralization complete: {len(nodes)} nodes, {len(elems)} tets")
 

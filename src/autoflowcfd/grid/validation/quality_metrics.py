@@ -200,10 +200,8 @@ def compute_tetrahedron_skewness_values(nodes: np.ndarray, cells: np.ndarray) ->
 def compute_prism_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
     """每个三棱柱的无符号体积，通过精确的 3-四面体分解
     T1=(v0,v1,v2,w2), T2=(v0,v1,w1,w2), T3=(v0,w0,w1,w2)——
-    与 mesh_prism_to_tet.convert_layers_to_tetrahedra 使用的
-    对角线一致拆分相同，因此此处棱柱的体积始终精确等于
-    旧的“拆分为 3 个四面体”表示的体积之和，无论棱柱是否为
-    “正”棱柱（平面四边形侧面，无扭转）。
+    在 convert_layers_to_prisms 的排序棱柱（v0<v1<v2<w0<w1<w2）上与 mesh_gen/utils/prism_split.py 的
+    对角线一致拆分相同，因此这类棱柱的体积始终精确等于其 3 个子四面体的体积之和，无论侧面是否平面。
 
     每个子四面体的贡献取 |有符号体积|：上述 (v0,v1,v2,w2) 风格
     的顶点元组并未单独定向以得到一致符号的结果

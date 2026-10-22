@@ -136,12 +136,12 @@ def _stop_with_partial_mesh(
     """
     from ...schema import NodeArray, PrismCells, TetrahedralCells, GridMetadata, VolumeMeshData
 
-    from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
+    from ..tetgen.mesh_tetgen_core import dedupe_coincident_points
 
     logger.success(f"Stopping after the {label} stage")
     # 与完整管线（generate_hybrid_mesh 的重合点合并）同样先合并几何重合点：BL 挤出停长的柱子上下层节点
     # 坐标相同、编号不同，不合并时它们张成的侧面三角形面积恰为零（cube_demo --bl-only 实测 5025 个）
-    nodes, tet_cells, remap = _dedupe_coincident_points(nodes, tet_cells)
+    nodes, tet_cells, remap = dedupe_coincident_points(nodes, tet_cells)
     prism_cells = remap[prism_cells]
     nodes_obj = NodeArray.from_array(nodes)
 

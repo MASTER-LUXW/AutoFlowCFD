@@ -201,7 +201,7 @@ class PrismCells:
     mesh_extrusion.py / mesh_prism_to_tet.py 中已有的逐层节点对应关系一致）。
     (v0,v1,v2) 和 (w0,w1,w2) 内的列顺序无需按节点索引预排序——
     面提取（face_extractor.extract_faces_mixed）会自行推导规范排序，
-    与 mesh_prism_to_tet.convert_layers_to_tetrahedra 的方式相同，
+    与 mesh_gen/utils/prism_split.py 的拆分规则相同（对角线只依赖侧面四边形自己的全局编号），
     因此共享边面的两个棱柱无论存储顺序如何，都能在其对角线上保持一致。
 
     作为 TetrahedralCells 的兄弟类（而非合并到一个填充数组中），

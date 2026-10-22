@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     from ...schema import BoundaryMap, VolumeMeshData
 
 from ..tetgen.mesh_prism_to_tet import orient_tetrahedra
-from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
+from ..tetgen.mesh_tetgen_core import dedupe_coincident_points
+from ..tetgen.mesh_tetgen_postprocess import drop_degenerate_tets
 from .mesh_background_merge import _build_merged_mesh
 from .mesh_background_merge_utils import PartialMeshReady
 from .mesh_background_repair import repair_nonmanifold_tets_with_escalation
@@ -93,17 +94,7 @@ def generate_hybrid_mesh(
 
         logger.info("Step 4/4: Re-orienting and computing tetrahedral volumes...")
         merged_cells = orient_tetrahedra(merged_nodes, merged_cells.astype(np.int64))
-        _nodes_obj_tmp = NodeArray.from_array(merged_nodes)
-        volumes = TetrahedralCells.compute_volumes(_nodes_obj_tmp, merged_cells.astype(np.int32))
-
-        # 丢弃退化单元
-        degenerate_threshold = (min_cell_size ** 3) * 1e-6
-        valid_mask = volumes > degenerate_threshold
-        n_invalid = np.sum(~valid_mask)
-        if n_invalid > 0:
-            logger.warning(f"Found {n_invalid} degenerate cells, removing them...")
-            merged_cells = merged_cells[valid_mask]
-            volumes = volumes[valid_mask]
+        merged_cells, volumes = drop_degenerate_tets(merged_nodes, merged_cells, min_cell_size, "Merged mesh")
 
         # 修复非流形面（参见 repair_nonmanifold_tets_with_escalation 自身
         # 文档字符串了解局部重铺/升级/兜底删除的原理）。
@@ -116,19 +107,11 @@ def generate_hybrid_mesh(
 
         # 合并重合点（seam 合并）
         n_nodes_before_seam_merge = len(merged_nodes)
-        merged_nodes, merged_cells, _seam_remap = _dedupe_coincident_points(merged_nodes, merged_cells)
+        merged_nodes, merged_cells, _seam_remap = dedupe_coincident_points(merged_nodes, merged_cells)
         if len(merged_nodes) != n_nodes_before_seam_merge:
             merged_cells = merged_cells.astype(np.int32)
             prism_cells = _seam_remap[prism_cells]
-            _tmp_nodes_obj_seam = NodeArray.from_array(merged_nodes)
-            post_merge_volumes_seam = TetrahedralCells.compute_volumes(_tmp_nodes_obj_seam, merged_cells)
-            degenerate_threshold_seam = (min_cell_size ** 3) * 1e-6
-            valid_mask_seam = post_merge_volumes_seam > degenerate_threshold_seam
-            if int(np.sum(~valid_mask_seam)) > 0:
-                logger.warning(f"Seam merge left {int(np.sum(~valid_mask_seam))} newly-degenerate cells, "
-                               "removing them...")
-                merged_cells = merged_cells[valid_mask_seam]
-                volumes = volumes[valid_mask_seam]
+            merged_cells, volumes = drop_degenerate_tets(merged_nodes, merged_cells, min_cell_size, "Seam merge")
             merged_nodes, merged_cells, _nm_changed_seam = (
                 repair_nonmanifold_tets_with_escalation(
                     merged_nodes, merged_cells,
@@ -174,20 +157,13 @@ def generate_hybrid_mesh(
 
         # 最终防御遍：合并重合点并修复非流形
         n_nodes_before_merge = len(merged_nodes)
-        merged_nodes, merged_cells, _remap = _dedupe_coincident_points(merged_nodes, merged_cells)
+        merged_nodes, merged_cells, _remap = dedupe_coincident_points(merged_nodes, merged_cells)
         if len(merged_nodes) != n_nodes_before_merge:
             mesh_changed_by_repair = True
             merged_cells = merged_cells.astype(np.int32)
             prism_cells = _remap[prism_cells]
 
-            # 合并后检查新的退化
-            _tmp_nodes_obj = NodeArray.from_array(merged_nodes)
-            post_merge_volumes = TetrahedralCells.compute_volumes(_tmp_nodes_obj, merged_cells)
-            degenerate_threshold = (min_cell_size ** 3) * 1e-6
-            valid_mask = post_merge_volumes > degenerate_threshold
-            if int(np.sum(~valid_mask)) > 0:
-                logger.warning(f"Final merge left {int(np.sum(~valid_mask))} newly-degenerate cells, removing them...")
-                merged_cells = merged_cells[valid_mask]
+            merged_cells, _ = drop_degenerate_tets(merged_nodes, merged_cells, min_cell_size, "Final merge")
 
         # 构建最终对象
         nodes_obj = NodeArray.from_array(merged_nodes)

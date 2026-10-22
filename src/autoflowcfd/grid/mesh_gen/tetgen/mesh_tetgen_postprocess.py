@@ -12,8 +12,29 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from loguru import logger
 
+#: 退化四面体 / 棱柱的体积阈值：`(min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION`。按目标单元尺寸缩放（不是固定的
+#: 浮点噪声量），使整体停滞到接近零但不精确为零的坍缩单元也被识别；又比真实的楔形棱柱（一条竖直边近零、另两条
+#: 正常）体积小很多个数量级，后者不会被误删（删掉会在外边界上撕出洞）。
+DEGENERATE_VOLUME_FRACTION = 1e-6
 
-def _dedupe_coincident_points(
+
+def drop_degenerate_tets(nodes: np.ndarray, cells: np.ndarray, min_cell_size: float,
+                         context: str) -> Tuple[np.ndarray, np.ndarray]:
+    """删除体积不超过 `(min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION` 的四面体，返回 `(保留的单元, 其体积)`。
+
+    体网格装配里每次可能产生近零体积单元的步骤（定向后、重合点合并后）之后都调用它；`context` 只用于日志。
+    """
+    from ...schema import NodeArray, TetrahedralCells
+
+    volumes = TetrahedralCells.compute_volumes(NodeArray.from_array(nodes), cells.astype(np.int32))
+    keep = volumes > (min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION
+    n_drop = int(np.count_nonzero(~keep))
+    if n_drop:
+        logger.warning(f"{context}: removing {n_drop} degenerate tetrahedra")
+    return cells[keep], volumes[keep]
+
+
+def dedupe_coincident_points(
     points: np.ndarray,
     faces: np.ndarray,
     tolerance: float = 1e-9,
@@ -49,17 +70,13 @@ def _dedupe_coincident_points(
     """
     from scipy.spatial import cKDTree
 
-    tree = cKDTree(points)
-    pairs = tree.query_pairs(tolerance)
+    pairs = cKDTree(points).query_pairs(tolerance, output_type="ndarray")      # (n_pairs, 2)
 
     n_points = len(points)
-    if not pairs:
+    if len(pairs) == 0:
         return points, faces, np.arange(n_points, dtype=np.int64)
 
-    rows = [p[0] for p in pairs]
-    cols = [p[1] for p in pairs]
-    # 确保数据数组为整数类型以避免 connected_components 产生浮点数标签
-    graph = coo_matrix((np.ones(len(rows), dtype=np.int32), (rows, cols)), shape=(n_points, n_points))
+    graph = coo_matrix((np.ones(len(pairs), dtype=np.int32), (pairs[:, 0], pairs[:, 1])), shape=(n_points, n_points))
     n_components, labels = connected_components(graph, directed=False)
 
     # 确保 labels 为整数类型以用于索引

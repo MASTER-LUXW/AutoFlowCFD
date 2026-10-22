@@ -53,8 +53,7 @@ def extrude_layers(
 
     Args:
         surface_nodes: 基础表面节点，形状=(n_nodes, 3)
-        surface_faces: 用于层拓扑的表面连接（convert_layers_to_prisms/
-            convert_layers_to_tetrahedra 从什么构建单元）——形状=(n_faces, 3)。
+        surface_faces: 用于层拓扑的表面连接（convert_layers_to_prisms 从什么构建单元）——形状=(n_faces, 3)。
             当 mesh_corner_split.split_sharp_corners 在上游运行时，这是它的
             `topology_faces`（真实三角形 + 斜角/帽三角形）。
         normals: 面法向，形状=(len(normal_faces), 3)——注意：大小为

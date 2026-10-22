@@ -1,137 +1,12 @@
-"""把分层棱柱网格（来自 mesh_extrusion.extrude_layers）转换成保形的四面体网格。
+"""分层挤出（`mesh_extrusion.extrude_layers`）-> 边界层三棱柱单元（`convert_layers_to_prisms`），以及四面体统一
+定向（`orient_tetrahedra`）。"""
 
-从 mesh_extrusion.py 拆出（该文件保留分层生成循环
-extrude_layers/extrude_single_layer），纯粹为了让两个文件都控制在 450
-行以内；两个模块彼此没有依赖关系。
-"""
+from typing import List
 
 import numpy as np
-from typing import List, Optional, Tuple
 from loguru import logger
 
-# 与 mesh_background.py 自身退化四面体清理使用的相同的"相对于单元大小"
-# 约定（`(min_cell_size ** 3) * 1e-6`）——在此复用，以便一个完全坍缩的
-# 棱柱（整个底面的 taper_scale/budget 停滞到接近 0，而不仅是浮点精确的 0）
-# 也被识别为退化，而不仅是旧的固定 1e-20 阈值捕获的精确零情况。故意仍然
-# 比真正的楔形棱柱体积小很多个数量级（一条垂直边接近零，另外两条正常）——
-# 见 convert_layers_to_prisms 的 Returns 文档了解为何这个区分很重要
-# （楔形是真实几何，丢弃它会撕出洞；完全坍缩的棱柱不贡献任何东西）。
-DEGENERATE_VOLUME_FRACTION = 1e-6
-
-
-def convert_layers_to_tetrahedra(
-    all_nodes: np.ndarray,
-    layer_connectivity: List[np.ndarray],
-    base_faces: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """将分层棱柱网格转换为保形的四面体网格。
-
-    每两个相邻层之间的三角棱柱被分割为 3 个四面体。分割方式
-    使得相邻棱柱在每个共享四边形面的对角线上保持一致，这正是
-    结果网格保形（每个内部面恰好被两个单元共享）的原因。盲目
-    应用的固定模板不具备这个性质，会产生悬挂面，有限体积求解器
-    会将它们误认为边界面。
-
-    规则见 `mesh_gen/utils/prism_split.py`（侧面四边形沿过其最小全局编号顶点的对角线拆分，只依赖
-    四边形自己的四个编号，共享侧面的两个棱柱必然选同一条对角线）。每层输出按块排列：先是该层每个
-    棱柱的第一个子四面体，依此类推。
-
-    四面体还被定向为正 signed 体积，然后任何 signed 体积解析为零
-    （不仅是小——见下方"丢弃的四面体"）的四面体从输出中完全移除。
-
-    Args:
-        all_nodes: 所有层的节点，shape=(total_nodes, 3)
-        layer_connectivity: 每个挤出步一个条目（n_layers 个节点层
-            对应 n_layers - 1 个条目），与本项目其他地方从
-            extrude_layers 生成的连接关系列表推导节点层数的约定
-            一致（见 mesh_background_merge._build_merged_mesh 自身的
-            `n_layers = len(bl_layer_conn) + 1` 及其文档字符串了解
-            原因——extrude_layers.all_layer_nodes 从 layer-0 块开始
-            然后每步追加一个块，所以节点数组总是比步数多一层）。
-            只使用此列表的长度（其实际的每层面索引内容从不被
-            读取——每层共享 base_faces 自身的局部面拓扑，只是按
-            nodes_per_layer 偏移）。
-        base_faces: 原始表面面，shape=(n_faces, 3)
-
-    Returns:
-        (tetrahedra, face_of_tet)：四面体连接关系，shape=(n_tets, 4)
-        ——n_tets 可能少于 n_base_faces*(n_layers-1)*3（见下方"丢弃
-        的四面体"）；face_of_tet，shape=(n_tets,)，将每个幸存的
-        四面体映射回其 base_faces 行索引。之前假设固定平铺
-        （n_tets_per_face = n_tets // n_base_faces，单元 i ->
-        base_faces[i % n_base_faces]）的调用方现在必须改用
-        face_of_tet，因为单元可能被丢弃。
-
-        丢弃的四面体：精确（到浮点噪声，|det| < 1e-20）零体积——
-        例如一个棱柱因 seam taper_scale 为 0 而完全坍缩
-        （mesh_extrusion.extrude_layers 的 taper_scale），将节点在
-        每层固定在其原始位置，所以两个相同层位置之间的棱柱厚度
-        为零。这样的四面体的唯一非退化面总是仅与该棱柱自身的
-        其他 2 个四面体内部共享（T1 的真实面就是 T2 自身的某个
-        面——棱柱自身的内部分裂对角线），从不与外部邻居共享，
-        所以丢弃它不丢失真实几何，也不会孤立另一个棱柱仍期望
-        匹配的面（经验验证：合并网格自身的保形检查——每个内部
-        面恰好被 2 个单元共享——在丢弃后仍然通过）。
-    """
-    # +1：layer_connectivity 每个挤出步一个条目，不是每个节点层——
-    # 见本函数自身的 `layer_connectivity` 文档。在此直接使用
-    # len(layer_connectivity)（本函数在此修复前的做法）会恰好少数
-    # 一层，进而使 nodes_per_layer = n_total_nodes // n_layers 计算出
-    # 比实际每层节点数更大的值——下面的每个 off_lo/off_hi 都会落在
-    # 错误的绝对节点索引上，静默将一个层的顶点连接到几层之外
-    # 同局部索引的顶点（已直接确认：在真实案例上产生了顶点来自
-    # 近壁过渡区域和域自身的入口/出口/远场壁的四面体——一个跨域
-    # 全长约 14 m^3 的四面体，而且这不是罕见的异常值：该案例上
-    # 约一半的过渡阶段四面体超过了合理的体积上限）。下面的棱柱
-    # 对应函数（convert_layers_to_prisms）有相同的修复；其在
-    # mesh_background_merge.py 中的调用方用一个临时切片时 +1 来
-    # 补偿，掩盖了那里的同一个 bug，但本函数的调用方没有类似的
-    # 补偿。
-    n_layers = len(layer_connectivity) + 1
-    n_base_faces = len(base_faces)
-
-    if n_layers < 2:
-        raise ValueError("Need at least 2 layers to create volume")
-
-    n_total_nodes = len(all_nodes)
-    nodes_per_layer = n_total_nodes // n_layers
-
-    logger.info(f"Converting {n_layers-1} layer pairs to conformal tetrahedra...")
-
-    from ..utils.prism_split import split_prisms_to_tets
-
-    base = np.asarray(base_faces, dtype=np.int64)
-    tetrahedra = np.concatenate([
-        split_prisms_to_tets(np.hstack([base + layer_idx * nodes_per_layer, base + (layer_idx + 1) * nodes_per_layer]))
-        for layer_idx in range(n_layers - 1)
-    ], axis=0)
-    face_of_tet = np.tile(np.arange(n_base_faces, dtype=np.int64), 3 * (n_layers - 1))
-
-    # 统一为正有向体积（倒置的交换两个顶点），下游可以依赖朝向，不必取 |det|。
-    tetrahedra = orient_tetrahedra(all_nodes, tetrahedra)
-
-    # 丢弃退化/近退化的连接伪四面体（见上方"丢弃的四面体"）；在定向之后重算即可——orient_tetrahedra
-    # 只翻转符号、不改变大小。
-    p0 = all_nodes[tetrahedra[:, 0]]
-    p1 = all_nodes[tetrahedra[:, 1]]
-    p2 = all_nodes[tetrahedra[:, 2]]
-    p3 = all_nodes[tetrahedra[:, 3]]
-    e1, e2, e3 = p1 - p0, p2 - p0, p3 - p0
-    det = np.einsum('ij,ij->i', e1, np.cross(e2, e3))
-    drop = np.abs(det) < 1e-20
-
-    n_dropped = int(np.count_nonzero(drop))
-    if n_dropped:
-        logger.info(
-            f"Dropped {n_dropped} exactly-zero-volume tetrahedra "
-            f"(see this function's own docstring)"
-        )
-        keep = ~drop
-        tetrahedra = tetrahedra[keep]
-        face_of_tet = face_of_tet[keep]
-
-    logger.info(f"Total tetrahedra generated: {len(tetrahedra)}")
-    return tetrahedra, face_of_tet
+from .mesh_tetgen_postprocess import DEGENERATE_VOLUME_FRACTION
 
 
 def orient_tetrahedra(nodes: np.ndarray, tets: np.ndarray) -> np.ndarray:
@@ -177,36 +52,22 @@ def convert_layers_to_prisms(
     all_nodes: np.ndarray,
     layer_connectivity: List[np.ndarray],
     base_faces: np.ndarray,
-    min_cell_size: Optional[float] = None,
+    min_cell_size: float,
 ) -> np.ndarray:
-    """将分层棱柱网格转换为真正的三角棱柱单元——
-    convert_layers_to_tetrahedra 的真棱柱对应版本，保留在同一模块
-   是因为两者共享完全相同的每层节点对应关系记录（只有最终发出的
-    单元形状不同）。
+    """将分层挤出转换为三角棱柱单元。
 
-    每个（层，底面）对发出一个棱柱，使用与旧的四面体路径相同的
-    排序顶点约定（按全局节点索引 v0<v1<v2，w_i 为上一层对应的
-    顶点）来保证对角线一致性——见 PrismCells 和
-    face_extractor.extract_faces_mixed 的文档字符串了解为何这使得
-    一个棱柱的 8 个边界与 convert_layers_to_tetrahedra 的 3-四面体
-    分割在相同 slab 中产生的结果位级相同，因此自动与相邻的棱柱
-    （或在 BL/core 界面处，相邻的 core 四面体）保形，而本函数
-    不需要任何跨单元协调，只需每个棱柱独立应用的相同全局索引排序。
+    每个（层，底面）对发出一个棱柱，顶点按全局节点索引排序（v0<v1<v2，w_i 为上一层对应顶点）。侧面四边形的拆分
+    只依赖它自己的四个全局编号（`mesh_gen/utils/prism_split.py`），相邻棱柱、BL / 核心界面处相邻的四面体因此
+    自动协调，不需要跨单元协调。
 
     Args:
         all_nodes: 所有层的节点，shape=(total_nodes, 3)
-        layer_connectivity: 每个挤出步一个条目，不是每个节点层——
-            见 convert_layers_to_tetrahedra 自身的 `layer_connectivity`
-            文档了解完整解释（本函数有相同的差一 bug，直到应用了
-            相同的修复）。只使用其长度——每层共享 base_faces 自身
+        layer_connectivity: 每个挤出**步**一个条目（n_layers 个节点层对应 n_layers - 1 个条目：
+            `extrude_layers` 的节点数组从 layer-0 块开始、每步追加一块）。只使用其长度——每层共享 base_faces
             的局部面拓扑，仅按 nodes_per_layer 偏移。
         base_faces: 原始表面面，shape=(n_faces, 3)
-        min_cell_size: 可选的目标单元尺寸（米），用于将退化体积
-            丢弃阈值缩放到 `(min_cell_size**3) * DEGENERATE_VOLUME_FRACTION`
-            而不是固定的 1e-20——见该常量自身的注释了解为何简单的
-            浮点噪声 epsilon 会漏掉一个完全坍缩（所有 3 条垂直边约 0，
-            整个底面停滞）但不到精确浮点零的棱柱。None（默认值）
-            保持旧的固定 1e-20 阈值，用于没有大小参考的调用方。
+        min_cell_size: 目标单元尺寸（米），退化体积丢弃阈值 `(min_cell_size**3) * DEGENERATE_VOLUME_FRACTION`
+            （为什么按尺寸缩放见该常量）。
 
     Returns:
         prisms：棱柱连接关系，shape=(n_prisms, 6)，格式 (v0,v1,v2,w0,w1,w2)
@@ -222,8 +83,8 @@ def convert_layers_to_prisms(
         坍缩的丢弃留下的坐标重复但索引不同的 seam 由调用方的
         重合点合并传递清理，与等效的四面体情况相同。
     """
-    # +1：见 convert_layers_to_tetrahedra 的相同修复/注释——
-    # layer_connectivity 每个挤出步一个条目，不是每个节点层。
+    # +1：layer_connectivity 每个挤出步一个条目，不是每个节点层（少数一层会让 nodes_per_layer 算大，把一层的
+    # 顶点连到几层之外，曾在真实案例上产生横跨全域约 14 m^3 的单元）。
     n_layers = len(layer_connectivity) + 1
     n_base_faces = len(base_faces)
 
@@ -258,10 +119,7 @@ def convert_layers_to_prisms(
     # Returns 文档。
     from ...validation.quality_metrics import compute_prism_volumes
     volumes = compute_prism_volumes(all_nodes, prisms)
-    degenerate_threshold = (
-        (min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION if min_cell_size is not None
-        else 1e-20
-    )
+    degenerate_threshold = (min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION
     drop = volumes < degenerate_threshold
 
     n_dropped = int(np.count_nonzero(drop))

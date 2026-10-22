@@ -2,7 +2,8 @@
 
 这些测试针对网格审计里发现的网格生成缺陷：
 
-* 棱柱 -> 四面体的拆分必须**协调**（每个内部面恰好被两个单元共享）。
+* 分层挤出 -> 棱柱（`convert_layers_to_prisms`）-> 四面体（`prism_split.split_prisms_to_tets`，降级与面提取共用的
+  拆分规则）必须**协调**（每个内部面恰好被两个单元共享）。
   盲目套用固定模板会产生悬挂面，有限体积的面提取器会把它们当成边界面，
   把内部区域静默地变成壁面。
 * 生成的四面体必须有**正的有符号体积**，这样翻转的单元才能被检出，
@@ -12,9 +13,8 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import (
-    convert_layers_to_tetrahedra, orient_tetrahedra,
-)
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import convert_layers_to_prisms, orient_tetrahedra
+from autoflowcfd.grid.mesh_gen.utils.prism_split import split_prisms_to_tets
 
 
 def _flat_patch(nx=3, ny=3, lx=1.0, ly=1.0):
@@ -47,6 +47,13 @@ def _stack_layers(base_nodes, n_layers=4, dz=0.1):
     return np.vstack(layers)
 
 
+def _slab_tets(all_nodes, layer_conn, base_faces, dz=0.1):
+    """生产路径：分层挤出 -> 棱柱 -> 3 个四面体 / 棱柱，统一定向（2026-10-22 I-147 以前测的是生产无调用的
+    `convert_layers_to_tetrahedra`，已删除）。"""
+    prisms = convert_layers_to_prisms(all_nodes, layer_conn, base_faces, min_cell_size=dz)
+    return orient_tetrahedra(all_nodes, split_prisms_to_tets(prisms))
+
+
 def _face_occurrence_counts(tets):
     """统计每个三角形面属于几个单元。"""
     templates = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
@@ -58,7 +65,7 @@ def _face_occurrence_counts(tets):
 
 class TestPrismSplitConformality:
     # 注意：下面的 layer_conn 总是 n_layers - 1 项（每个挤出**步**一项），
-    # 不是 n_layers 项（每层节点一项）——见 convert_layers_to_tetrahedra 的
+    # 不是 n_layers 项（每层节点一项）——见 convert_layers_to_prisms 的
     # layer_connectivity 文档。这里传 n_layers 项曾让内部的 nodes_per_layer 静默
     # 算错（差一），协调性/封闭面检查恰好注意不到，但下面的体积检查能发现。
     def test_every_face_shared_by_at_most_two_cells(self):
@@ -72,7 +79,7 @@ class TestPrismSplitConformality:
         all_nodes = _stack_layers(base_nodes, n_layers)
         layer_conn = [base_faces.copy() for _ in range(n_layers - 1)]
 
-        tets, _face_of_tet = convert_layers_to_tetrahedra(all_nodes, layer_conn, base_faces)
+        tets = _slab_tets(all_nodes, layer_conn, base_faces)
         counts = _face_occurrence_counts(tets)
 
         assert counts.max() <= 2, (
@@ -90,7 +97,7 @@ class TestPrismSplitConformality:
         n_layers = 4
         all_nodes = _stack_layers(base_nodes, n_layers)
         layer_conn = [base_faces.copy() for _ in range(n_layers - 1)]
-        tets, _face_of_tet = convert_layers_to_tetrahedra(all_nodes, layer_conn, base_faces)
+        tets = _slab_tets(all_nodes, layer_conn, base_faces)
 
         templates = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]],
                              dtype=np.int64)
@@ -126,7 +133,7 @@ class TestPrismSplitConformality:
         n_layers = 3
         all_nodes = _stack_layers(base_nodes, n_layers)
         layer_conn = [base_faces.copy() for _ in range(n_layers - 1)]
-        tets, _face_of_tet = convert_layers_to_tetrahedra(all_nodes, layer_conn, base_faces)
+        tets = _slab_tets(all_nodes, layer_conn, base_faces)
 
         p0, p1, p2, p3 = (all_nodes[tets[:, i]] for i in range(4))
         signed = np.einsum('ij,ij->i', p1 - p0,
@@ -142,7 +149,7 @@ class TestPrismSplitConformality:
         n_layers, dz = 4, 0.1
         all_nodes = _stack_layers(base_nodes, n_layers, dz)
         layer_conn = [base_faces.copy() for _ in range(n_layers - 1)]
-        tets, _face_of_tet = convert_layers_to_tetrahedra(all_nodes, layer_conn, base_faces)
+        tets = _slab_tets(all_nodes, layer_conn, base_faces)
 
         p0, p1, p2, p3 = (all_nodes[tets[:, i]] for i in range(4))
         vol = np.abs(np.einsum('ij,ij->i', p1 - p0,
