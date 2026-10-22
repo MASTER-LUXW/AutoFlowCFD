@@ -141,20 +141,9 @@ def _repair_mixed_mesh_post_stage_c(
                 f"attempting local cavity patch"
             )
             tet_keep_allones = np.ones(len(merged_cells), dtype=bool)
-            # 保持默认 n_buffer_rings=1。V2.0 专家组评审在追查 cube_demo
-            # 336.57 相邻体积比根因时，怀疑默认 1 圈缓冲把这里的空腔固定
-            # 边界卡得太紧，试过把它调大：n_buffer_rings=4 和 =2 都是
-            # 真实崩溃（不是"指标没改善"，是硬性 ValueError——"Face
-            # connectivity references N cells, expected N+2"），且两次
-            # 崩溃的具体数字完全相同，与两个独立、真实、已验证的中间
-            # 修复（本函数末尾新增的收尾去重；mesh_repair_cavity_shared.
-            # _cavity_boundary_faces 补上了此前遗漏的退化面过滤）叠加
-            # 后依然逐位复现同样的崩溃——说明这两个修复虽然本身是正确
-            # 的独立改进（保留），但都不是这次崩溃的根因。诊断已经做到
-            # 能在具体坐标层面复现异常模式的程度（见本文件 git 历史/
-            # 会话记录），但触发这次崩溃的确切机制本轮未能定位。在
-            # 找到真正根因之前，调大 n_buffer_rings 对这个调用点是已
-            # 验证的不安全操作，不要在未确认修复的情况下重新尝试。
+            # 保持默认 n_buffer_rings=1：在 cube_demo 上调大到 2 / 4 都触发 ValueError（"Face connectivity
+            # references N cells, expected N+2"，两者数字相同），收尾去重与 _cavity_boundary_faces 的退化面过滤
+            # 修好后依然逐位复现，机制尚未查明——查明之前调大缓冲圈数在这里是已验证不安全的。
             merged_nodes, prism_cells, merged_cells, _ = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
                 ar_keep, tet_keep_allones,

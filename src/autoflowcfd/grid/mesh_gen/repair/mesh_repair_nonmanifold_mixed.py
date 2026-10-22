@@ -24,12 +24,9 @@ from .mesh_repair_cavity_shared import (
 from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets
 from .mesh_repair_nonmanifold_mixed_weld import GlobalWeldState
 
-# _weld_near_coincident_boundary_points 的容差——空腔边界面自身中位边长
-# 的比例，不是固定长度（见该函数自己的文档字符串了解为什么必须用局部
-# 尺度）。V2.0 专项攻关记录（cube_demo BL 质量campaign 第十九轮）：这个
-# 函数是 BL 挤出前沿被撕裂（见 mesh_front_collision.py 模块文档字符串）
-# 后唯一实际"缝合"出退化 sliver 的地方——之前对重铺结果完全没有事后
-# 质量校验，也没有对输入边界点集本身的近重合焊接，两者都在本轮补上。
+# _weld_near_coincident_boundary_points 的容差——空腔边界面自身中位边长的比例，不是固定长度（为什么必须用局部
+# 尺度见该函数文档）。本模块是 BL 挤出前沿被撕裂（mesh_front_collision.py 模块文档）后唯一会把撕裂缝合成退化
+# sliver 的地方，因此重铺前先焊接近重合边界点、重铺后做事后质量门（cube_demo 相邻体积比 336.57 -> 33.20）。
 #
 # 0.10 是真实 cube_demo A/B 扫描出的安全上界，不是随意选的：
 # <=0.10（含本值）在整个真实生产管线上稳定安全——0.05 时焊接从未

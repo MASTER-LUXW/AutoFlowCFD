@@ -117,23 +117,10 @@ def extrude_layers(
     bl_layers = 8 if bl_layers is None else max(0, int(bl_layers))
     bl_growth_rate = growth_rate
 
-    # V2.0 专项攻关记录（cube_demo BL 质量campaign 第十六轮，"协同循环"
-    # 重设计）：之前用两个连续衰减启发式（_compute_sharp_angle_attenuation
-    # 按节点自身最尖锐二面角、_compute_edge_distance_field 按到最近尖锐边
-    # 距离）逐层压薄尖角附近的厚度——这是本次专项攻关最先诊断出的问题
-    # 表现（"很多亚毫米级薄棱柱堆在角点，而不是干净地少几层"），但两次
-    # 独立尝试直接修复它（顶点专属静态厚度上限、棱柱降级对角线重选择）
-    # 都没能改善相邻单元体积比这个主指标——根因排查确认：真正的问题不是
-    # "衰减不够精确"，是"用连续衰减压薄再反应式冻结"这个停止方式本身，
-    # 与 ANSA 文档描述的 Collapse 机制（精确回退到上一层已完成位置，不是
-    # 渐进逼近）不符，会在任意衰减比例的中间状态停住，产生大量退化程度
-    # 不一的薄棱柱。这两个连续衰减启发式已完全移除；替换为两个机制协同：
-    # ①compute_vertex_corner_thickness_limit 在挤出前静态算出真顶点节点
-    # 的目标厚度上限，直接并入 remaining_budget——每一层都按完整名义
-    # 厚度挤出（不再逐层打折），remaining_budget 的既有硬停止逻辑
-    # （mesh_layer_step.py 自身注释）在某个干净的层边界精确停止，不再有
-    # 中间的压薄状态；②clamp_budget_for_convergence（已保留，逻辑不变）
-    # 作为反应式兜底，处理这个静态估计漏掉的真实几何会聚。
+    # 尖角附近的厚度由两个机制决定、每层仍按完整名义厚度挤出（不逐层打折）：真顶点节点的静态厚度上限并入
+    # remaining_budget，由硬停止在干净的层边界停下；clamp_budget_for_convergence 作反应式兜底处理静态估计漏掉
+    # 的真实会聚。逐层连续衰减（按二面角 / 到尖锐边距离压薄）已删除：它让停止点落在压薄的中间状态，产生大量
+    # 薄棱柱（见 mesh_extrusion_vertex_limit.py 模块文档）。
     vertex_corner_limit = compute_vertex_corner_thickness_limit(surface_nodes, normal_faces)
 
     # 手动（结构化）挤出也在约 0.5 * max_cell_size 停止（ANSA 风格）

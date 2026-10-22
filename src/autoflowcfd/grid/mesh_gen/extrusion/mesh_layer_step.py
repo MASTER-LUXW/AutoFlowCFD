@@ -32,11 +32,8 @@ MITER_LIMIT = 1.2
 # convergence 的运行累积上限，或 freeze_self_colliding_nodes 的反应式
 # 冻结——见 extrude_layers）已经小于本层名义厚度请求的量时，本层及之后
 # 所有层此节点位移精确为 0，硬停止在当前（已完成的）层位置——不再有
-# 渐近摊薄的中间阶段（V2.0 专项攻关记录：cube_demo BL 质量campaign 第五轮，
-# 曾经在这里用 BUDGET_TAPER_FRACTION/MIN_TAPER_FRACTION_OF_NOMINAL 做
-# 渐近摊薄，换来的是一长串"消失地薄但非零"的层，是核心区 tetgen 填充在
-# BL/核心交界处生出极端 sliver 四面体的直接原因；改回硬停止后 cube_demo
-# 上相邻单元体积比从 1431.89 降到 421.11。参照 ANSA 官方文档描述的
+# 渐近摊薄的中间阶段（渐近摊薄会留下一长串"消失地薄但非零"的层，是核心区 tetgen 填充在 BL / 核心交界处生出
+# 极端 sliver 四面体的直接原因；硬停止使 cube_demo 相邻单元体积比从 1431.89 降到 421.11。参照 ANSA 官方文档描述的
 # Collapse 机制："从外层往内逐层减少层数，上层节点收缩回下层节点，棱柱
 # 退化为面"——即精确回退，不是渐进逼近）。产生的"完全坍缩"棱柱由
 # mesh_prism_to_tet.convert_layers_to_prisms 自身已有的

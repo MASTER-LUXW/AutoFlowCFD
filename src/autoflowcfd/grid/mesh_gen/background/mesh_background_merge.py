@@ -54,8 +54,7 @@ OVERSIZED_TET_FACTOR = 5.0
 # refine=True + elem_growth_ratio 立即 RuntimeError（"Failed to
 # tetrahedralize...may need to repair surface"），不是参数用法问题，是
 # 这版绑定缺失该机制依赖的接口。所以仍然只能靠这个单一 flat 上限本身
-# 间接控制过渡陡度：0.25 -> 0.20（cube_demo BL 质量campaign 第十一轮，
-# 直接应低回 0.2 曾评估过的取值，用于让过渡稍微变慢/变细）。
+# 间接控制过渡陡度：取 0.20（由 0.25 下调，让过渡稍慢、稍细）。
 CORE_FILL_VOLUME_CAP_FRACTION = 0.20
 
 
