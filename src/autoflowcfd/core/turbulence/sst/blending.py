@@ -33,9 +33,6 @@ class _SSTBlendingMixin:
 
             arg1 = min[ max( sqrt(k)/(beta* omega d), 500 nu/(d^2 omega) ), 4 rho sigma_w2 k/(CD_kw d^2) ]
 
-        历史缺陷（ProjectFiles/V2.0/6_整体专家组二次评审.md T-01 发现16）：第一项曾写成倒数且用
-        kappa 顶替 beta*，第三项（交叉扩散上界）缺失。
-
         Args:
             k, omega: 模型求值用的有效值（`bounds.model_evaluation_fields`）
             d: 壁距；nu: 运动粘度；rho: 密度
