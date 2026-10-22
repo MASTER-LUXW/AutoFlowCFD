@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 立方体参考坐标 `(a,b,c)` 下的几何原语（numba）。
 
-坐标变换（立方体 -> 单纯形，三角形面通量点采样用）、物理映射、参考面网格、以及原生棱柱面点在目标单元参考
+物理映射（立方体 -> 单纯形的坐标变换取 `grid/curved_mapping/curved_mapping.py` 的唯一一份）、参考面网格、以及原生棱柱面点在目标单元参考
 空间里的 Newton 定位（两条映射逐位恒等，见 `fr/native_prism/interp_numba.py` 模块文档）。被 `kernel.py`
 （主 kernel）、`kernel_multisource.py` 与 `native_geometry_nb.py` 共同依赖；面编码查找表在 `face_code_tables.py`。
 """
@@ -8,42 +8,9 @@
 import numpy as np
 from numba import njit
 
-
-# ============================================================================
-# numba 版坐标变换
-# ============================================================================
-
-
-@njit(cache=True)
-def _cube_to_tet_rst_nb(a, b, c):
-    t = c
-    s = (1.0 + b) * (1.0 - c) / 2.0 - 1.0
-    r = -(1.0 + a) * (s + t) / 2.0 - 1.0
-    return r, s, t
-
-
-@njit(cache=True)
-def _tet_barycentric_nb(r, s, t):
-    L1 = -(1.0 + r + s + t) / 2.0
-    L2 = (1.0 + r) / 2.0
-    L3 = (1.0 + s) / 2.0
-    L4 = (1.0 + t) / 2.0
-    return L1, L2, L3, L4
-
-
-@njit(cache=True)
-def _cube_to_tri_rs_nb(a, b):
-    s = b
-    r = (1.0 + a) * (1.0 - b) / 2.0 - 1.0
-    return r, s
-
-
-@njit(cache=True)
-def _tri_barycentric_nb(r, s):
-    l1 = -(r + s) / 2.0
-    l2 = (1.0 + r) / 2.0
-    l3 = (1.0 + s) / 2.0
-    return l1, l2, l3
+from autoflowcfd.grid.curved_mapping.curved_mapping import (
+    cube_to_tet_rst, cube_to_tri_rs, tet_barycentric, tri_barycentric,
+)
 
 
 # ============================================================================
@@ -57,8 +24,8 @@ def _map_tet_to_physical_nb(ref_pts, cell_nodes):
     result = np.empty((n, 3))
     for p in range(n):
         a, b, c = ref_pts[p, 0], ref_pts[p, 1], ref_pts[p, 2]
-        r, s, t = _cube_to_tet_rst_nb(a, b, c)
-        L1, L2, L3, L4 = _tet_barycentric_nb(r, s, t)
+        r, s, t = cube_to_tet_rst(a, b, c)
+        L1, L2, L3, L4 = tet_barycentric(r, s, t)
         for d in range(3):
             result[p, d] = (
                 L1 * cell_nodes[0, d] + L2 * cell_nodes[1, d]
@@ -73,8 +40,8 @@ def _map_prism_to_physical_nb(ref_pts, cell_nodes):
     result = np.empty((n, 3))
     for p in range(n):
         a, b, c = ref_pts[p, 0], ref_pts[p, 1], ref_pts[p, 2]
-        r, s = _cube_to_tri_rs_nb(a, b)
-        l1, l2, l3 = _tri_barycentric_nb(r, s)
+        r, s = cube_to_tri_rs(a, b)
+        l1, l2, l3 = tri_barycentric(r, s)
         z = c
         for d in range(3):
             bottom = l1 * cell_nodes[0, d] + l2 * cell_nodes[1, d] + l3 * cell_nodes[2, d]

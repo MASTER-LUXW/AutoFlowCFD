@@ -111,7 +111,12 @@ class MeshDistortionError(ValueError):
 # ---------------------------------------------------------------------------
 # Duffy 坍缩坐标变换
 # ---------------------------------------------------------------------------
+#
+# 下面四个变换是全仓库唯一的一份：numba 核（`fr/face_flux_points/ref_geometry_nb.py`、`native_geometry_nb.py`）
+# 逐点调用，Python 路径按数组逐元素求值（同一个 njit 函数按参数类型各编译一份）。2026-10-22（I-215）以前
+# numba 核另有一份逐字相同的 `_nb` 副本。
 
+@njit(cache=True)
 def cube_to_tet_rst(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """计算立方体坐标 (a,b,c)∈[-1,1]^3 -> 参考四面体坐标 (r,s,t)。
 
@@ -123,6 +128,7 @@ def cube_to_tet_rst(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> Tuple[np.nda
     return r, s, t
 
 
+@njit(cache=True)
 def tet_barycentric(r: np.ndarray, s: np.ndarray, t: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
                                                                           np.ndarray]:
     """参考四面体重心坐标（对应顶点 v1,v2,v3,v4），恒满足 L1+L2+L3+L4=1。"""
@@ -133,6 +139,7 @@ def tet_barycentric(r: np.ndarray, s: np.ndarray, t: np.ndarray) -> Tuple[np.nda
     return L1, L2, L3, L4
 
 
+@njit(cache=True)
 def cube_to_tri_rs(a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """正方形坐标 (a,b)∈[-1,1]^2 -> 参考三角形坐标 (r,s)。
 
@@ -143,6 +150,7 @@ def cube_to_tri_rs(a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray
     return r, s
 
 
+@njit(cache=True)
 def tri_barycentric(r: np.ndarray, s: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """参考三角形重心坐标（对应顶点 p1,p2,p3），恒满足 l1+l2+l3=1。"""
     l1 = -(r + s) / 2.0

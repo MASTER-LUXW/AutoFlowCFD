@@ -49,8 +49,8 @@ def _native_tet_adj_row_batched(
 
     # phys(a,b) = l1(r_tri,s_tri)*p_i + l2*p_j + l3*p_k，其中
     # (r_tri,s_tri)=cube_to_tri_rs(a,b)：见 curved_mapping.py/
-    # face_flux_points/ref_geometry_nb.py::_cube_to_tri_rs_nb 同一约定
-    # （r=(1+a)(1-b)/2-1, s=b）与 _tri_barycentric_nb（l1=-(r+s)/2,
+    # grid/curved_mapping/curved_mapping.py::cube_to_tri_rs 同一约定
+    # （r=(1+a)(1-b)/2-1, s=b）与 tri_barycentric（l1=-(r+s)/2,
     # l2=(1+r)/2, l3=(1+s)/2）——链式法则直接展开：
     # d phys/da = (1-b)/4 * e1；d phys/db = -(1+a)/4*e1 + 0.5*e2。
     dphys_da = ((1.0 - b) / 4.0)[None, :, None] * e1[:, None, :]

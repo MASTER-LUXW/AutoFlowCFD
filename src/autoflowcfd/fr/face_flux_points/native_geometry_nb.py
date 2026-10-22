@@ -9,7 +9,7 @@ import numpy as np
 from numba import njit
 
 from autoflowcfd.fr.native_tet.basis import simplex3d_value
-from .ref_geometry_nb import _cube_to_tri_rs_nb, _tri_barycentric_nb
+from autoflowcfd.grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
 
 
 # ============================================================================
@@ -81,7 +81,7 @@ def _map_native_tet_to_physical_nb(rst, cell_nodes):
 @njit(cache=True)
 def triangle_face_points_nb(n1d, Pa, Pb, Papex, sps_1d):
     """三角形面上 `n1d*n1d` 个通量点的物理坐标：坍缩三角形采样
-    （`_cube_to_tri_rs_nb`/`_tri_barycentric_nb`）的重心坐标依次乘 `(Pa, Pb, Papex)`，
+    （`cube_to_tri_rs`/`tri_barycentric`）的重心坐标依次乘 `(Pa, Pb, Papex)`，
     `b -> 1` 坍缩到 `Papex`。四面体的面与原生棱柱的封盖共用这一份（直边单元在三角面
     上的映射是仿射的，重心组合即精确的物理点）；三个顶点按坍缩顶点槽位轮换
     （`fr/triangle_apex.py`）由调用方给出。"""
@@ -90,8 +90,8 @@ def triangle_face_points_nb(n1d, Pa, Pb, Papex, sps_1d):
     for i in range(n1d):
         for j in range(n1d):
             flat = i * n1d + j
-            r_tri, s_tri = _cube_to_tri_rs_nb(sps_1d[i], sps_1d[j])
-            l1, l2, l3 = _tri_barycentric_nb(r_tri, s_tri)
+            r_tri, s_tri = cube_to_tri_rs(sps_1d[i], sps_1d[j])
+            l1, l2, l3 = tri_barycentric(r_tri, s_tri)
             for d in range(3):
                 result[flat, d] = l1 * Pa[d] + l2 * Pb[d] + l3 * Papex[d]
     return result
