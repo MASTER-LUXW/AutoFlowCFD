@@ -68,6 +68,7 @@ def test_worker_threads_use_the_callers_errstate(four_threads):
 def test_sa_pointwise_terms_are_unchanged_by_chunking(four_threads):
     """SA 的源项 / 阻尼 / 涡粘经分块求值与直接调用逐位相同（含负支、壁面点 d = 0）。"""
     from autoflowcfd.core.turbulence.sa.model import _pointwise_source
+    from autoflowcfd.core.turbulence.sst.kernels import compute_strain_and_vorticity_magnitude
 
     rng = np.random.default_rng(1)
     n = 3 * MIN_CELLS_PER_CHUNK
@@ -75,10 +76,11 @@ def test_sa_pointwise_terms_are_unchanged_by_chunking(four_threads):
     nu = np.full((n, 6), 1.5e-5)
     d = np.abs(rng.standard_normal((n, 6))) * 1e-2
     d[::7, 0] = 0.0
-    gv = rng.standard_normal((n, 6, 3, 3)) * 50.0
+    # 涡量模在分块之外整场算一次（与 `SAModel.compute_source_terms` 相同）
+    omega = compute_strain_and_vorticity_magnitude(rng.standard_normal((n, 6, 3, 3)) * 50.0)[1]
     with np.errstate(all="ignore"):
-        whole = _pointwise_source(nt, nu, d, gv, 0.7, np)
-        chunked = map_cell_chunks(_pointwise_source, (nt, nu, d, gv), 0.7, np)
+        whole = _pointwise_source(nt, nu, d, omega, 0.7, np)
+        chunked = map_cell_chunks(_pointwise_source, (nt, nu, d, omega), 0.7, np)
     for w, c in zip(whole, chunked):
         np.testing.assert_array_equal(w, c)
 
