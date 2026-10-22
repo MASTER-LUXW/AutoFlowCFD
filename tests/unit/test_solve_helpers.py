@@ -1,15 +1,9 @@
-"""Unit tests for cli/solve/helpers.py's load_mesh_for_solver - the
-dispatch logic between .pkl and .nas volume-mesh input, and the
-求解前质量门 enforcement layered on top of both.
+"""`cli/solve/mesh_loader.py::load_mesh_for_solver` 的单元测试：.pkl 与 .nas 体网格输入之间的分派逻辑，以及
+两者之上统一施加的求解前质量门。
 
-The underlying parsers this dispatches to (mesh_external_import.
-import_external_volume_mesh, its own call into parse_volume_mesh_nas) have
-no dedicated test coverage of their own and constructing a real valid
-volume-mesh NAS fixture is out of scope here - these tests mock that call
-boundary instead, so what's actually under test is load_mesh_for_solver's
-OWN logic: which branch it takes per extension, that it enforces
---surface-mesh being required for .nas, and that the quality gate blocks
-(unless skipped) regardless of which loading path produced the mesh.
+它分派到的底层解析（`mesh_external_import.import_external_volume_mesh` 及其内部的 `parse_volume_mesh_nas`）
+由各自的测试覆盖；这里在那个调用边界上打桩，被测的只是 `load_mesh_for_solver` 自己的逻辑：按扩展名走哪条
+分支、.nas 必须给 `--surface-mesh`、以及不论网格来自哪条加载路径质量门都会拦截（除非显式跳过）。
 """
 
 import pickle

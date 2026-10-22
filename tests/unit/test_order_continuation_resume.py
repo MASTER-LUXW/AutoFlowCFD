@@ -1,25 +1,16 @@
-"""Regression test for a real bug found 2026-08-22 (real-mesh resume,
-asked directly by the user: "如果当前是P1，resume是从P1开始运算吗"):
+"""真实缺陷回归测试（2026-08-22 真实网格续算时发现，用户直接问："如果当前是P1，resume是从P1开始运算吗"）。
 
-`run_order_continuation` unconditionally reinitializes `solver.state` to a
-uniform freestream and restarts the P0->target ramp from scratch whenever
-`solver.state.U.shape[1] != 1` (not P0). This branch exists to handle a
-*freshly constructed* FRSolver, whose default initial state is a uniform
-freestream sized at the *target* order (not P0) - reinitializing it down
-to a proper P0 starting point before ramping is correct there.
+`run_order_continuation`（`core/utils/order_continuation/run.py`）在 `solver.state.U.shape[1] != 1`（不是 P0）时
+无条件把 `solver.state` 重置为均匀来流、从 P0 重新爬坡。这条分支是给**全新构造**的 FRSolver 准备的：它的初始
+状态是按**目标**阶数开的均匀来流，爬坡前降到 P0 起点是对的。
 
-But `solve resume` reuses the exact same code path. A checkpoint saved
-mid-ramp (e.g. genuinely converged physics at P1) also has
-`state.U.shape[1] != 1`, and would hit the *identical* branch - silently
-discarding the real, resumed solution and restarting the whole ramp from
-a uniform P0 freestream, with no error or warning. Resuming a P1/P2
-checkpoint would be indistinguishable from not resuming at all.
+但 `solve resume` 走同一条路径。爬坡中途保存的 checkpoint（例如 P1 上已有真实收敛进展）同样满足
+`state.U.shape[1] != 1`，会进入同一条分支——静默丢掉续算恢复的真实解、从均匀 P0 来流重新开始，不报错也不
+警告。续算 P1 / P2 的 checkpoint 与根本没有续算无从区分。
 
-Fix: `rebuild_solver_from_checkpoint` now marks the solver with
-`_resumed_from_checkpoint = True` right after loading the real state;
-`run_order_continuation` skips the reinit-to-P0 branch when this flag is
-set, and starts the `orders` ramp range from `solver.current_order`
-(the checkpoint's real order) instead of always from P0.
+修复：`rebuild_solver_from_checkpoint` 在恢复真实状态后给求解器打上 `_resumed_from_checkpoint = True`；
+`run_order_continuation` 见到这个标记时跳过重置到 P0 的分支，阶数序列从 `solver.current_order`（checkpoint 的
+真实阶数）起，而不是总从 P0 起。
 """
 
 from types import SimpleNamespace
@@ -271,28 +262,18 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
 
 
 class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudget:
-    """Regression test for a real bug found 2026-09-05 (user directly
-    pointed out: "phase_max_iter 的默认值应该是 max_iter // len(orders)，
-    两者不是或的关系"): the final (target) stage's "eat the rest of the
-    budget, don't get diluted by len(orders)" rule — the entire point of
-    the `phase_max_iter` parameter (2026-09-01) — was gated behind
-    `phase_max_iter is not None`, i.e. only active when a caller explicitly
-    passes `--phase-max-iter`. Callers who never pass it (the common CLI
-    case) got the *old*, pre-fix behaviour by construction: the final
-    stage capped at the same `max_iter // len(orders)` share as every
-    other stage, silently truncated regardless of how much budget earlier
-    stages left unused.
+    """真实缺陷回归测试（2026-09-05，用户直接指出："phase_max_iter 的默认值应该是 max_iter // len(orders)，
+    两者不是或的关系"）：最终（目标）阶段"吃掉剩余全部步数、不被 len(orders) 均分"这条规则——`phase_max_iter`
+    参数（2026-09-01）存在的全部意义——此前被 `phase_max_iter is not None` 门住，只在调用方显式传
+    `--phase-max-iter` 时生效。不传它的调用方（CLI 的常见情形）按构造得到修复前的旧行为：最终阶段与其他阶段
+    一样被截在 `max_iter // len(orders)`，不管前面的阶段剩下多少预算。
 
-    Fix: `phase_max_iter`'s absence only supplies *this one number's*
-    default value (`max_iter // len(orders)`); "final stage gets whatever
-    budget remains" applies unconditionally, default or explicit alike.
+    修复：不传 `phase_max_iter` 只决定**这一个数**的默认值（`max_iter // len(orders)`）；"最终阶段拿剩余全部
+    预算"无条件成立，默认值与显式值都一样。
 
-    This test constructs a scenario where the difference is observable
-    without relying on any residual-drop/convergence coincidence: P0
-    (non-final) promotes early via the CL-02 residual-drop criterion,
-    leaving unused budget; P1 (final) is scripted to never trigger any
-    exit condition on its own, so it runs for exactly its assigned
-    `stage_iter_budget` - directly exposing which budget it was given.
+    本测试构造一个不依赖任何残差下降 / 收敛巧合就能看出差别的场景：P0（非最终阶段）按 CL-02 残差下降判据提前
+    升阶、留下未用的预算；P1（最终阶段）被脚本化为自己永远不触发任何退出条件，于是恰好跑满分到的
+    `stage_iter_budget`——直接暴露它拿到的是哪一份预算。
     """
 
     def test_final_stage_gets_leftover_budget_without_explicit_phase_max_iter(self):

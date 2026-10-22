@@ -124,7 +124,7 @@ class TestVTKExporter(unittest.TestCase):
             self.assertTrue(result.exists())
             self.assertEqual(result.suffix, '.vtk')
 
-            # Check file content
+            # 检查文件内容
             with open(result, 'r') as f:
                 content = f.read()
                 self.assertIn("vtk DataFile Version 3.0", content)
@@ -180,7 +180,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
 
     def test_export_csv(self):
         """把收敛历史导出为 CSV"""
-        # Add some iterations
+        # 加入若干步迭代
         for i in range(5):
             self.analyzer.add_iteration(
                 iteration=i+1,
@@ -194,7 +194,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
 
             self.assertTrue(result.exists())
 
-            # Verify CSV content
+            # 核对 CSV 内容
             with open(result, 'r') as f:
                 reader = csv.reader(f)
                 rows = list(reader)
@@ -224,7 +224,7 @@ class TestSimulationReport(unittest.TestCase):
         self.config = {'backend': 'cpu', 'order': 2}
         self.analyzer = ConvergenceAnalyzer()
 
-        # Add some iterations
+        # 加入若干步迭代
         for i in range(5):
             self.analyzer.add_iteration(
                 iteration=i+1,
@@ -242,7 +242,7 @@ class TestSimulationReport(unittest.TestCase):
 
             self.assertTrue(result.exists())
 
-            # Verify JSON content
+            # 核对 JSON 内容
             with open(result, 'r') as f:
                 report_data = json.load(f)
                 self.assertIn('metadata', report_data)

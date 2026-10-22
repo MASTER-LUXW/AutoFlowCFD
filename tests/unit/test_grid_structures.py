@@ -257,7 +257,7 @@ class TestGridData:
             bc_types={"wall": "WALL"}
         )
 
-        # Intentionally wrong metadata
+        # 故意写错的元数据
         metadata = GridMetadata(
             node_count=10,  # Wrong!
             cell_count=1,
@@ -277,7 +277,7 @@ class TestGridData:
         """网格数据经 HDF5 保存并读回。"""
         pytest.importorskip("h5py")
 
-        # Create test grid
+        # 构造测试网格
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 0.0], dtype=np.float64),
@@ -308,14 +308,14 @@ class TestGridData:
             metadata=metadata
         )
 
-        # Save to HDF5
+        # 写出 HDF5
         filepath = tmp_path / "test_grid.h5"
         original_grid.save_hdf5(str(filepath))
 
-        # Load from HDF5
+        # 读回 HDF5
         loaded_grid = GridData.load_hdf5(str(filepath))
 
-        # Verify data integrity
+        # 核对数据完整性
         assert loaded_grid.node_count == original_grid.node_count
         assert loaded_grid.cell_count == original_grid.cell_count
         np.testing.assert_array_equal(loaded_grid.nodes.x, original_grid.nodes.x)

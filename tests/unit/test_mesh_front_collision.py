@@ -241,7 +241,7 @@ class TestClampBudgetForConvergence:
         nodes = np.array([a0, a1, a2, b0, b1, b2])
         faces = np.array([[0, 1, 2], [3, 4, 5]])
         centroid_a, centroid_b = nodes[:3].mean(axis=0), nodes[3:].mean(axis=0)
-        assert np.linalg.norm(centroid_a - centroid_b) < 0.2  # confirm genuinely close
+        assert np.linalg.norm(centroid_a - centroid_b) < 0.2  # 确认确实很接近
         budget = np.full(6, np.inf)
 
         clamp_budget_for_convergence(nodes, faces, budget)
@@ -271,7 +271,7 @@ class TestClampBudgetForConvergence:
         nodes = np.zeros((0, 3))
         faces = np.zeros((0, 3), dtype=np.int64)
         budget = np.zeros(0)
-        clamp_budget_for_convergence(nodes, faces, budget)  # must not raise
+        clamp_budget_for_convergence(nodes, faces, budget)  # 不得抛异常
 
 
 class TestExtrudeLayersNeverProducesASelfIntersectingLayer:

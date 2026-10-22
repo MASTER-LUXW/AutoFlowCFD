@@ -1,33 +1,21 @@
-"""Regression test for a real bug found 2026-08-22 on a real 791k-cell
-resume run: `order` and `target_order` were conflated into a single
-checkpoint metadata field.
+"""真实缺陷回归测试（2026-08-22，79.1 万单元真实网格续算时发现）：`order` 与 `target_order` 被混在 checkpoint
+元数据的同一个字段里。
 
-`FRSolver.__init__(order=...)` sets *both* `self.current_order` (state
-shape) and `self.order` (the Order Continuation ramp target read by
-`solver.solve()`'s `self.order_continuation_enabled and self.order >= 2`
-gate, see fr_solver/solver.py). A checkpoint saved mid-ramp (e.g. during
-the P0 phase, before any P0->P1 transition) has `current_order=0` but a
-target of e.g. 2 - these genuinely differ. Storing only one value and
-using it for both purposes on `resume` is a contradiction:
+`FRSolver.__init__(order=...)` 同时设置 `self.current_order`（状态形状）与 `self.order`（Order Continuation
+爬坡的目标阶数，`solver.solve()` 里 `self.order_continuation_enabled and self.order >= 2` 判据读取它，见
+`core/fr_solver/solver/`）。爬坡中途保存的 checkpoint（例如 P0 阶段、尚未发生 P0 -> P1 切换）`current_order=0`
+而目标是 2——两者确实不同。只存一个值、续算时两种用途都用它，自相矛盾：
 
-- Reconstruct at target_order (2): mesh/FRSolver initial state shape
-  (n_cells, 27, n_vars) doesn't match the saved (n_cells, 1, n_vars)
-  U_sps -> `rebuild_solver_from_checkpoint` raises "状态形状不匹配".
-- Reconstruct at current_order (0) *and* leave FRSolver's `self.order`
-  at 0 too (the actual observed bug, from an earlier same-day fix that
-  only addressed the shape-mismatch half of this): shapes match and
-  resume proceeds silently, but `self.order >= 2` is now False, so
-  `solver.solve()` silently skips `_solve_with_order_continuation`
-  entirely. Real symptom on the production run: the CLI's rich
-  "P{n} Iter ...: Drop: ...x" per-order logging was replaced by the
-  generic "Iteration N: Residual = ..." format, and the residual sat
-  flat with no path to ever reach P1/P2.
+- 按 target_order（2）重建：网格 / FRSolver 的初始状态形状 (n_cells, 27, n_vars) 与保存的 (n_cells, 1, n_vars)
+  U_sps 不符 -> `rebuild_solver_from_checkpoint` 报 "状态形状不匹配"。
+- 按 current_order（0）重建、且 FRSolver 的 `self.order` 也留在 0（实际观测到的缺陷，来自当天较早一次只修了
+  形状不符那一半的修复）：形状一致、续算静默进行，但 `self.order >= 2` 为假，`solver.solve()` 整个跳过
+  `_solve_with_order_continuation`。生产算例上的实际症状：CLI 按阶数打印的 "P{n} Iter ...: Drop: ...x" 变成了
+  通用的 "Iteration N: Residual = ..." 格式，残差停在原地，永远到不了 P1 / P2。
 
-Fix: `write_checkpoint` now stores `order` (current_order, for shape
-matching) and `target_order` (solver.order, for continuing the ramp) as
-two distinct metadata fields; `rebuild_solver_from_checkpoint` builds the
-mesh/initial state at `order` but then explicitly restores
-`solver.order = target_order` afterward.
+修复：`write_checkpoint` 把 `order`（current_order，用于形状匹配）与 `target_order`（solver.order，用于继续
+爬坡）存成两个元数据字段；`rebuild_solver_from_checkpoint` 按 `order` 构造网格与初始状态，之后显式恢复
+`solver.order = target_order`。
 """
 
 from types import SimpleNamespace

@@ -36,16 +36,16 @@ CTRIA3,6,1,7,8,4
 
     def test_complete_parsing_workflow(self, sample_nas_file: Path) -> None:
         """从文件到校验后网格的完整解析流程。"""
-        # Step 1: Parse NAS file
+        # 第 1 步：解析 NAS 文件
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
 
-        # Verify basic structure
+        # 核对基本结构
         assert grid.node_count == 8
         assert grid.cell_count == 6
         assert grid.metadata.file_format == "v24"
 
-        # Verify data types
+        # 核对数据类型
         assert grid.nodes.x.dtype == np.float64
         assert grid.cells.connectivity.dtype == np.int32
 
@@ -64,7 +64,7 @@ CTRIA3,6,1,7,8,4
         validator = GridValidator(grid)
         results = validator.validate()
 
-        # Check validation completed
+        # 检查校验已完成
         assert 'passed' in results
         assert 'aspect_ratio' in results
         assert 'skewness' in results
@@ -79,14 +79,14 @@ CTRIA3,6,1,7,8,4
         parser = NASParser(str(sample_nas_file))
         original_grid = parser.parse()
 
-        # Save to HDF5
+        # 写出 HDF5
         h5_file = tmp_path / "grid.h5"
         original_grid.save_hdf5(str(h5_file))
 
-        # Load from HDF5
+        # 读回 HDF5
         loaded_grid = type(original_grid).load_hdf5(str(h5_file))
 
-        # Verify data integrity
+        # 核对数据完整性
         assert loaded_grid.node_count == original_grid.node_count
         assert loaded_grid.cell_count == original_grid.cell_count
         np.testing.assert_array_equal(loaded_grid.nodes.x, original_grid.nodes.x)
@@ -112,7 +112,7 @@ CTRIA3,6,1,7,8,4
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
 
-        # Check bounding box
+        # 检查包围盒
         bbox = grid.metadata.bounding_box
         assert bbox is not None
 
@@ -120,7 +120,7 @@ CTRIA3,6,1,7,8,4
         # (min_x, max_x, min_y, max_y, min_z, max_z)。
         min_x, max_x, min_y, max_y, min_z, max_z = bbox
 
-        # Verify bounds match actual data
+        # 包围盒应与实际数据一致
         assert abs(min_x - np.min(grid.nodes.x)) < 1e-10
         assert abs(max_x - np.max(grid.nodes.x)) < 1e-10
         assert abs(min_y - np.min(grid.nodes.y)) < 1e-10
@@ -135,7 +135,7 @@ CTRIA3,6,1,7,8,4
         max_node_idx = np.max(grid.cells.connectivity)
         assert max_node_idx < grid.node_count
 
-        # No negative indices
+        # 不能有负下标
         assert np.min(grid.cells.connectivity) >= 0
 
     def test_memory_layout_contiguous(self, sample_nas_file: Path) -> None:
@@ -143,7 +143,7 @@ CTRIA3,6,1,7,8,4
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
 
-        # Check SoA arrays are contiguous
+        # SoA 数组应连续存储
         assert grid.nodes.x.flags['C_CONTIGUOUS']
         assert grid.nodes.y.flags['C_CONTIGUOUS']
         assert grid.nodes.z.flags['C_CONTIGUOUS']
@@ -183,13 +183,13 @@ CTRIA3,6,1,7,8,4
         nas_file = tmp_path / "large_mesh.nas"
         nas_file.write_text(nas_content)
 
-        # Measure parsing time
+        # 计时解析
         start_time = time.time()
         parser = NASParser(str(nas_file))
         grid = parser.parse()
         parse_time = time.time() - start_time
 
-        # Verify mesh size
+        # 核对网格规模
         assert grid.node_count == nx * ny
         assert grid.cell_count == 2 * (nx - 1) * (ny - 1)
 
@@ -212,7 +212,7 @@ GRID,2,,1.0,0.0,0.0
 
         parser = NASParser(str(nas_file))
 
-        # Should raise appropriate error
+        # 应抛出对应的错误
         with pytest.raises(Exception):  # NASParseError
             parser.parse()
 
@@ -221,11 +221,11 @@ GRID,2,,1.0,0.0,0.0
         parser = NASParser(str(sample_nas_file))
         grid = parser.parse()
 
-        # Metadata should match actual counts
+        # 元数据应与实际计数一致
         assert grid.metadata.node_count == len(grid.nodes.x)
         assert grid.metadata.cell_count == len(grid.cells.connectivity)
 
-        # Boundary groups should match
+        # 边界组应一致
         assert len(grid.metadata.boundary_groups) == len(grid.boundaries.groups)
 
     def test_quality_metrics_reasonable(self, sample_nas_file: Path) -> None:
@@ -236,10 +236,10 @@ GRID,2,,1.0,0.0,0.0
         validator = GridValidator(grid)
         results = validator.validate()
 
-        # Aspect ratio should be >= 1
+        # 长宽比应 >= 1
         assert results['aspect_ratio']['min'] >= 1.0
 
-        # Skewness should be in [0, 1]
+        # 扭曲度应在 [0, 1] 内
         assert 0.0 <= results['skewness']['min'] <= 1.0
         assert 0.0 <= results['skewness']['max'] <= 1.0
 

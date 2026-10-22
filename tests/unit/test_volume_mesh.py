@@ -29,7 +29,7 @@ class TestTetrahedralCells:
 
     def test_compute_multiple_tets(self):
         """多个四面体的体积计算。"""
-        # Create two identical tetrahedra
+        # 构造两个相同的四面体
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0, 2.0, 3.0, 2.0]),
             y=np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),

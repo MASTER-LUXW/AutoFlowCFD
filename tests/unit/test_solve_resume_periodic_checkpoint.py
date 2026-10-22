@@ -1,21 +1,12 @@
-"""Regression test for a real gap found 2026-08-22 (user asked directly:
-"多少步存一个ckpt" - how many steps between checkpoint saves - while a
-long resume run was in progress).
+"""真实缺陷回归测试（2026-08-22，长时间续算运行中用户直接问："多少步存一个ckpt"）。
 
-`solve resume` never passed a `checkpoint_callback` to `solver.solve()`,
-unlike `solve steady` (which has `--checkpoint-interval` wired up via its
-own `_checkpoint_cb`). A resume run wrote exactly one checkpoint, at the
-very end after all `--max-iter` iterations completed - a multi-hour
-resume that crashed or was interrupted partway would lose everything
-back to the checkpoint it started from, with no intermediate save point.
+`solve resume` 此前从不给 `solver.solve()` 传 `checkpoint_callback`，而 `solve steady` 有 `--checkpoint-interval`
+接到它自己的回调上。续算只在全部 `--max-iter` 步跑完之后写一次 checkpoint——跑了几个小时的续算如果中途崩溃
+或被打断，会丢掉全部进展、退回出发时的那个 checkpoint，中间没有任何保存点。
 
-Fix: `resume()` now has its own `--checkpoint-interval` option and builds
-an equivalent callback. The callback's iteration numbers must be the
-*absolute* count (checkpoint's starting `iteration` + this run's local
-counter) - the local counter alone restarts from 0/1 every resume call,
-and would silently collide with (overwrite) a pre-resume checkpoint file
-of the same name (e.g. local iteration 500 colliding with the original
-run's own checkpoint_iter_000500.h5).
+修复：`resume()` 有了自己的 `--checkpoint-interval` 选项并构造等价的回调。回调用的迭代数必须是**绝对**计数
+（checkpoint 的起始 `iteration` + 本次运行的局部计数）——只用局部计数的话每次续算都从 0/1 重新数起，会与续算
+之前同名的 checkpoint 文件静默冲突（覆盖），例如局部第 500 步与原运行自己的 checkpoint_iter_000500.h5 撞名。
 """
 
 from types import SimpleNamespace

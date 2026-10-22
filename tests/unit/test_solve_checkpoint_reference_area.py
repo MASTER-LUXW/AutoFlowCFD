@@ -1,23 +1,14 @@
-"""Regression test for a real gap found 2026-08-22 (user reported after a
-resume run: "阻力 侧力 升力没有显示" - drag/side-force/lift not showing).
+"""真实缺陷回归测试（2026-08-22，用户在一次续算后反馈："阻力 侧力 升力没有显示"）。
 
-`run_order_continuation`'s per-iteration log line only appends
-Cd/Cl/Cs when `solver._reference_area` is a positive number (see
-order_continuation.py: `getattr(solver, '_reference_area', None)`).
-`solve_steady_command.py` sets this attribute right after construction
-(explicit --reference-area, or auto-estimated from the surface mesh's
-projected frontal area via `_compute_reference_area_auto` when not
-given) - but `rebuild_solver_from_checkpoint` never set it at all, so a
-resumed solver had no `_reference_area` attribute whatsoever. Even
-passing `--reference-area` to `solve resume` wouldn't have produced
-per-iteration Cd/Cl/Cs, only a single post-hoc value after the whole
-run finished (via resume()'s own `_report_aerodynamic_coefficients`
-call).
+`run_order_continuation` 每步日志只在 `solver._reference_area` 为正数时才附带 Cd / Cl / Cs（见
+`core/utils/order_continuation/`：`getattr(solver, '_reference_area', None)`）。稳态命令
+（`cli/solve/steady/command.py`）构造之后紧接着设置这个属性（显式 --reference-area，不给时由
+`_compute_reference_area_auto` 按面网格的迎风投影面积自动估算）——但 `rebuild_solver_from_checkpoint` 从来不设，
+续算出的求解器根本没有 `_reference_area` 属性。即使给 `solve resume` 传 `--reference-area`，也只会在整个运行
+结束后由 resume() 自己的 `_report_aerodynamic_coefficients` 打印一次，每步日志里仍没有 Cd / Cl / Cs。
 
-Fix: `rebuild_solver_from_checkpoint` now mirrors solve_steady_command.py's
-logic exactly - explicit `reference_area` param wins, otherwise falls
-back to `_compute_reference_area_auto(volume_data)` - and sets
-`solver._reference_area` before returning.
+修复：`rebuild_solver_from_checkpoint` 与稳态命令同一逻辑——显式 `reference_area` 参数优先，否则退回
+`_compute_reference_area_auto(volume_data)`——并在返回前设置 `solver._reference_area`。
 """
 
 from types import SimpleNamespace

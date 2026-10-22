@@ -28,7 +28,7 @@ class TestEstimateSteinerleft:
 
         expected_estimated_tets = 30.0 / maxvol  # 3000
         expected = int(np.clip(expected_estimated_tets * 3.0, 300_000, 20_000_000))
-        assert result == expected == 300_000  # clipped to the floor here
+        assert result == expected == 300_000  # 这里被钳到下限
 
     def test_extra_small_regions_do_not_explode_the_estimate(self):
         """真实缺陷的回归测试：Stage B 的小局部修复区域（由 min_cell_size 得到的
@@ -39,7 +39,7 @@ class TestEstimateSteinerleft:
         """
         points = _box_points(8.0, 3.0, 3.0)  # bbox_volume = 72，与真实算例一致
         main_maxvol = 0.1 ** 3 * 0.15  # 与 _build_merged_mesh 自己的公式一致
-        stage_b_maxvol = 0.003 ** 3 * 0.15  # tiny relative to main_maxvol
+        stage_b_maxvol = 0.003 ** 3 * 0.15  # 相对 main_maxvol 极小
         regions = [
             (np.array([4.0, 1.5, 1.5]), 1, main_maxvol),
         ] + [
@@ -72,7 +72,7 @@ class TestEstimateSteinerleft:
         """
         points = _box_points(8.0, 3.0, 3.0)
         maxvol_a = 0.01
-        maxvol_b = 0.02  # coarsest of the two
+        maxvol_b = 0.02  # 两者中较粗的那个
         regions = [
             (np.array([1.0, 1.0, 1.0]), 1000, maxvol_a),
             (np.array([2.0, 1.0, 1.0]), 1001, maxvol_b),

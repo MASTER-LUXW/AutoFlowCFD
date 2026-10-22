@@ -119,7 +119,7 @@ class TestSmoothBadCells:
         validator = MeshQualityValidator()
 
         perturbed = nodes.copy()
-        perturbed[iC] += np.array([0.9, 0.9, 0.0])  # aggressive, may itself invert a cell
+        perturbed[iC] += np.array([0.9, 0.9, 0.0])  # 激进，本身可能把单元翻转
 
         current_volumes = compute_tetrahedron_volumes(perturbed, cells)
         already_bad = current_volumes <= 0

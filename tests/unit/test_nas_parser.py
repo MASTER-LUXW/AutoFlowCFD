@@ -28,7 +28,7 @@ class TestNASParser:
         txt_file = tmp_path / "test.txt"
         txt_file.write_text("$ Test file\n")
 
-        # Should not raise, just warn
+        # 不抛异常，只告警
         parser = NASParser(str(txt_file))
         assert parser is not None
 
@@ -242,7 +242,7 @@ CTRIA3,1,1,1,2,3
         parser = NASParser(str(nas_file))
         grid = parser.parse()
 
-        # Connectivity should use 0-based indices
+        # 连接关系应为 0 起始下标
         connectivity = grid.cells.connectivity[0]
         assert connectivity[0] == 0  # Node 1 in Nastran -> index 0
         assert connectivity[1] == 1  # Node 2 in Nastran -> index 1

@@ -52,7 +52,7 @@ class TestGridValidator:
     @pytest.fixture
     def stretched_grid(self) -> GridData:
         """创建拉长的三角形网格（质量差）。"""
-        # Create a very stretched triangle
+        # 构造一个高度拉伸的三角形
         nodes = NodeArray(
             x=np.array([0.0, 10.0, 0.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 0.1], dtype=np.float64),
@@ -118,7 +118,7 @@ class TestGridValidator:
         assert 'max' in ar_stats
         assert 'avg' in ar_stats
         assert 'min' in ar_stats
-        assert ar_stats['min'] >= 1.0  # Aspect ratio cannot be < 1
+        assert ar_stats['min'] >= 1.0  # 长宽比不可能 < 1
         assert ar_stats['max'] >= ar_stats['avg']
 
     def test_skewness_calculation(self, simple_grid: GridData) -> None:
@@ -140,7 +140,7 @@ class TestGridValidator:
         assert 'max' in jac_stats
         assert 'avg' in jac_stats
         assert 'min' in jac_stats
-        assert jac_stats['min'] > 0.0  # Valid triangle has positive Jacobian
+        assert jac_stats['min'] > 0.0  # 合法三角形的 Jacobian 为正
         assert 'negative_count' in jac_stats
 
     def test_validation_summary(self, simple_grid: GridData) -> None:
@@ -171,7 +171,7 @@ class TestGridValidator:
         """生成质量指标的直方图。"""
         validator = GridValidator(simple_grid)
 
-        # Test aspect ratio histogram
+        # 检查长宽比直方图
         counts, bins = validator.get_quality_histogram('aspect_ratio', bins=10)
         assert len(counts) == 10
         assert len(bins) == 11  # n bins have n+1 edges
@@ -185,7 +185,7 @@ class TestGridValidator:
 
     def test_multiple_cells_validation(self) -> None:
         """多个单元的校验。"""
-        # Create a mesh with multiple triangles
+        # 构造含多个三角形的网格
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float64),

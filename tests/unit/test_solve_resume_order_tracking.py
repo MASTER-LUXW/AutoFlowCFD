@@ -1,25 +1,18 @@
-"""Regression test for a real bug (found 2026-08-22, real-mesh resume):
-`solve resume` re-wrote its own checkpoint using the `order` value read
-from the checkpoint metadata *before* calling `solver.solve()` - but
-`solver.solve()` can itself trigger an Order Continuation transition
-(P0->P1 etc.) partway through, leaving `solver.current_order` ahead of
-that pre-solve snapshot by the time the checkpoint is written. The next
-resume would then reconstruct the mesh/FRSolver at the *wrong* (stale)
-order, producing a U_sps shape that no longer matches the actually-saved
-state - exactly the failure the user hit on a real 791k-cell run:
+"""真实缺陷回归测试（2026-08-22 真实网格续算时发现）：`solve resume` 重写自己的 checkpoint 时，用的是调用
+`solver.solve()` **之前**从 checkpoint 元数据读出的 `order`——但 `solver.solve()` 自己可能中途触发 Order
+Continuation 的阶数切换（P0 -> P1 等），写 checkpoint 时 `solver.current_order` 已经领先于求解前的那份快照。
+下一次续算于是按**过时**的阶数重建网格与 FRSolver，得到的 U_sps 形状与实际保存的状态不符——正是用户在
+79.1 万单元真实算例上遇到的失败：
 
     Checkpoint 状态形状 (791492, 1, 7) 与重建求解器的状态形状
     (791492, 27, 7) 不匹配
 
-The same stale-closure-variable bug existed in `solve_steady_command.py`'s
-periodic checkpoint callback and end-of-run checkpoint, and in
-`solve_transient_command.py`'s end-of-run checkpoint - all four call sites
-now pass `solver.current_order` (the live value) instead of the value
-captured before `solve()` ran. This test pins the `solve resume` case,
-which is exercised directly through the CLI (the other three sites
-require a full mesh-generation pipeline to reach solve(), too heavy for
-a unit test - covered instead by inspection/consistency across all four
-call sites, which were fixed identically)."""
+同样的"闭包里取了过时变量"缺陷也存在于稳态命令（`cli/solve/steady/command.py`）的周期 checkpoint 回调与收尾
+checkpoint、以及瞬态命令（`cli/solve/transient.py`）的收尾 checkpoint——四处调用点现在都传
+`solver.current_order`（当时的实际值），而不是 `solve()` 之前取下的值。本测试钉住 `solve resume` 这一处，
+它可以直接经 CLI 触发（其余三处要走完整的网格生成流程才能到 solve()，单元测试太重——四处改法相同，由代码
+一致性核对覆盖）。
+"""
 
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
