@@ -36,7 +36,8 @@ from ._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_prov
 from autoflowcfd.core.freestream_defaults import MU_MOLECULAR
 
 
-def _build_couette_solver(order: int = 2):
+def _build_couette_solver(order: int = 2, **solver_kwargs):
+    """`solver_kwargs` 原样传给 FRSolver（如 `adaptive_cfl=False, cfl_start=...` 固定 CFL）。"""
     H = 1.0
     U_wall = 0.01
     ny = 6
@@ -63,7 +64,7 @@ def _build_couette_solver(order: int = 2):
         mesh=mesh, order=order, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=rho_inf, vel_inf=U_wall, p_inf=p_inf,
-        bc_overrides=bc_overrides, mu_molecular=MU_MOLECULAR,
+        bc_overrides=bc_overrides, mu_molecular=MU_MOLECULAR, **solver_kwargs,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_overrides)
@@ -123,28 +124,28 @@ def test_couette_prism_stable_from_wrong_ic():
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at iter {i}"
 
 
-#: 两个棱柱基档在"精确线性剪切保持性"上的实测上界（1600 步，
-#: `FILTER_MODE=off` 即默认档，判据 `|u - u_exact|/U_wall`）。
+#: 精确线性剪切保持性的上界（固定 CFL `_SHEAR_CFL`、1600 步，判据 `|u - u_exact|/U_wall`），取实测值约 3 倍。
 #:
-#: 2026-09-19 原生棱柱基接入残差全链路之后测得：
+#: 2026-10-22 HEAD 实测（误差随步数近似线性增长，400/800/1200/1600 步）：
 #:
-#:     档        P1         P2         P3
-#:     坍缩    6.62e-09   1.78e-02   第 5 步 NaN
-#:     原生    2.05e-09   8.40e-09   4.38e-08
+#:     P1   2.30e-09  4.31e-09  6.30e-09  8.29e-09
+#:     P2   8.06e-09  1.67e-08  2.33e-08  2.87e-08
+#:     P3   1.09e-08  1.77e-08  2.39e-08  3.19e-08
 #:
-#: **P2 改善约 210 万倍、P3 从发散变成稳定。** 残差侧同向：坍缩 P2 的
-#: 残差 1600 步涨 5e7 倍（1.6e-5 -> 8.7e2），原生 P2 只涨 23 倍
-#: （3.0e-6 -> 7.0e-5），与 P1 同样的缓慢线性爬升 —— 那是壁面边界条件的
-#: 瞬态，不是失稳。
+#: 线性增长的来源是物理的：常温线性剪切对可压缩 N-S 并不严格是定常解——粘性耗散 `mu (dU/dy)^2` 持续加热，温度与
+#: 密度随时间缓慢偏离初场，再经能量 / 动量耦合反映到速度上，所以误差正比于走过的伪时间。因此必须固定 CFL：
+#: 自适应控制器的轨迹一变，1600 步走过的伪时间就变，误差随之按比例变化。
 #:
-#: 上界取实测值的约 3 倍余量。坍缩档那两条**刻意保留**为"记录当前真实
-#: 行为"的判据（不是目标值）：坍缩那两档一旦变好说明坍缩侧也被改动了，
-#: 应当来更新这里而不是放宽。（"默认档仍是坍缩"这句已于 2026-09-20 作废，
-#: 默认改为 native，见 `fr/native_prism/__init__.py`。）
+#: 两次变化都不是缺陷（2026-10-22 用二分与固定 CFL A/B 定位）：
+#:   * 24b6356（2026-10-01 平均流离散守恒：过积分细->粗改为 L2 投影、本侧通量迹并进体积算子）：固定 CFL 0.03 下
+#:     P1 3.33e-09 -> 9.0e-09，有意的离散改动（换来棱柱上的精确守恒）；
+#:   * 1dc7111（2026-10-20 监控残差逐方程按参考量级归一化）：此前自适应控制器在这个算例上把 CFL 误压在下限 0.01
+#:     （1600 步平均 0.0106），修好之后升到上限 0.06（平均 0.058），同样 1600 步多走 5.5 倍伪时间——2026-09-19 按
+#:     自适应 CFL 标定的旧阈值（P1 1e-8、P2 3e-8，当时实测 2.05e-9 / 8.40e-9）因此失效。
 #:
-#: 坍缩棱柱基 2026-09-23 已删除（原生基是唯一实现），坍缩档的两条记录判据
-#: （P1 1e-7、P2 实测 1.78e-2）随之移出参数表，数据保留在这里作为史料。
-_SHEAR_TOL = {1: 1e-8, 2: 3e-8, 3: 1.5e-7}
+#: 坍缩棱柱基（2026-09-23 已删除）当年的对照：坍缩 P2 1.78e-2、P3 第 5 步 NaN，原生基回到上表的量级。
+_SHEAR_CFL = 0.03
+_SHEAR_TOL = {1: 2.5e-8, 2: 9e-8, 3: 1e-7}
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])
@@ -171,7 +172,7 @@ def test_couette_prism_preserves_the_exactly_representable_shear(order):
     """
     tol = _SHEAR_TOL[order]
     solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver(
-        order=order)
+        order=order, adaptive_cfl=False, cfl_start=_SHEAR_CFL)
 
     gamma = 1.4
     y = mesh.sps_coords[:, :, 1]
