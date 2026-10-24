@@ -74,12 +74,28 @@ def compute_aerodynamic_coefficients_fr(
     )
 
 
+def _wind_coefficients(force, freestream, reference_area: float) -> Dict[str, float]:
+    """合力 `(3,)` -> 风轴系 {'Cd','Cl','Cs'}。"""
+    qa = _dynamic_pressure_area(freestream, reference_area)
+    d_hat, s_hat, l_hat = _wind_axes(freestream)
+    return {'Cd': float(force @ d_hat / qa), 'Cl': float(force @ l_hat / qa), 'Cs': float(force @ s_hat / qa)}
+
+
 def pressure_force_coefficients(solver, reference_area: float, groups: Optional[Sequence[str]] = None) -> Dict[str,
                                                                                                                float]:
     """只含压力（无粘数值通量）部分的力系数 {'Cd','Cl','Cs'}，供每步监控：不算速度梯度，开销只在壁面通量点上。"""
     host = solver.host_view() if hasattr(solver, "host_view") else solver
     code_to_name = wall_group_codes(host.boundary_ghost_provider, groups)
     force = sample_wall(host, list(code_to_name), viscous=False).force_inviscid.sum(axis=0)
-    qa = _dynamic_pressure_area(host.freestream, reference_area)
-    d_hat, s_hat, l_hat = _wind_axes(host.freestream)
-    return {'Cd': float(force @ d_hat / qa), 'Cl': float(force @ l_hat / qa), 'Cs': float(force @ s_hat / qa)}
+    return _wind_coefficients(force, host.freestream, reference_area)
+
+
+def total_and_pressure_force_coefficients(solver, reference_area: float) -> Dict[str, float]:
+    """全部 WALL 组的总力系数 {'Cd','Cl','Cs'}（压力 + 粘性）与其中压力部分 {'Cd_p','Cl_p','Cs_p'}：一次壁面采样
+    （含速度 / 温度梯度，粘性力需要它们），供瞬态逐步的气动力历史（`core/probes/forces.py`）。"""
+    host = solver.host_view() if hasattr(solver, "host_view") else solver
+    samples = sample_wall(host, list(wall_group_codes(host.boundary_ghost_provider, None)), viscous=True)
+    f_p = samples.force_inviscid.sum(axis=0)
+    total = _wind_coefficients(f_p + samples.force_viscous.sum(axis=0), host.freestream, reference_area)
+    pressure = _wind_coefficients(f_p, host.freestream, reference_area)
+    return {**total, **{f"{k}_p": v for k, v in pressure.items()}}

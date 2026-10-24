@@ -51,6 +51,10 @@ _TIME_METHOD_CHOICES = ["dual-time", "rk3"]
 @click.option("--probe", "probes", nargs=3, type=float, multiple=True,
               help="探针位置 X Y Z（米，可重复给出）：每个物理步在该点求 FR 解多项式的值，压力与速度写进输出目录的 "
                    "probes.csv（布局在 probes.json），供 post transient-psd 使用；续算接着写")
+@click.option("--force-history", is_flag=True,
+              help="每个物理步把总气动力系数（压力 + 粘性，风轴系、全部 WALL 组）及其压力部分追加到输出目录的 "
+                   "forces.csv（需要 --reference-area；core/probes/forces.py）。每步一次全场梯度与壁面积分，分布式"
+                   "每步还要把整场汇总到 root，所以只在要求时打开；续算接着写")
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）。'
@@ -65,7 +69,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               physical_time: float,
               output_dir: str, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
-              dual_time_inner_iter: int, threads: int, probes: tuple, init_checkpoint: Optional[str],
+              dual_time_inner_iter: int, threads: int, probes: tuple, force_history: bool,
+              init_checkpoint: Optional[str],
               turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: Optional[int],
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
@@ -134,7 +139,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
                                      viscosity_ratio, artificial_viscosity_enabled, artificial_viscosity_alpha,
                                      wall_treatment),
         sem_num_eddies=sem_num_eddies, reference_area=reference_area, init_checkpoint=init_checkpoint,
-        probes=tuple(probes),
+        probes=tuple(probes), force_history=force_history,
         # 瞬态不以残差为停止条件，跑满指定步数（tol=0）
         max_iter=max_iter, dt=dt, tol=0.0, phase_max_iter=phase_max_iter,
         residual_drop_threshold=residual_drop_threshold))

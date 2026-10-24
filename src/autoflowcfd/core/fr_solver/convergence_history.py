@@ -126,8 +126,8 @@ def checkpoint_history(solver, iteration: int) -> dict:
 
 
 def record_step(solver, residual: float) -> None:
-    """求解循环每步调用一次：把这一步记进 `solver.convergence_history`；挂了探针时采样一次（集体操作，
-    `core/probes/recorder.py`）。
+    """求解循环每步调用一次：把这一步记进 `solver.convergence_history`；挂了探针 / 逐步气动力历史时各记一次（集体
+    操作，`core/probes/recorder.py`、`core/probes/forces.py`）。
 
     逐方程 RMS 取单步里算好的 `solver._residual_per_equation`（`monitor_residuals`），湍流监控残差取
     `turbulence_monitor_residual`（隐式紧耦合步的湍流子系统残差或显式更新的速率 RMS）；CFL 取当前值
@@ -146,6 +146,7 @@ def record_step(solver, residual: float) -> None:
         coefficients = {"Cd_p": aero["Cd"], "Cl_p": aero["Cl"], "Cs_p": aero["Cs"]}
     solver.convergence_history.append(residual, getattr(solver, "_residual_per_equation", None),
                                       current_cfl_number(solver), coefficients, turbulence_monitor_residual(solver))
-    recorder = getattr(solver, "_probe_recorder", None)
-    if recorder is not None:
-        recorder.record(solver)
+    for name in ("_probe_recorder", "_force_recorder"):         # 探针 / 逐步气动力历史（core/probes）
+        recorder = getattr(solver, name, None)
+        if recorder is not None:
+            recorder.record(solver)

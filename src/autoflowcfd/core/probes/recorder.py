@@ -22,6 +22,7 @@ from typing import Dict, Optional
 import numpy as np
 
 from .locate import ProbeLocations, locate_probes
+from .series_file import append_series_row, prepare_series_file
 
 PROBE_FILE = "probes.csv"
 PROBE_LAYOUT_FILE = "probes.json"
@@ -29,8 +30,6 @@ PROBE_LAYOUT_FILE = "probes.json"
 PROBE_POINTS_KEY = "probe_points"
 #: 每个探针记录的原始变量（列名 `probe{i}_{name}`）与它们在原始变量里的列号
 RECORDED = (("p", 4), ("u", 1), ("v", 2), ("w", 3))
-#: 续算截断时判定"晚于 checkpoint 时刻"的相对容差（物理时间是逐步累加的浮点数）
-_RESUME_TIME_RTOL = 1e-9
 
 
 def _global_mesh(solver):
@@ -125,19 +124,7 @@ class ProbeRecorder:
         return ["time", "iteration"] + [f"probe{i}_{name}" for i in range(len(self.points)) for name, _ in RECORDED]
 
     def _prepare_file(self, resume_time: Optional[float]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        kept = []
-        if resume_time is not None and self.path.exists():
-            with open(self.path, newline="") as f:
-                rows = list(csv.reader(f))
-            if rows and rows[0] != self._header():
-                raise ValueError(f"{self.path} 的列与本次探针不一致（探针坐标变了）：换一个输出目录或删掉旧文件")
-            limit = resume_time * (1.0 + _RESUME_TIME_RTOL) + 1e-300
-            kept = [r for r in rows[1:] if float(r[0]) <= limit]
-        with open(self.path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(self._header())
-            writer.writerows(kept)
+        prepare_series_file(self.path, self._header(), resume_time, "探针坐标变了")
         layout = {"points": self.points.tolist(), "cells": self.locations.cells.tolist(),
                   "cell_is_prism": self.locations.is_prism.tolist(), "reference_coords": self.locations.rst.tolist(),
                   "columns": [name for name, _ in RECORDED]}
@@ -173,8 +160,7 @@ class ProbeRecorder:
         iteration = history.iterations[-1] if history.iterations else 0
         row = [repr(float(solver.time_integrator.current_time)), int(iteration)]
         row += [repr(float(Q[i, col])) for i in range(len(self.points)) for _, col in RECORDED]
-        with open(self.path, "a", newline="") as f:
-            csv.writer(f).writerow(row)
+        append_series_row(self.path, row)
 
 
 def attach_probes(solver, points, output_dir, resume_time: Optional[float] = None) -> Optional[ProbeRecorder]:

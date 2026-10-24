@@ -15,6 +15,8 @@
 * **物理时间**（`physical_time`，时间精确推进时）：瞬态统计、频谱与探针时间序列的时间轴。此前
   `time_integrator.current_time` 从不推进、也不写出，`post transient-*` 拿迭代数当物理时间。
 * **探针坐标**（`probe_points`，挂了探针时）：续算按它重新挂上探针、接着写时间序列（`core/probes`）。
+* **逐步气动力历史的参考面积**（`force_history_reference_area`，`--force-history` 时）：续算按它重新挂上、接着写
+  `forces.csv`（`core/probes/forces.py`）。
 
 湍流输运方程同样做双时间步（`time_integration/implicit/newton/physical_time.py`），它的上一时间层 `turb_prev_unknowns`
 （`(n_cells, n_sps, n_transported)`，模型的未知量空间：SST 为 k 与 ln omega）一并写出与恢复。
@@ -59,6 +61,11 @@ def time_metadata(solver) -> dict:
         from autoflowcfd.core.probes import PROBE_POINTS_KEY
 
         out[PROBE_POINTS_KEY] = np.asarray(recorder.points, dtype=np.float64)
+    forces = getattr(solver, "_force_recorder", None)
+    if forces is not None:
+        from autoflowcfd.core.probes import FORCE_HISTORY_KEY
+
+        out[FORCE_HISTORY_KEY] = float(forces.reference_area)
     return out
 
 

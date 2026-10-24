@@ -55,6 +55,7 @@ class SolveRun:
     tol: float
     phase_max_iter: Optional[int]
     residual_drop_threshold: float
+    force_history: bool = False      # 瞬态逐步气动力历史 forces.csv（core/probes/forces.py）
 
     @property
     def distributed(self) -> bool:
@@ -157,6 +158,8 @@ def _print_header(run: SolveRun) -> None:
         print(f"Init From  : {run.init_checkpoint}")
     if run.probes:
         print(f"Probes     : {len(run.probes)}")
+    if run.force_history:
+        print("Forces     : 逐步气动力历史 forces.csv")
     print()
 
 
@@ -173,7 +176,7 @@ def run_solve(run: SolveRun):
     from autoflowcfd.cli.solve.distributed_build import finish_distributed
     from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
     from autoflowcfd.core.mpi import is_root
-    from autoflowcfd.core.probes import attach_probes
+    from autoflowcfd.core.probes import attach_force_history, attach_probes
 
     _print_header(run)
     solver, volume_data = _build(run)
@@ -186,6 +189,11 @@ def run_solve(run: SolveRun):
         callback = periodic_checkpoint_callback(run.checkpoint_interval, run.output_dir, run.input_file,
                                                 run.turbulence_model, run.backend, surface_mesh=run.surface_mesh)
     attach_probes(solver, run.probes, run.output_dir)
+    if run.force_history:
+        try:
+            attach_force_history(solver, reference_area, run.output_dir)     # 集体操作（分布式时）
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
 
     try:
         result = solver.solve(max_iter=run.max_iter, dt=run.dt, tol=run.tol, checkpoint_callback=callback,

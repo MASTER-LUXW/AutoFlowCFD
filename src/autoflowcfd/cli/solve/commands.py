@@ -105,6 +105,9 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
               help='相对收敛容差（与 solve steady --tol 同义）')
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default=None,
               help='续算的输出目录（checkpoint 与结果）；不给时为 checkpoint 所在算例目录')
+@click.option('--force-history', is_flag=True,
+              help='续算时开始写逐步气动力历史 forces.csv（同 solve transient --force-history）；原算例已在写时'
+                   '不用给，按 checkpoint 记录的参考面积接着写')
 @click.option('--reset-turbulence', is_flag=True,
               help='checkpoint 的湍流场有超过 10%% 的自由度贴近上界（湍流场曾失控、未恢复），或缺少湍流场 / 涡粘时，'
                    '把湍流场重置为来流值再续算（平均流保留）。不给时这两种 checkpoint 拒绝续算并报告')
@@ -116,7 +119,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
            gpu_device: Optional[int], dt: Optional[float], tol: float, output_dir: Optional[str],
-           reset_turbulence: bool) -> None:
+           force_history: bool, reset_turbulence: bool) -> None:
     """从 checkpoint 续算。
 
     按 checkpoint 记录的网格（输出目录的 volume_mesh.pkl）、阶数、湍流模型与全部物理参数重建求解器，恢复解点状态、
@@ -151,6 +154,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         output_dir: 输出目录，None 时为 checkpoint 所在算例目录
         reset_turbulence: 湍流场被上界大面积截断或 checkpoint 缺湍流场时重置为来流值（不给时拒绝续算，
             `core/utils/order_continuation/turbulence_reset.py`）
+        force_history: 从本次续算起写逐步气动力历史（原算例已在写时自动接着写，`core/probes/forces.py`）
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
@@ -164,7 +168,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, reset_turbulence=reset_turbulence,
             time_scheme=time_scheme, dt=dt, tol=tol, reference_area=reference_area,
-            low_mach_precond=low_mach_precond, output_dir=output_dir,
+            low_mach_precond=low_mach_precond, output_dir=output_dir, force_history=force_history,
         )
         return
 
@@ -185,7 +189,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     result = continue_single_node(
         solver, iteration, metadata, checkpoint_file, max_iter=max_iter, dt=_resume_dt(dt, metadata, solver),
         tol=tol, checkpoint_interval=checkpoint_interval, phase_max_iter=phase_max_iter,
-        residual_drop_threshold=residual_drop_threshold, output_dir=output_dir)
+        residual_drop_threshold=residual_drop_threshold, output_dir=output_dir, force_history=force_history)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")
     # solver._reference_area 而非 CLI 参数：重建时两者都是 None 会自动估算并存到这个属性上
@@ -219,6 +223,7 @@ def _resume_distributed(
     reset_turbulence: bool = False,
     low_mach_precond: Optional[bool] = None,
     output_dir: Optional[str] = None,
+    force_history: bool = False,
 ) -> None:
     """`resume` 的分布式分支：CPU MPI 传统模式 / 完全分布式加载 / 多 GPU 共用同一个重建入口
     `rebuild_distributed_solver_from_checkpoint`，续算（中间 checkpoint 的文件名按续算起点的绝对迭代数偏移）后
@@ -245,9 +250,14 @@ def _resume_distributed(
     from autoflowcfd.cli.solve.checkpoint_io.resume_run import resume_output_dir
 
     output_dir = output_dir or resume_output_dir(checkpoint_file)
-    from autoflowcfd.core.probes import attach_probes_from_checkpoint
+    from autoflowcfd.core.probes import attach_force_history_on_resume, attach_probes_from_checkpoint
 
     attach_probes_from_checkpoint(solver, metadata, output_dir)       # 集体操作
+    try:
+        attach_force_history_on_resume(solver, metadata, output_dir, force_history,
+                                       solver._report_reference_area)   # 集体操作
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
 
     if is_root():
         logger.info(
