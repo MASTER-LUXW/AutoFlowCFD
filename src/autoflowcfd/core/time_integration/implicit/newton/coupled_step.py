@@ -300,7 +300,7 @@ def _caches(solver, backend):
         n_real_prism, n_real_tet = real_sps_per_cell(int(backend.order))
         cell_is_prism = np.asarray(backend.cell_is_prism, dtype=bool)
         n_turb = int(backend.turb.model.n_transported)
-        mean_coarse = mean_coarse_available(backend.coarse_context(), n_real_prism, n_real_tet)
+        mean_coarse = mean_coarse_available(n_real_prism, n_real_tet)
         plan = plan_block_memory(backend.red, cell_is_prism, backend.n_sps, n_real_prism, n_real_tet,
                                  N_MEAN_FLOW_VARS, n_turb, mean_coarse=mean_coarse)
         common = dict(cell_is_prism=cell_is_prism, n_sps=backend.n_sps, plan=plan,

@@ -8,7 +8,9 @@ from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler
 from autoflowcfd.core.time_integration.implicit.blocks import block_budget as bb
 from autoflowcfd.core.time_integration.implicit.blocks.block_jacobi import BlockJacobiCache
 from autoflowcfd.core.time_integration.implicit.blocks.coloring import greedy_cell_coloring
-from autoflowcfd.core.time_integration.implicit.coarse.cell_coarse import CoarseCorrectedPreconditioner, restriction_weights
+from autoflowcfd.core.time_integration.implicit.coarse.cell_coarse import (
+    CoarseCorrectedPreconditioner, restriction_weights,
+)
 from autoflowcfd.core.time_integration.implicit.newton.jfnk import step_newton_krylov
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators

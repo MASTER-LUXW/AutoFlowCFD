@@ -193,7 +193,7 @@ def step_mean_flow_newton(
             raise ValueError(f"状态行数 {u_flat.shape[0]} 不是单元数 {n_cells} 的整数倍")
         n_sps = u_flat.shape[0] // n_cells
         # 平均流单独做 Newton 步只在没有输运型湍流方程时（层流、LES 一类）：预处理预算由它独占
-        mean_coarse = block_assembler is not None and mean_coarse_available(global_coarse, n_real_prism, n_real_tet)
+        mean_coarse = block_assembler is not None and mean_coarse_available(n_real_prism, n_real_tet)
         plan = plan_block_memory(red, cell_is_prism, n_sps, n_real_prism, n_real_tet, N_MEAN_FLOW_VARS, 0,
                                  mean_coarse=mean_coarse)
         solver._newton_block_precond = BlockJacobiCache(

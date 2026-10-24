@@ -26,6 +26,7 @@ import numpy as np
 from autoflowcfd.core.utils.array_module import to_host
 
 from .assemble import MeanFlowLinearization, assemble_mean_flow_blocks
+from .coarse import select_coarse_rows
 from .coupling import CouplingBlocks, CouplingGroup
 
 
@@ -39,7 +40,7 @@ def unsupported_reason(*, order: int) -> Optional[str]:
 class MeanFlowBlockAssembler:
     """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]] | [, coarse])`（主机
     float32；跨 rank 耦合块只在分布式给出，见 `select_rows`；`coarse_weights` 由块缓存在单元级粗校正档设置，
-    此时给出单元级粗块 `coarse.py::CoarseBlocks`）。"""
+    此时给出单元级粗块 `coarse.py::CoarseBlocks`，分布式再给出跨 rank 的 `CrossCoarseBlocks`）。"""
 
     __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling", "coarse_weights")
 
@@ -66,14 +67,19 @@ class MeanFlowBlockAssembler:
         if self.row_compact is None:
             return assemble_mean_flow_blocks(self.ctx, to_host(u_dev), residual=r,
                                              want_coupling=self.want_coupling, coarse_weights=self.coarse_weights)
-        if self.coarse_weights is not None:
-            raise NotImplementedError("分布式单元级粗块尚未接入（I-234）")
         # halo 交换在状态自己的数组模块上做（多 GPU 的交换器收 cupy 数组），再搬回主机
         U = np.ascontiguousarray(to_host(self.compact_state(u_dev)))
         R = np.zeros(U.shape[:2] + (r.shape[-1],))
         R[self.row_compact] = r
-        out = assemble_mean_flow_blocks(self.ctx, U, residual=R, want_coupling=self.want_coupling)
-        return select_rows(out, self.row_compact, int(self.ctx.mesh.n_prism_cells), self.want_coupling)
+        n_prism = int(self.ctx.mesh.n_prism_cells)
+        if self.coarse_weights is None:
+            out = assemble_mean_flow_blocks(self.ctx, U, residual=R, want_coupling=self.want_coupling)
+            return select_rows(out, self.row_compact, n_prism, self.want_coupling)
+        # 单元级粗块：限制权重放进紧凑空间（halo 行为 0，它们的行贡献本就不属于本 rank），粗块分 rank 内 / 跨 rank
+        W = np.zeros(U.shape[:2])
+        W[self.row_compact] = self.coarse_weights
+        out = assemble_mean_flow_blocks(self.ctx, U, residual=R, coarse_weights=W)
+        return select_rows(out[:2], self.row_compact, n_prism, False) + select_coarse_rows(out[2], self.row_compact)
 
 
 def select_rows(out, row_compact, n_prism_compact: int, want_coupling: bool):

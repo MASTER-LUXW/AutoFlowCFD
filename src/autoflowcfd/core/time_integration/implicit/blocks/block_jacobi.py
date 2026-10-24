@@ -340,7 +340,7 @@ class BlockJacobiCache:
             out = self.assembler(u0_flat, r0_flat)
             blocks_prism, blocks_tet = out[0], out[1]
             if self.cell_coarse:
-                self._set_coarse_matrix(out[2])
+                self._set_coarse_matrix(out[2], out[3] if len(out) > 3 else None)
             if self.use_ilu:
                 from .block_ilu import BlockCouplingStructure
                 n_real = np.where(self.cell_is_prism, self.n_real_prism, self.n_real_tet)
@@ -383,15 +383,19 @@ class BlockJacobiCache:
                        else f"差分装配 {self.jac.n_residual_evals} 次残差求值")
                     + f"，{time.time() - t0:.1f}s）")
 
-    def _set_coarse_matrix(self, coarse) -> None:
-        """装配给出的单元级粗块 -> 粗矩阵（稀疏结构与聚合层次首次构造后复用，单元对必须与首次一致）。"""
+    def _set_coarse_matrix(self, coarse, cross=None) -> None:
+        """装配给出的单元级粗块（分布式另有跨 rank 粗块）-> 粗矩阵（稀疏结构与聚合层次首次构造后复用，单元对
+        必须与首次一致）。"""
         from ..coarse.cell_coarse import CellCoarseMatrix, CellCoarseTopology
 
+        xr, xc = (None, None) if cross is None else (cross.rows, cross.cols)
         if self._coarse_topology is None:
-            self._coarse_topology = CellCoarseTopology(self.cell_is_prism.size, coarse.rows, coarse.cols, self.n_var)
-        elif not self._coarse_topology.matches(coarse.rows, coarse.cols):
+            self._coarse_topology = CellCoarseTopology(self.cell_is_prism.size, coarse.rows, coarse.cols, self.n_var,
+                                                       xr, xc)
+        elif not self._coarse_topology.matches(coarse.rows, coarse.cols, xr, xc):
             raise RuntimeError("单元级粗块的单元对与首次装配不一致（网格拓扑不应在缓存生命周期内变化）")
-        self._coarse_matrix = CellCoarseMatrix(self._coarse_topology, coarse.diag, coarse.blocks)
+        self._coarse_matrix = CellCoarseMatrix(self._coarse_topology, coarse.diag, coarse.blocks,
+                                               None if cross is None else cross.blocks)
 
     def _coarse_corrected(self, base, dtau_flat):
         """块 Jacobi 叠加单元级粗校正；粗层近似逆按 `_factorization_stale` 的同一判据复用。"""
@@ -401,7 +405,7 @@ class BlockJacobiCache:
             self._coarse_solve = None    # 先释放旧的，不同时持有两份
             mat = self._coarse_matrix
             self._coarse_solve = CellCoarseSolve(mat, mat.ptc_diagonal(self._coarse_weights_host, dtau_flat,
-                                                                       self.n_sps))
+                                                                       self.n_sps), self._coarse.ctx)
             self._coarse_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
         return CoarseCorrectedPreconditioner(base, self._coarse_solve, self._coarse_weights, self._real_slots,
                                              self.n_sps)

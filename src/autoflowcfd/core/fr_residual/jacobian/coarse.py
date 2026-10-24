@@ -80,3 +80,26 @@ def finish_coarse_blocks(diag, layout: CoarsePairLayout, pair_blocks) -> CoarseB
     off = ~on
     return CoarseBlocks(diag=diag, rows=layout.rows[off], cols=layout.cols[off],
                         blocks=np.ascontiguousarray(pair_blocks[off]))
+
+
+@dataclass
+class CrossCoarseBlocks:
+    """跨 rank 的单元对粗块：行单元在本 rank（Newton 行单元下标）、列单元是 halo（紧凑空间编号）。"""
+    rows: np.ndarray
+    cols: np.ndarray
+    blocks: np.ndarray
+
+
+def select_coarse_rows(coarse: CoarseBlocks, row_compact):
+    """紧凑空间（local+halo）的粗块 -> 只含本 rank Newton 行单元的两组（与 `backend.py::select_rows` 同一约定）：
+    rank 内（行列都换成行单元下标，对角块按 `row_compact` 取出）与跨 rank（列保持紧凑编号）。"""
+    rc = np.asarray(row_compact, dtype=np.int64)
+    local = -np.ones(coarse.diag.shape[0], dtype=np.int64)
+    local[rc] = np.arange(rc.size)
+    lr, lc = local[coarse.rows], local[coarse.cols]
+    inner = (lr >= 0) & (lc >= 0)
+    cross = (lr >= 0) & (lc < 0)
+    return (CoarseBlocks(diag=np.ascontiguousarray(coarse.diag[rc]), rows=lr[inner], cols=lc[inner],
+                         blocks=np.ascontiguousarray(coarse.blocks[inner])),
+            CrossCoarseBlocks(rows=lr[cross], cols=coarse.cols[cross],
+                              blocks=np.ascontiguousarray(coarse.blocks[cross])))
