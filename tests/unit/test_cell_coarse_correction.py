@@ -13,18 +13,24 @@ from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
 NV = 5
 
 
+def _uniform(W, real):
+    """真实解点上合计为单元体积的均匀权重（正性限制器 `norm_weights` 的定义，测试里按定义构造）。"""
+    w = np.where(real, W, 0.0)
+    return np.where(real, (w.sum(axis=1) / real.sum(axis=1))[:, None], 0.0)
+
+
 def test_restriction_weights_use_the_cell_integral_unless_it_has_negative_entries():
     """积分权重全部非负的单元用它；有负权重的单元改为真实解点上的均匀权重，合计同一体积；零填充槽位为 0。"""
     W = np.array([[0.0, 0.5, 0.5, 9.0],          # 棱柱式：顶点权重 0
                   [-0.05, 0.4, 0.4, 0.25],       # 四面体式：顶点权重为负
                   [0.2, 0.3, 7.0, 7.0]])         # 两个零填充槽位
     real = np.array([[True, True, True, False], [True, True, True, True], [True, True, False, False]])
-    w = restriction_weights(W, real)
+    w = restriction_weights(W, _uniform(W, real))
     np.testing.assert_allclose(w[0], [0.0, 0.5, 0.5, 0.0])
     np.testing.assert_allclose(w[1], np.full(4, 1.0 / 4))
     np.testing.assert_allclose(w[2], [0.2, 0.3, 0.0, 0.0])
     with pytest.raises(ValueError):
-        restriction_weights(np.array([[-1.0, 0.5]]), np.ones((1, 2), dtype=bool))
+        restriction_weights(np.array([[-1.0, 0.5]]), np.zeros((1, 2)))
 
 
 def _fine_system(n_cells, n_sps, seed, pairs):
@@ -127,7 +133,8 @@ def test_small_problem_uses_an_exact_coarse_solve():
     n_cells, n_sps = 9, 3
     pairs = _chain_pairs(n_cells)
     J, real, Jcc, Jcy = _fine_system(n_cells, n_sps, 3, pairs)
-    w = restriction_weights(np.where(real, 1.0, 0.0) * np.linspace(0.5, 1.5, n_sps)[None, :], real)
+    W = np.where(real, 1.0, 0.0) * np.linspace(0.5, 1.5, n_sps)[None, :]
+    w = restriction_weights(W, _uniform(W, real))
     dtau = np.full(n_cells * n_sps, 0.3)
     diag, blocks = _coarse_blocks(Jcc, Jcy, pairs, w)
     topo = CellCoarseTopology(n_cells, np.array(pairs)[:, 0], np.array(pairs)[:, 1])
@@ -191,7 +198,7 @@ def test_coarse_correction_cuts_gmres_iterations_on_a_long_chain():
             return np.einsum("cij,cj->ci", inv_blocks, v.reshape(n_cells, m)).reshape(v.shape)
 
     base = _BJ(dtau, NV)
-    w = restriction_weights(np.full((n_cells, n_sps), 0.5), real)
+    w = restriction_weights(np.full((n_cells, n_sps), 0.5), _uniform(np.full((n_cells, n_sps), 0.5), real))
     diag, blocks = _coarse_blocks(Jcc, Jcy, pairs, w)
     topo = CellCoarseTopology(n_cells, np.array(pairs)[:, 0], np.array(pairs)[:, 1])
     assert topo.hierarchy

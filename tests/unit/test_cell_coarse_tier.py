@@ -51,8 +51,8 @@ def _case(order=2):
     real = real_row_mask(cip, mesh.n_sps_per_cell, order).reshape(mesh.n_cells, -1)
     from autoflowcfd.core.time_integration.positivity.limiter import build_positivity_limiter
 
-    W = np.asarray(build_positivity_limiter(mesh, ops, order=order).W)
-    w = restriction_weights(W, real)
+    lim = build_positivity_limiter(mesh, ops, order=order)
+    w = restriction_weights(np.asarray(lim.W), np.asarray(lim.norm_weights))
 
     def assembler():
         return MeanFlowBlockAssembler(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,

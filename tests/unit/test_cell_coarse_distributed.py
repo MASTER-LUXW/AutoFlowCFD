@@ -142,6 +142,11 @@ def test_distributed_solver_with_coarse_tier_matches_single_machine(monkeypatch)
     from tests.validation._channel_mesh import build_face_exact_ghost_provider
 
     monkeypatch.setattr(bb, "estimate_ilu_bytes", lambda *a, **k: 2 ** 60)
+    # 规划按可用内存定预算（block_budget.py）；固定可用内存，档位不随机器当时的负载变化（另有大算例在跑、空闲
+    # 内存低于余量 2 GiB 时预算为 0，两边都退回对角预处理，判据失去意义）
+    from autoflowcfd.core.utils import system_memory
+
+    monkeypatch.setattr(system_memory, "available_bytes", lambda xp: 16 * 2 ** 30)
     single = _solver()
     mesh = single.mesh
     bc = {n: {"type": "SYMMETRY"} for n in ("wall_bottom", "wall_top", "z_min", "z_max")}

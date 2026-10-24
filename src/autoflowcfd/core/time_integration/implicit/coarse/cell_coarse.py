@@ -29,7 +29,7 @@ CFL 4000 时块 Jacobi 的线性求解停滞、整步残差变大（该步被拒
 
 单元积分权重（解点求积权重 x det J，正性限制器的同一组 `W`：`R` 作用在残差上就是单元净通量，`A_c` 即以
 FR 迹为面状态的有限体积通量 Jacobian）在该单元全部非负时用它；有负权重时改用真实解点上的均匀权重（同样合计
-为单元体积）。P2 四面体顶点的积分权重是 -V/20（二次 Lagrange 顶点基函数的积分），P2 棱柱三角形顶点的
+为单元体积，就是正性限制器给 Newton 残差范数的那一组 `norm_weights`，不另算一份）。P2 四面体顶点的积分权重是 -V/20（二次 Lagrange 顶点基函数的积分），P2 棱柱三角形顶点的
 是 0。2026-10-16 同一线性系统（CFL 2600）的对照：
 
     权重                                全局线性残差（GMRES 次数）
@@ -67,22 +67,25 @@ from ..blocks.block_ilu import BlockCouplingStructure
 from ..blocks.preconditioner import PseudoTransientDiagonal
 
 
-def restriction_weights(quad_weights, real):
+def restriction_weights(quad_weights, uniform_weights):
     """逐（单元, 槽位）的限制权重（模块文档"限制权重"）。
 
     Args:
         quad_weights: `(n_cells, n_sps)` 解点求积权重 x det J（零填充槽位的值不用）。
-        real: `(n_cells, n_sps)` 真实解点掩码。
+        uniform_weights: `(n_cells, n_sps)` 真实解点上合计为单元体积的均匀权重、零填充槽位为 0（正性限制器的
+            `norm_weights`）；真实解点掩码即其正值处。
+
+    Raises:
+        ValueError: 有单元没有正的均匀权重（体积非正）
     """
     from autoflowcfd.core.utils.array_module import array_module
 
     xp = array_module(quad_weights)
-    real = xp.asarray(real, dtype=bool)
+    uniform = xp.asarray(uniform_weights, dtype=xp.float64)
+    real = uniform > 0.0
+    if not bool(xp.all(real.any(axis=1))):
+        raise ValueError("均匀权重（单元体积 / 真实解点数）必须为正")
     w = xp.where(real, xp.asarray(quad_weights, dtype=xp.float64), 0.0)
-    volume = w.sum(axis=1)
-    if not bool(xp.all(volume > 0.0)):
-        raise ValueError("单元积分权重之和（单元体积）必须为正")
-    uniform = xp.where(real, (volume / real.sum(axis=1))[:, None], 0.0)
     negative = (w < 0.0).any(axis=1)
     return xp.where(negative[:, None], uniform, w)
 
@@ -93,12 +96,9 @@ def mean_coarse_available(n_real_prism: int, n_real_tet: int) -> bool:
     return max(int(n_real_prism), int(n_real_tet)) > 1
 
 
-def mean_coarse_weights(positivity, cell_is_prism, n_sps: int, n_real_prism: int, n_real_tet: int):
-    """限制权重（`restriction_weights`），积分权重取正性限制器的 `W`（与状态同一数组模块）。"""
-    xp = positivity.xp
-    n_real = np.where(np.asarray(cell_is_prism, dtype=bool), int(n_real_prism), int(n_real_tet))
-    real = xp.asarray(np.arange(int(n_sps))[None, :] < n_real[:, None])
-    return restriction_weights(positivity.W, real)
+def mean_coarse_weights(positivity):
+    """限制权重（`restriction_weights`）：积分权重与均匀权重都取正性限制器的那一份（与状态同一数组模块）。"""
+    return restriction_weights(positivity.W, positivity.norm_weights)
 
 
 class CellCoarseTopology:

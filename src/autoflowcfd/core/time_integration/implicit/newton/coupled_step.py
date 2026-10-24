@@ -312,8 +312,7 @@ def _caches(solver, backend):
         if need_mean:
             solver._newton_block_precond = BlockJacobiCache(
                 n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True,
-                coarse_weights=mean_coarse_weights(backend.positivity, cell_is_prism, backend.n_sps,
-                                                   n_real_prism, n_real_tet) if mean_coarse else None, **common)
+                coarse_weights=mean_coarse_weights(backend.positivity) if mean_coarse else None, **common)
     return solver._newton_block_precond, solver._newton_turb_state["block"]
 
 

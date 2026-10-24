@@ -201,8 +201,7 @@ def step_mean_flow_newton(
             n_sps=n_sps, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=N_MEAN_FLOW_VARS, red=red, coupling_graph=coupling_graph,
             global_coarse=global_coarse,
-            coarse_weights=mean_coarse_weights(positivity, cell_is_prism, n_sps, n_real_prism, n_real_tet)
-            if mean_coarse else None)
+            coarse_weights=mean_coarse_weights(positivity) if mean_coarse else None)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(
