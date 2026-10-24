@@ -182,3 +182,33 @@ def test_multi_gpu_coupled_steps_match_single_machine(pair):
             a, b = np.asarray(getattr(g.turb_model_gpu, name)), np.asarray(getattr(single.turb_model, name))
             r = np.abs(a - b).max() / np.abs(b).max()
             assert r <= tol_turb, f"第 {k + 1} 步 {name} 相对差 {r:.2e}"
+
+
+def test_multi_gpu_coupled_steps_in_the_cell_coarse_tier(pair, monkeypatch):
+    """平均流在块 Jacobi + 单元级粗校正档（`two+cc`，块 ILU 内存估计抬到放不下、固定可用内存）：多 GPU 侧粗块走
+    装配器分布式分支（限制权重放进紧凑空间、`select_coarse_rows` 拆 rank 内 / 跨 rank）与数组模块的限制 / 延拓。
+    判据同单 GPU 的同名用例（`test_gpu_coupled_nk_step.py`）：块 Jacobi 的 cupy 分支 float32 矩阵乘使方向在
+    forcing 容差内与 CPU 不同。实测 3 步后状态差 / 更新量：不带粗校正的纯 two 档最大 8.8e-4，two+cc 最大 1.4e-3
+    （粗层 K 循环非线性，略有放大；SA 槽道的横向速度分量），接线错误给出 O(1)。判 GMRES 次数相同、残差范数一致到
+    1e-5、状态差不超过更新量的 5e-3。"""
+    from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
+    from autoflowcfd.core.time_integration.implicit.blocks import block_budget as bb
+    from autoflowcfd.core.time_integration.implicit.newton.coupled_step import step_coupled_newton
+    from autoflowcfd.core.utils import system_memory
+
+    monkeypatch.setattr(bb, "estimate_ilu_bytes", lambda *a, **k: 2 ** 60)
+    monkeypatch.setattr(system_memory, "available_bytes", lambda xp: 16 * 2 ** 30)
+    single, g = pair
+    dtau = np.asarray(single._compute_local_time_step()).reshape(-1)
+    U0 = single.state.U[..., :5].copy()
+    for _ in range(3):
+        ic = step_coupled_newton(single, CpuCoupledBackend(single), dtau)
+        ig = step_coupled_newton(g, mgi_mod.MultiGpuCoupledBackend(g, _cell_is_prism(single), 1, None, None), dtau)
+        assert ig["gmres_iters"] == ic["gmres_iters"]
+        assert ig["res_norm"] == pytest.approx(ic["res_norm"], rel=1e-5)
+    update = np.abs(single.state.U[..., :5] - U0).max(axis=(0, 1))
+    diff = np.abs(np.asarray(g.U_gpu)[..., :5] - single.state.U[..., :5]).max(axis=(0, 1))
+    assert np.all(diff <= 5e-3 * update + 1e-12 * np.abs(U0).max(axis=(0, 1))), (diff, update)
+    for s in (single, g):
+        cache = s._newton_block_precond
+        assert cache.plan.mean == "two+cc" and cache._coarse_matrix is not None
