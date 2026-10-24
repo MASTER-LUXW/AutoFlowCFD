@@ -42,6 +42,7 @@ from numba import njit, prange
 from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, boundary_other_gradients
 from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point, viscous_common_flux_point
 from .pointwise import N_VISC_INPUTS, _SQRT_EPS, primitive_step
+from .transform import coarse_reduce_slot
 
 #: 每个面侧的耦合块来源：src0 单元、src1 单元、混合拆分面配对边界面的 owner。
 N_CROSS_SOURCES = 3
@@ -323,12 +324,17 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, vbc_kind,
                           owner_face_op, neighbor_face_op, ref_area_weight, E_nat, lift_nat,
                           ip_length, mu, Pr, Pr_t, c_ip, mach_ref,
-                          cross_offset, cross_data, cross_col):
+                          cross_offset, cross_data, cross_col,
+                          coarse_pair, coarse_rw, coarse_gamma, use_gamma, coarse_out, coarse_col):
     """一个颜色组内全部面的块贡献：对角部分累加到 `K_prism` / `K_tet`（float32）；
     `cross_offset` 非空（形状 `(n_faces, 2, 3)`）时耦合块写入 `cross_data`
-    （扁平 float32，槽位偏移见 `coupling.py::cross_layout`），列单元写入 `cross_col`。
+    （扁平 float32，槽位偏移见 `coupling.py::cross_layout`），列单元写入 `cross_col`；
+    `coarse_pair` 非空时耦合块当场约化成单元对 5x5 粗块累加到 `coarse_out`（`coarse.py` 模块文档，
+    `coarse_rw/coarse_gamma` 见 `transform.py::coarse_reduce_slot`），列单元写入 `coarse_col`。
     """
     want_cross = cross_offset.shape[0] > 0
+    want_coarse = coarse_pair.shape[0] > 0
+    side_cross = want_cross or want_coarse       # 两者都要界面核算出耦合块（numba：调用参数里不能有内联控制流）
     for fi in prange(face_indices.shape[0]):
         f = face_indices[fi]
         for side in range(2):
@@ -378,7 +384,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 c, n, E, L, ref_area_weight, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                 Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
                 Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_face_op, E_nat,
-                ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, want_cross)
+                ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, side_cross)
             k = slot[c]
             K = K_prism if is_p else K_tet
             for s in range(n):
@@ -401,3 +407,15 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                                 for b in range(5):
                                     cross_data[pos] = cross[src, s, o, t, b]
                                     pos += 1
+            if want_coarse:
+                for src in range(N_CROSS_SOURCES):
+                    p = coarse_pair[f, side, src]
+                    if p < 0:
+                        continue
+                    y = cross_cells[src]
+                    coarse_col[f, side, src] = y
+                    if y < 0:
+                        continue
+                    n_y = n_real_prism if y < n_prism else n_real_tet
+                    g_c = coarse_gamma[c] if use_gamma else coarse_gamma[0]
+                    coarse_reduce_slot(cross[src], n, n_y, coarse_rw[c], g_c, use_gamma, Q[y], coarse_out[p])

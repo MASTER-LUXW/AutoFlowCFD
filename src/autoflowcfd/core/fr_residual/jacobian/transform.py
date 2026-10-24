@@ -8,10 +8,15 @@
 对角块另加 `Gamma` 随状态变化的那一项 `d(Gamma R_raw)/dU_s |_{R_raw}`（只在 s = t）。
 耦合块在变换之前先把同一 (行, 列) 单元对的多个槽位求和（变换是线性的、且只
 依赖行列单元）。逐块并行、块内无共享写。
+
+块 Jacobi 档的粗校正只要单元对的 5x5 约化（`coarse.py`）：`coarse_reduce_slot` 对每个槽位做同一个变换后
+立即按行权重、列求和约化，`coarse_diag_kernel` 对收尾后的对角块做同样的约化。
 """
 
 import numpy as np
 from numba import njit, prange
+
+from .pointwise import primitive_jacobian_point
 
 
 @njit(cache=True, inline='always')
@@ -91,3 +96,52 @@ def finalize_pairs_kernel(data, base, n_r, n_c, first, n_slots, rows, cols, det,
                 for t in range(n_c):
                     for b in range(5):
                         out[u, s, a, t, b] = res[s, a, t, b]
+
+
+@njit(cache=True, inline='always')
+def coarse_reduce_slot(X, n_r, n_c, rw_r, gamma_r, use_gamma, Q_c, out):
+    """一个耦合槽位（原始变量空间、未除 det 的 `X`）约化成单元对 5x5 粗块并累加到 `out`：
+
+        out[a, d] += sum_s rw_r[s] * (G_s (sum_t X[s,:,t,:] TQ_t))[a, d]
+
+    `rw_r[s] = -w_s / det_s`（限制权重与 `R = -dU/dt` 的除 det、取负），`G_s` 为 `gamma_r[s]`（低马赫预处理）或
+    单位阵，`TQ_t` 由列单元第 `t` 个解点的原始变量 `Q_c[t]` 现算——与 `finalize_pairs_kernel` 对完整块做的
+    同一个变换，再对行按权重、对列直接求和（`time_integration/implicit/coarse/cell_coarse.py`）。
+    """
+    tq = np.empty((5, 5))
+    tmp = np.zeros((n_r, 5, 5))
+    for t in range(n_c):
+        primitive_jacobian_point(Q_c[t, 0], Q_c[t, 1], Q_c[t, 2], Q_c[t, 3], tq)
+        for s in range(n_r):
+            for e in range(5):
+                for d in range(5):
+                    acc = 0.0
+                    for b in range(5):
+                        acc += X[s, e, t, b] * tq[b, d]
+                    tmp[s, e, d] += acc
+    for s in range(n_r):
+        r = rw_r[s]
+        for a in range(5):
+            for d in range(5):
+                if use_gamma:
+                    acc = 0.0
+                    for e in range(5):
+                        acc += gamma_r[s, a, e] * tmp[s, e, d]
+                else:
+                    acc = tmp[s, a, d]
+                out[a, d] += r * acc
+
+
+@njit(cache=True, parallel=True)
+def coarse_diag_kernel(K, w, out):
+    """收尾后的对角块 `K (n, nr, 5, nr, 5)` 约化：`out[k] = sum_s w[k, s] sum_t K[k, s, :, t, :]`。"""
+    n_r = K.shape[1]
+    for k in prange(K.shape[0]):
+        for s in range(n_r):
+            ws = w[k, s]
+            if ws == 0.0:
+                continue
+            for a in range(5):
+                for t in range(n_r):
+                    for d in range(5):
+                        out[k, a, d] += ws * K[k, s, a, t, d]

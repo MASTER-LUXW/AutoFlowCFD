@@ -38,15 +38,9 @@ class CouplingBlocks:
         return int(sum(g.rows.size for g in self.groups))
 
 
-def cross_layout(flat, n_prism, n_real_prism, n_real_tet, n_var: int = 5, include_partner: bool = True):
-    """槽位布局：返回 `(offset, expected_col, total_size, slots)`。
-
-    `offset[f, side, src]`（`(n_faces,2,3)` int64，-1 表示该槽位不存在）是槽位在
-    扁平数组里的起点，`expected_col` 是该槽位的列单元（界面核写回的列单元必须
-    与它一致）；`slots` 是按分组排好序的 `(row_cell, col_cell, offset)` 与分组边界。
-    `n_var` 为每个解点的未知量个数（平均流 5、k-omega 2）；`include_partner` 为假时
-    不给混合拆分面配对边界面的 owner 留槽位（k-omega 的配对幽灵态只依赖本侧迹）。
-    """
+def cross_slots(flat, include_partner: bool = True):
+    """界面核输出的全部耦合槽位：`(rows, cols, keys)`，`keys[k] = (面, 侧, 来源)`，行 / 列单元为
+    `rows[k] / cols[k]`（未排序、同一单元对可出现多次）。`include_partner` 见 `cross_layout`。"""
     own = np.asarray(flat.owner_cell, dtype=np.int64)
     nei = np.asarray(flat.neighbor_cell, dtype=np.int64)
     bnd = np.asarray(flat.is_boundary, dtype=bool)
@@ -75,9 +69,19 @@ def cross_layout(flat, n_prism, n_real_prism, n_real_tet, n_var: int = 5, includ
             partner_owner = np.where(mixed_partner >= 0, own[np.maximum(mixed_partner, 0)], -1)
             add(has_mixed & (partner_owner != row_cell), row_cell, partner_owner, side, 2)
 
-    rows = np.concatenate(rows)
-    cols = np.concatenate(cols)
-    keys = np.concatenate(keys)
+    return np.concatenate(rows), np.concatenate(cols), np.concatenate(keys)
+
+
+def cross_layout(flat, n_prism, n_real_prism, n_real_tet, n_var: int = 5, include_partner: bool = True):
+    """槽位布局：返回 `(offset, expected_col, total_size, slots)`。
+
+    `offset[f, side, src]`（`(n_faces,2,3)` int64，-1 表示该槽位不存在）是槽位在
+    扁平数组里的起点，`expected_col` 是该槽位的列单元（界面核写回的列单元必须
+    与它一致）；`slots` 是按分组排好序的 `(row_cell, col_cell, offset)` 与分组边界。
+    `n_var` 为每个解点的未知量个数（平均流 5、k-omega 2）；`include_partner` 为假时
+    不给混合拆分面配对边界面的 owner 留槽位（k-omega 的配对幽灵态只依赖本侧迹）。
+    """
+    rows, cols, keys = cross_slots(flat, include_partner)
     n_row = np.where(rows < n_prism, n_real_prism, n_real_tet)
     n_col = np.where(cols < n_prism, n_real_prism, n_real_tet)
     group = 2 * (rows >= n_prism) + (cols >= n_prism)          # 0: P-P, 1: P-T, 2: T-P, 3: T-T

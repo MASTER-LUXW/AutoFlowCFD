@@ -47,10 +47,11 @@ from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 from .artificial_viscosity import add_scalar_coupling_kron_gamma, add_scalar_kron_gamma, artificial_diffusion_blocks
+from .coarse import add_scalar_coupling_coarse, coarse_pair_layout, finish_coarse_blocks
 from .coupling import cross_layout, finalize_coupling
 from .faces import add_face_blocks_color
 from .pointwise import _SQRT_EPS, primitive_jacobian, temperature_gradient_row
-from .transform import finalize_diag_kernel
+from .transform import coarse_diag_kernel, finalize_diag_kernel
 from .volume import VolumeSegment, add_volume_blocks
 from .wall_stress import add_wall_stress_blocks
 
@@ -117,9 +118,12 @@ def _ghost_perturbations(flat, Q, provider):
     return Qg0, QgP, HG, row
 
 
-def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want_coupling: bool = False):
+def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want_coupling: bool = False,
+                              coarse_weights=None):
     """返回 `(blocks_prism, blocks_tet)`（float32，`CellBlockJacobian` 布局）；
-    `want_coupling` 时再返回面邻居耦合块 `CouplingBlocks`（`coupling.py`，块 ILU 用）。
+    `want_coupling` 时再返回面邻居耦合块 `CouplingBlocks`（`coupling.py`，块 ILU 用）；`coarse_weights`
+    （`(n_cells, n_sps)` 限制权重）给出时再返回单元级粗块 `CoarseBlocks`（`coarse.py`，块 Jacobi 档的粗校正用，
+    不存完整耦合块；两者不同时装配）。
 
     Args:
         U: `(n_cells, n_sps, >=5)` 守恒变量（本 rank 的全部单元，含分布式 halo）。
@@ -180,6 +184,24 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
         cross_offset = np.zeros((0, 2, 3), dtype=np.int64)
         cross_data = np.zeros(0, dtype=np.float32)
         cross_col = cross_offset
+    want_coarse = coarse_weights is not None
+    if want_coarse and want_coupling:
+        raise ValueError("完整耦合块（块 ILU 档）与单元级粗块（块 Jacobi 档的粗校正）不同时装配")
+    if want_coarse:
+        w_c = np.ascontiguousarray(np.asarray(coarse_weights, dtype=np.float64).reshape(n_cells, n_sps))
+        layout = coarse_pair_layout(flat, n_cells)
+        coarse_pair = layout.pair
+        safe_det = np.where(w_c != 0.0, det, 1.0)
+        coarse_rw = np.ascontiguousarray(np.where(w_c != 0.0, -w_c / safe_det, 0.0))
+        coarse_gamma = _gamma_field(Q, ctx.mach_ref) if ctx.low_mach else np.zeros((1, 1, 5, 5), dtype=np.float32)
+        coarse_out = np.zeros((layout.rows.size, 5, 5))
+        coarse_col = -np.ones_like(coarse_pair)
+    else:
+        coarse_pair = np.zeros((0, 2, 3), dtype=np.int64)
+        coarse_rw = np.zeros((1, 1))
+        coarse_gamma = np.zeros((1, 1, 5, 5), dtype=np.float32)
+        coarse_out = np.zeros((0, 5, 5))
+        coarse_col = coarse_pair
     D_prism = np.ascontiguousarray(np.asarray(ctx.ops.D_native_prism_padded)[:npr, :npr])
     D_tet = np.ascontiguousarray(np.asarray(ctx.ops.D_native_tet_padded)[:nte, :nte])
     for color in range(flat.n_colors):
@@ -201,11 +223,14 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             flat.owner_face_op, flat.neighbor_face_op, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length,
             float(ctx.mu), float(ctx.Pr), float(ctx.Pr_t), float(c_ip),
-            float(ctx.mach_ref), cross_offset, cross_data, cross_col)
+            float(ctx.mach_ref), cross_offset, cross_data, cross_col,
+            coarse_pair, coarse_rw, coarse_gamma, bool(ctx.low_mach), coarse_out, coarse_col)
     del QgP, Qg0
     if want_coupling:
         if not np.array_equal(cross_col, expected_col):
             raise RuntimeError("耦合块槽位布局与界面核实际来源不一致（槽位缺写或列单元不同）")
+    if want_coarse and not np.array_equal(coarse_col, layout.expected_col):
+        raise RuntimeError("粗块单元对布局与界面核实际来源不一致（槽位缺写或列单元不同）")
 
     # ---- 除 det、取负、右乘 dQ/dU、左乘 Gamma ----
     # 对角块逐单元收尾，按单元分块、只在真实解点上构造 TQ/Gamma/dGamma（逐解点 (5,5)
@@ -217,7 +242,8 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
     det_c = np.ascontiguousarray(det, dtype=np.float64)
     # 人工粘性 `dU_k/dt += L_nu U_k`（nu 按步冻结）：Newton 块里直接加 `Gamma_s (-L_nu)[s,t]`，
     # 不经过 dQ/dU（见 artificial_viscosity.py）
-    av = None if ctx.nu_av is None else artificial_diffusion_blocks(mesh, ctx.ops, flat, ctx.nu_av, want_coupling)
+    av = None if ctx.nu_av is None else artificial_diffusion_blocks(mesh, ctx.ops, flat, ctx.nu_av,
+                                                                    want_coupling or want_coarse)
     for kind, (K, lo, n) in enumerate(((K_prism, 0, npr), (K_tet, n_prism, nte))):
         for k0 in range(0, K.shape[0], _FINALIZE_CHUNK_CELLS):
             k1 = min(k0 + _FINALIZE_CHUNK_CELLS, K.shape[0])
@@ -233,6 +259,14 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             return _transform_arrays(U5[cells, :n], Q[cells, :n], gamma_R[cells, :n], ctx)[1]
         add_wall_stress_blocks(ctx, K_prism, K_tet, U5, row_gamma if ctx.low_mach else None, n_prism, npr, nte)
     blocks = (K_prism.reshape(n_prism, npr * 5, npr * 5), K_tet.reshape(n_cells - n_prism, nte * 5, nte * 5))
+    if want_coarse:
+        # 对角粗块由收尾后（含 d(Gamma R)/dU、人工粘性、壁面模型）的 J_cc 求和
+        diag = np.zeros((n_cells, 5, 5))
+        coarse_diag_kernel(K_prism, np.ascontiguousarray(w_c[:n_prism, :npr]), diag[:n_prism])
+        coarse_diag_kernel(K_tet, np.ascontiguousarray(w_c[n_prism:, :nte]), diag[n_prism:])
+        if av is not None:
+            add_scalar_coupling_coarse(coarse_out, layout, av[2], w_c, coarse_gamma, bool(ctx.low_mach), n_cells)
+        return blocks + (finish_coarse_blocks(diag, layout, coarse_out),)
     if not want_coupling:
         return blocks
     # 耦合块只在块 ILU（预处理合计预算放得下，见 block_budget.py::plan_block_modes）时装配，行、列单元任意，
@@ -260,6 +294,29 @@ def _transform_arrays(U5, Q, gamma_R, ctx):
     return TQ, gamma, dgamma
 
 
+def _gamma_columns(Q, mach_ref):
+    """逐解点 `Gamma` 矩阵 `(n_cells, n_sps, 5, 5)`：`Gamma` 对残差线性，对单位残差作用即得各列
+    （`apply_low_mach_preconditioner` 就是残差用的那一个函数）。"""
+    from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+
+    shape = Q.shape[:2]
+    gamma = np.empty(shape + (5, 5))
+    for v in range(5):
+        e = np.zeros(shape + (5,))
+        e[..., v] = 1.0
+        gamma[..., :, v] = apply_low_mach_preconditioner(e, Q, mach_ref)
+    return gamma
+
+
+def _gamma_field(Q, mach_ref):
+    """全场 `Gamma`（float32，粗块约化的行因子用；按单元分块构造，不形成整场 float64 临时量）。"""
+    out = np.empty(Q.shape[:2] + (5, 5), dtype=np.float32)
+    for k0 in range(0, Q.shape[0], _FINALIZE_CHUNK_CELLS):
+        k1 = min(k0 + _FINALIZE_CHUNK_CELLS, Q.shape[0])
+        out[k0:k1] = _gamma_columns(Q[k0:k1], mach_ref)
+    return out
+
+
 def _gamma_matrices(Q, gamma_R, TQ, mach_ref):
     """逐解点 `Gamma` 矩阵与 `d(Gamma R_raw)/dU|_{R_raw}`（均为 `(n_cells, n_sps, 5, 5)`）。
 
@@ -268,16 +325,9 @@ def _gamma_matrices(Q, gamma_R, TQ, mach_ref):
     （`preconditioning.py::low_mach_preconditioner_state_jacobian`）再乘 `dQ/dU`。2026-10-22（I-25）以前对原始
     变量做前向差分：`Gamma R - R` 远小于 `R` 时舍入误差 `eps |R| / h` 使该项相对误差达 1e-5 量级。
     """
-    from autoflowcfd.core.utils.preconditioning import (
-        apply_low_mach_preconditioner, low_mach_preconditioner_state_jacobian,
-    )
+    from autoflowcfd.core.utils.preconditioning import low_mach_preconditioner_state_jacobian
 
-    shape = Q.shape[:2]
-    gamma = np.empty(shape + (5, 5))
-    for v in range(5):
-        e = np.zeros(shape + (5,))
-        e[..., v] = 1.0
-        gamma[..., :, v] = apply_low_mach_preconditioner(e, Q, mach_ref)
+    gamma = _gamma_columns(Q, mach_ref)
     R_raw = np.linalg.solve(gamma, gamma_R[..., None])[..., 0]
     dq = low_mach_preconditioner_state_jacobian(R_raw, Q, mach_ref)
     return gamma, np.einsum("csav,csvb->csab", dq, TQ)

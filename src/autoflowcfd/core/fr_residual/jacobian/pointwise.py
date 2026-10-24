@@ -42,29 +42,35 @@ def primitive_step(Q, v):
     return _SQRT_EPS * (abs(Q[v]) + speed + c + 1e-300)
 
 
+@njit(cache=True, inline='always')
+def primitive_jacobian_point(rho, u, v, w, out):
+    """一个点的 `dQ/dU`（`out` 为 `(5, 5)`，全部元素都被写）：只依赖密度与速度。"""
+    gm1 = GAMMA - 1.0
+    for a in range(5):
+        for b in range(5):
+            out[a, b] = 0.0
+    out[0, 0] = 1.0
+    out[1, 0] = -u / rho
+    out[1, 1] = 1.0 / rho
+    out[2, 0] = -v / rho
+    out[2, 2] = 1.0 / rho
+    out[3, 0] = -w / rho
+    out[3, 3] = 1.0 / rho
+    out[4, 0] = gm1 * 0.5 * (u * u + v * v + w * w)
+    out[4, 1] = -gm1 * u
+    out[4, 2] = -gm1 * v
+    out[4, 3] = -gm1 * w
+    out[4, 4] = gm1
+
+
 @njit(cache=True, parallel=True)
 def primitive_jacobian(U):
     """`dQ/dU`，U `(N, >=5)` 守恒变量 -> `(N, 5, 5)`。"""
     n = U.shape[0]
-    out = np.zeros((n, 5, 5))
-    gm1 = GAMMA - 1.0
+    out = np.empty((n, 5, 5))
     for k in prange(n):
         rho = U[k, 0]
-        u = U[k, 1] / rho
-        v = U[k, 2] / rho
-        w = U[k, 3] / rho
-        out[k, 0, 0] = 1.0
-        out[k, 1, 0] = -u / rho
-        out[k, 1, 1] = 1.0 / rho
-        out[k, 2, 0] = -v / rho
-        out[k, 2, 2] = 1.0 / rho
-        out[k, 3, 0] = -w / rho
-        out[k, 3, 3] = 1.0 / rho
-        out[k, 4, 0] = gm1 * 0.5 * (u * u + v * v + w * w)
-        out[k, 4, 1] = -gm1 * u
-        out[k, 4, 2] = -gm1 * v
-        out[k, 4, 3] = -gm1 * w
-        out[k, 4, 4] = gm1
+        primitive_jacobian_point(rho, U[k, 1] / rho, U[k, 2] / rho, U[k, 3] / rho, out[k])
     return out
 
 

@@ -5,6 +5,7 @@
     multilevel.py    多层预处理子（细层块 ILU 光滑 + 粗层 K 循环 + 最粗层直接解）
     global_coarse.py 分布式的全局粗校正（跨 rank 粗矩阵，各 rank 冗余直接解）
     selection.py     块 ILU 档的预处理构造（本地多层 / 块 ILU，分布式叠全局粗校正）
+    cell_coarse.py   块 Jacobi 档的单元级叠加性粗校正（P>=1 平均流，粗矩阵由解析装配器流式给出）
 """
 
 from .aggregation import build_hierarchy  # noqa: F401
