@@ -37,10 +37,11 @@ def unsupported_reason(*, order: int) -> Optional[str]:
 
 
 class MeanFlowBlockAssembler:
-    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]])`（主机 float32；
-    跨 rank 耦合块只在分布式给出，见 `select_rows`）。"""
+    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]] | [, coarse])`（主机
+    float32；跨 rank 耦合块只在分布式给出，见 `select_rows`；`coarse_weights` 由块缓存在单元级粗校正档设置，
+    此时给出单元级粗块 `coarse.py::CoarseBlocks`）。"""
 
-    __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling")
+    __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling", "coarse_weights")
 
     def __init__(self, *, mesh, ops, ghost_provider, mu, mach_ref, low_mach, mu_t, n_sps: int,
                  nu_av=None, flat=None, compact_state: Optional[Callable] = None, row_compact=None,
@@ -57,13 +58,16 @@ class MeanFlowBlockAssembler:
         self.compact_state = compact_state
         self.row_compact = None if row_compact is None else np.asarray(row_compact, dtype=np.int64)
         self.want_coupling = bool(want_coupling)
+        self.coarse_weights = None
 
     def __call__(self, u0_flat, r0_flat):
         u_dev = u0_flat.reshape(-1, self.n_sps, u0_flat.shape[-1])
         r = to_host(r0_flat).reshape(u_dev.shape[0], self.n_sps, -1)
         if self.row_compact is None:
             return assemble_mean_flow_blocks(self.ctx, to_host(u_dev), residual=r,
-                                             want_coupling=self.want_coupling)
+                                             want_coupling=self.want_coupling, coarse_weights=self.coarse_weights)
+        if self.coarse_weights is not None:
+            raise NotImplementedError("分布式单元级粗块尚未接入（I-234）")
         # halo 交换在状态自己的数组模块上做（多 GPU 的交换器收 cupy 数组），再搬回主机
         U = np.ascontiguousarray(to_host(self.compact_state(u_dev)))
         R = np.zeros(U.shape[:2] + (r.shape[-1],))

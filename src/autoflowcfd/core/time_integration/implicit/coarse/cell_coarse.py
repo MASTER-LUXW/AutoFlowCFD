@@ -81,6 +81,20 @@ def restriction_weights(quad_weights, real):
     return xp.where(negative[:, None], uniform, w)
 
 
+def mean_coarse_available(global_coarse, n_real_prism: int, n_real_tet: int) -> bool:
+    """平均流块 Jacobi 档能否叠加单元级粗校正：P>=1（每单元不止一个真实解点；P0 的块 Jacobi 本身就是单元级，
+    有面邻居耦合块时走块 ILU）且单机（`global_coarse` 为 None）。"""
+    return global_coarse is None and max(int(n_real_prism), int(n_real_tet)) > 1
+
+
+def mean_coarse_weights(positivity, cell_is_prism, n_sps: int, n_real_prism: int, n_real_tet: int):
+    """限制权重（`restriction_weights`），积分权重取正性限制器的 `W`（与状态同一数组模块）。"""
+    xp = positivity.xp
+    n_real = np.where(np.asarray(cell_is_prism, dtype=bool), int(n_real_prism), int(n_real_tet))
+    real = xp.asarray(np.arange(int(n_sps))[None, :] < n_real[:, None])
+    return restriction_weights(positivity.W, real)
+
+
 class CellCoarseTopology:
     """粗矩阵的稀疏结构（面邻居单元对，行内按列排序）与聚合层次：只依赖网格，跨装配复用。"""
 

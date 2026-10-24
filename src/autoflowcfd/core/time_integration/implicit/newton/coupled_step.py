@@ -61,6 +61,7 @@ from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from ..blocks.block_budget import plan_block_memory
 from ..blocks.block_jacobi import BlockJacobiCache
+from ..coarse.cell_coarse import mean_coarse_available, mean_coarse_weights
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
 from .jfnk import step_newton_krylov
@@ -145,17 +146,26 @@ class FrozenViscosityMeanResidual:
 
 
 class _BlockDiagonal:
-    """两个子系统预处理子的块对角组合（`PseudoTransientDiagonal` 接口）。"""
+    """两个子系统预处理子的块对角组合（`PseudoTransientDiagonal` 接口）。
 
-    __slots__ = ("mean", "turb", "dtau", "flexible", "nonlinear_columns")
+    部分灵活（`gmres.py` 模块文档）：整块非线性的列（块 ILU 档的多层 K 循环）标在 `nonlinear_columns`；平均流
+    块 Jacobi 叠加单元级粗校正时（`coarse/cell_coarse.py`），它的非线性部分只是粗层向量，经 `coarse_rows`
+    交给 GMRES，平均流列本身不标为非线性。"""
+
+    __slots__ = ("mean", "turb", "dtau", "flexible", "nonlinear_columns", "coarse_rows", "n_coarse_cols",
+                 "_mean_cols_nonlinear")
 
     def __init__(self, mean, turb, dtau, n_turb: int):
         self.mean, self.turb, self.dtau = mean, turb, dtau
         self.flexible = bool(mean.flexible or turb.flexible)
-        # 只有一块非线性时 GMRES 只为那几列存预处理向量（`gmres.py` 模块文档"部分灵活"）
+        self.coarse_rows = getattr(mean, "coarse_rows", None)
+        self.n_coarse_cols = mean.n_coarse_cols if self.coarse_rows is not None else 0
+        self._mean_cols_nonlinear = bool(mean.flexible) and self.coarse_rows is None
+        turb_nl = bool(turb.flexible)
+        # 只有一部分列整列非线性时 GMRES 只为那几列存预处理向量；两块整列同为非线性时整份存
         self.nonlinear_columns = (
-            np.array([mean.flexible] * N_MEAN_FLOW_VARS + [turb.flexible] * int(n_turb), dtype=bool)
-            if mean.flexible != turb.flexible else None)
+            np.array([self._mean_cols_nonlinear] * N_MEAN_FLOW_VARS + [turb_nl] * int(n_turb), dtype=bool)
+            if self._mean_cols_nonlinear != turb_nl else None)
 
     # 两块的作用都只读输入、返回新数组（接受非连续的列切片），所以这里不再先复制输入
     def apply(self, v):
@@ -164,10 +174,21 @@ class _BlockDiagonal:
         out[:, N_MEAN_FLOW_VARS:] = self.turb.apply(v[:, N_MEAN_FLOW_VARS:])
         return out
 
-    def apply_linear(self, v):
-        """线性那一块的作用（另一块的列置零，由 GMRES 用存下来的预处理向量填上）。"""
+    def apply_split(self, v):
+        """平均流粗校正之外的作用与粗层向量（`linear_solve.py::_SolveSpaceSplit`）。"""
         out = array_module(v).empty_like(v)
-        out[:, :N_MEAN_FLOW_VARS] = 0.0 if self.mean.flexible else self.mean.apply(v[:, :N_MEAN_FLOW_VARS])
+        out[:, :N_MEAN_FLOW_VARS], c = self.mean.apply_split(v[:, :N_MEAN_FLOW_VARS])
+        out[:, N_MEAN_FLOW_VARS:] = self.turb.apply(v[:, N_MEAN_FLOW_VARS:])
+        return out, c
+
+    def apply_linear(self, v):
+        """线性部分的作用（整列非线性的列置零、平均流不含粗校正，由 GMRES 用存下来的量补上）。"""
+        out = array_module(v).empty_like(v)
+        vm = v[:, :N_MEAN_FLOW_VARS]
+        if self.coarse_rows is not None:
+            out[:, :N_MEAN_FLOW_VARS] = self.mean.apply_linear(vm)
+        else:
+            out[:, :N_MEAN_FLOW_VARS] = 0.0 if self.mean.flexible else self.mean.apply(vm)
         out[:, N_MEAN_FLOW_VARS:] = 0.0 if self.turb.flexible else self.turb.apply(v[:, N_MEAN_FLOW_VARS:])
         return out
 
@@ -194,9 +215,10 @@ class CoupledBlockPreconditioner:
 
     @property
     def flexible_fraction(self) -> float:
-        """需要存预处理向量的列占比（重启长度按它分内存，`linear_solve.py::krylov_restart`）。"""
-        n_flex = N_MEAN_FLOW_VARS * self.mean.flexible + self.n_turb * self.turb.flexible
-        return n_flex / (N_MEAN_FLOW_VARS + self.n_turb)
+        """需要存预处理向量的分量占比（重启长度按它分内存，`linear_solve.py::krylov_restart`）：两个缓存各自的
+        占比按列数加权。"""
+        return ((N_MEAN_FLOW_VARS * self.mean.flexible_fraction + self.n_turb * self.turb.flexible_fraction)
+                / (N_MEAN_FLOW_VARS + self.n_turb))
 
     def _with_assemblers(self, u0, action: str, r0, scales, dtau):
         be = self.be
@@ -278,8 +300,9 @@ def _caches(solver, backend):
         n_real_prism, n_real_tet = real_sps_per_cell(int(backend.order))
         cell_is_prism = np.asarray(backend.cell_is_prism, dtype=bool)
         n_turb = int(backend.turb.model.n_transported)
+        mean_coarse = mean_coarse_available(backend.coarse_context(), n_real_prism, n_real_tet)
         plan = plan_block_memory(backend.red, cell_is_prism, backend.n_sps, n_real_prism, n_real_tet,
-                                 N_MEAN_FLOW_VARS, n_turb)
+                                 N_MEAN_FLOW_VARS, n_turb, mean_coarse=mean_coarse)
         common = dict(cell_is_prism=cell_is_prism, n_sps=backend.n_sps, plan=plan,
                       n_real_prism=n_real_prism, n_real_tet=n_real_tet, red=backend.red,
                       colors=backend.cell_colors(), global_coarse=backend.coarse_context())
@@ -288,7 +311,9 @@ def _caches(solver, backend):
                 "block": BlockJacobiCache(n_var=n_turb, **common)}
         if need_mean:
             solver._newton_block_precond = BlockJacobiCache(
-                n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True, **common)
+                n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True,
+                coarse_weights=mean_coarse_weights(backend.positivity, cell_is_prism, backend.n_sps,
+                                                   n_real_prism, n_real_tet) if mean_coarse else None, **common)
     return solver._newton_block_precond, solver._newton_turb_state["block"]
 
 

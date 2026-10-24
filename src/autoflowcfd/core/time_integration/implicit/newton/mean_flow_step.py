@@ -26,6 +26,7 @@ from loguru import logger
 
 from ..blocks.block_budget import plan_block_memory
 from ..blocks.block_jacobi import BlockJacobiCache
+from ..coarse.cell_coarse import mean_coarse_available, mean_coarse_weights
 from .forcing import EisenstatWalkerForcing
 from .jfnk import step_newton_krylov
 from ..reductions import LocalReductions
@@ -192,12 +193,16 @@ def step_mean_flow_newton(
             raise ValueError(f"状态行数 {u_flat.shape[0]} 不是单元数 {n_cells} 的整数倍")
         n_sps = u_flat.shape[0] // n_cells
         # 平均流单独做 Newton 步只在没有输运型湍流方程时（层流、LES 一类）：预处理预算由它独占
-        plan = plan_block_memory(red, cell_is_prism, n_sps, n_real_prism, n_real_tet, N_MEAN_FLOW_VARS, 0)
+        mean_coarse = block_assembler is not None and mean_coarse_available(global_coarse, n_real_prism, n_real_tet)
+        plan = plan_block_memory(red, cell_is_prism, n_sps, n_real_prism, n_real_tet, N_MEAN_FLOW_VARS, 0,
+                                 mean_coarse=mean_coarse)
         solver._newton_block_precond = BlockJacobiCache(
             cell_is_prism=cell_is_prism, colors=cell_colors(), plan=plan,
             n_sps=n_sps, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=N_MEAN_FLOW_VARS, red=red, coupling_graph=coupling_graph,
-            global_coarse=global_coarse)
+            global_coarse=global_coarse,
+            coarse_weights=mean_coarse_weights(positivity, cell_is_prism, n_sps, n_real_prism, n_real_tet)
+            if mean_coarse else None)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(

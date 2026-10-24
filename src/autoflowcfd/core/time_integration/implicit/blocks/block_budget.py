@@ -1,8 +1,13 @@
 """AutoFlowCFD V2.0 - 单元块预处理的内存预算与分档（平均流与湍流两个缓存共享）。
 
 档位偏好：块 ILU（对角块 + 逆 + 面邻居耦合块）> 块 Jacobi 两份（`J_cc` 与逆）> 单份
-（冻结 dtau，`block_jacobi.py` 模块文档"内存"）> 不装配（对角预处理）。多层预处理的粗层
+（冻结 dtau，`block_jacobi.py` 模块文档"内存"）> 不装配（对角预处理）。块 ILU 档多层预处理的粗层
 （`coarse/`）只有单元均值量级的未知量，不进预算。
+
+P>=1 平均流（`mean_coarse`）在块 ILU 与两份之间另有两档"两份 / 单份 + 单元级叠加性粗校正"（`two+cc`、
+`single+cc`，`coarse/cell_coarse.py`）：粗校正在大 CFL 下把块 Jacobi 停滞的线性求解变成可解（cube_demo 粗网格
+SA P2 CFL 4000：294 次停在 0.551 -> 277 次达到 0.1），比块 Jacobi 两份与单份之间的差别大得多，所以单份 + 粗校正
+排在两份之前。它的内存（`estimate_cell_coarse_bytes`）按单元数计，不随阶数增长。
 
 ## 预算按实际可用内存定（2026-10-15）
 
@@ -40,6 +45,12 @@ import numpy as np
 
 #: 档位偏好顺序：块 ILU > 块 Jacobi 两份 > 单份（冻结 dtau）> 不装配（对角预处理）。
 BLOCK_MODES = ("ilu", "two", "single")
+
+#: P>=1 平均流的档位偏好（模块文档）：`+cc` 为叠加单元级粗校正。
+MEAN_COARSE_MODES = ("ilu", "two+cc", "single+cc", "two", "single")
+
+#: 单元级粗校正标记（档位名后缀）。
+COARSE_SUFFIX = "+cc"
 
 #: 估计耦合块数用的每单元平均面邻居数（四面体 4、棱柱 5，内部单元为主）。
 _MEAN_FACE_NEIGHBORS = 4.2
@@ -91,29 +102,48 @@ def estimate_ilu_bytes(n_prism: int, n_tet: int, n_real_prism: int,
 BlockSizes = Tuple[int, int, int, int]
 
 
+#: 粗校正内存估计用的系数（字节 / 单元）：常驻的粗矩阵（对角块 float64、面邻居耦合块 float32、粗层 ILU 分解）
+#: 加上构造时最大的瞬时量——粗层 Galerkin 三元组（每块 25 个 int64 行号、int64 列号、float64 值）与装配时的
+#: 单元对累加数组（float64），两者不同时存在，取大者。
+_COARSE_RESIDENT_PER_CELL = 25 * (8 + _MEAN_FACE_NEIGHBORS * 4 + 4)
+_COARSE_TRANSIENT_PER_CELL = (1 + _MEAN_FACE_NEIGHBORS) * 25 * 24
+
+
+def estimate_cell_coarse_bytes(n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int) -> int:
+    """单元级粗校正（`coarse/cell_coarse.py`）的字节数：常驻部分 + 构造瞬时量 + 装配时的逐解点 `Gamma` 场
+    （float32，`(单元, 槽位, 5, 5)`，低马赫预处理时才有；按有计，保守）。"""
+    n = n_prism + n_tet
+    n_sps = max(n_real_prism if n_prism else 0, n_real_tet if n_tet else 0)
+    return int(n * (_COARSE_RESIDENT_PER_CELL + _COARSE_TRANSIENT_PER_CELL) + n * n_sps * 25 * 4)
+
+
 def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
                      n_var: int) -> int:
-    """某一档（`BLOCK_MODES`）的字节数。"""
+    """某一档（`BLOCK_MODES` / `MEAN_COARSE_MODES`）的字节数。"""
     if mode == "ilu":
         return estimate_ilu_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
+    base, coarse = (mode[:-len(COARSE_SUFFIX)], True) if mode.endswith(COARSE_SUFFIX) else (mode, False)
     two = estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
-    return two if mode == "two" else two // 2
+    extra = estimate_cell_coarse_bytes(n_prism, n_tet, n_real_prism, n_real_tet) if coarse else 0
+    return (two if base == "two" else two // 2) + extra
 
 
-def _best_mode(budget: int, sizes: BlockSizes, n_var: int) -> Optional[str]:
-    for mode in BLOCK_MODES:
+def _best_mode(budget: int, sizes: BlockSizes, n_var: int, modes=BLOCK_MODES) -> Optional[str]:
+    for mode in modes:
         if block_mode_bytes(mode, *sizes, n_var) <= budget:
             return mode
     return None
 
 
-def plan_block_modes(sizes: BlockSizes, n_mean: int, n_turb: int, budget: int) -> Tuple[Optional[str], Optional[str]]:
+def plan_block_modes(sizes: BlockSizes, n_mean: int, n_turb: int, budget: int,
+                     mean_coarse: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """在合计预算 `budget` 内为平均流（`n_mean` 个未知量）与湍流（`n_turb` 个，0 为没有湍流缓存）选档，
     返回 `(平均流档, 湍流档)`；None 表示一档也放不下（对角预处理）。`sizes = (n_prism, n_tet, n_real_prism,
-    n_real_tet)`。"""
+    n_real_tet)`。`mean_coarse`：平均流可用单元级粗校正档（模块文档）。"""
     reserve = block_mode_bytes("single", *sizes, n_turb) if n_turb else 0
+    modes = MEAN_COARSE_MODES if mean_coarse else BLOCK_MODES
     # 平均流优先：留出湍流单份后放不下时不再预留（湍流在剩余里取档，最坏退回对角预处理）
-    mean_mode = _best_mode(budget - reserve, sizes, n_mean) or _best_mode(budget, sizes, n_mean)
+    mean_mode = _best_mode(budget - reserve, sizes, n_mean, modes) or _best_mode(budget, sizes, n_mean, modes)
     if not n_turb:
         return mean_mode, None
     used = 0 if mean_mode is None else block_mode_bytes(mean_mode, *sizes, n_mean)
@@ -139,18 +169,19 @@ class BlockPlan:
 
 
 def plan_for_budget(cell_is_prism, n_real_prism: int, n_real_tet: int, n_mean: int, n_turb: int, budget: int,
-                    available: Optional[int] = None, reserve: int = 0, restart_cap: Optional[int] = None) -> BlockPlan:
+                    available: Optional[int] = None, reserve: int = 0, restart_cap: Optional[int] = None,
+                    mean_coarse: bool = False) -> BlockPlan:
     """在给定合计预算下为两个缓存定档（`plan_block_memory` 先由可用内存算出预算再调它；测试直接给预算）。"""
     cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
     n_prism = int(cell_is_prism.sum())
     sizes = (n_prism, int(cell_is_prism.size - n_prism), n_real_prism, n_real_tet)
-    mean, turb = plan_block_modes(sizes, n_mean, n_turb, int(budget))
+    mean, turb = plan_block_modes(sizes, n_mean, n_turb, int(budget), mean_coarse)
     return BlockPlan(mean, turb, int(budget), int(budget if available is None else available), int(reserve),
                      restart_cap)
 
 
 def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_tet: int,
-                      n_mean: int, n_turb: int) -> BlockPlan:
+                      n_mean: int, n_turb: int, mean_coarse: bool = False) -> BlockPlan:
     """按本 rank 当前可用内存为两个块缓存定档（模块文档）。分布式下各 rank 的预算取全局最小，档位全局一致。
 
     Args:
@@ -159,6 +190,7 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
         n_sps: 每单元槽位数（原生基的统一槽位，含零填充）。
         n_real_prism, n_real_tet: 两类单元的真实解点数。
         n_mean, n_turb: 平均流与湍流未知量个数（没有湍流缓存时 `n_turb = 0`）。
+        mean_coarse: 平均流可用单元级粗校正档（模块文档）。
     """
     from autoflowcfd.core.utils.system_memory import available_bytes
 
@@ -181,13 +213,16 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
         reserve = allocation + min(MEMORY_HEADROOM, allocation + best_blocks)
         budget = int(red.min(red.xp.asarray([float(max(available - reserve, 0))])))
         return plan_for_budget(cell_is_prism, n_real_prism, n_real_tet, n_mean, n_turb, budget, available, reserve,
-                               restart_cap)
+                               restart_cap, mean_coarse)
+
+    # 单元级粗校正时平均流只为粗层向量（每单元 n_mean 个数）存预处理向量（`gmres.py` 模块文档"部分灵活"）
+    coarse_fraction = cell_is_prism.size * n_mean / max(real_entries, 1) if mean_coarse else 0.0
 
     def plan_at(restart_cap: Optional[int]) -> BlockPlan:
         # 只有块 ILU 档的那一块会用多层（非线性）预处理、要存预处理向量（`gmres.py` 模块文档"部分灵活"）。先按
-        # "平均流线性、湍流非线性"规划；平均流选到块 ILU 时它也变成非线性，按整份灵活重新规划（结果再降档也
-        # 安全：预留只多不少）。
-        first = plan(n_turb / n_vars, restart_cap)
+        # "平均流线性（或只有粗层向量）、湍流非线性"规划；平均流选到块 ILU 时它也变成非线性，按整份灵活重新规划
+        # （结果再降档也安全：预留只多不少）。
+        first = plan(n_turb / n_vars + coarse_fraction, restart_cap)
         return first if first.mean != "ilu" else plan(1.0, restart_cap)
 
     def complete(p: BlockPlan) -> bool:

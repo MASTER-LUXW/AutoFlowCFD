@@ -70,6 +70,13 @@ Krylov 基（约 4.8 GiB）共存于 31.5 GB 开发机只能是一份。
 
 一份也放不下时不装配、退回对角预处理并打 WARNING（例如 P3 棱柱一块 200x200，
 79 万单元就要上百 GB）。
+
+## 单元级粗校正（`two+cc` / `single+cc` 档）
+
+P>=1 平均流放不下块 ILU 时，块 Jacobi 之外叠加单元级粗校正（`coarse/cell_coarse.py`）：每次装配同时请求
+单元对 5x5 粗块（解析装配器在界面核里流式约化，`fr_residual/jacobian/coarse.py`），粗矩阵的稀疏结构与聚合
+层次只依赖网格、跨装配复用；粗层近似逆按伪时间项与块 ILU 档的分解同一判据复用（`DTAU_REBUILD_RATIO` /
+`PTC_NEGLIGIBLE`）。
 """
 
 from typing import TYPE_CHECKING, Any, Optional
@@ -77,7 +84,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import numpy as np
 from loguru import logger
 
-from .block_budget import BlockPlan, block_mode_bytes
+from .block_budget import COARSE_SUFFIX, BlockPlan, block_mode_bytes
 from .cell_block_inverse import CellBlockJacobiPreconditioner, invert_blocks_in_place
 from .cell_blocks import CellBlockJacobian
 from .precond_shift import block_diagonal_scale, shifted_dtau
@@ -122,12 +129,14 @@ class BlockJacobiCache:
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
                  "_coupling_graph_fn", "_coupling_graph", "kind", "refresh_slack",
                  "single_copy", "_inverted_dtau", "_coarse", "cross",
-                 "_factored", "_factored_dtau", "_ptc_diag", "shifted", "plan")
+                 "_factored", "_factored_dtau", "_ptc_diag", "shifted", "plan",
+                 "cell_coarse", "_coarse_weights", "_coarse_weights_host", "_real_slots", "_coarse_topology",
+                 "_coarse_matrix", "_coarse_solve", "_coarse_dtau")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int, plan: BlockPlan,
                  red: Optional[LocalReductions] = None, coupling_graph=None, with_turbulence: bool = False,
-                 global_coarse=None):
+                 global_coarse=None, coarse_weights=None):
         """`colors`：块装配用的单元着色（单机 `coloring.greedy_cell_coloring`；分布式
         是全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。
 
@@ -145,6 +154,9 @@ class BlockJacobiCache:
 
         `global_coarse`（`coarse.CoarseCommContext`，分布式后端给出）：块 ILU 档在本 rank 的
         预处理之外再叠全局粗校正（`coarse/global_coarse.py`），装配器须同时给出跨 rank 耦合块。
+
+        `coarse_weights`：`(n_cells, n_sps)` 单元级粗校正的限制权重（`coarse/cell_coarse.py::restriction_weights`，
+        与状态同一数组模块）；档位带 `+cc` 时必须给出。
         """
         self.red = red if red is not None else LocalReductions()
         self.n_var = int(n_var)
@@ -174,7 +186,23 @@ class BlockJacobiCache:
         mode = plan.turbulence if self.kind.startswith("turbulence") else plan.mean
         # 块 ILU 要面邻居耦合块（解析装配或 P0 差分装配给出）
         self.use_ilu = mode == "ilu"
-        self.single_copy = mode == "single"
+        self.single_copy = mode is not None and mode.startswith("single")
+        self.cell_coarse = mode is not None and mode.endswith(COARSE_SUFFIX)
+        self._coarse_weights = coarse_weights if self.cell_coarse else None
+        self._coarse_weights_host = None
+        self._real_slots = None
+        self._coarse_topology: Any = None       # 单元级粗校正：`CellCoarseTopology`（跨装配复用）
+        self._coarse_matrix: Any = None         # 本次装配的 `CellCoarseMatrix`
+        self._coarse_solve: Any = None          # 按 `_coarse_dtau` 构造的 `CellCoarseSolve`
+        self._coarse_dtau = None
+        if self.cell_coarse:
+            if coarse_weights is None:
+                raise ValueError("单元级粗校正档需要限制权重（coarse_weights）")
+            from autoflowcfd.core.utils.array_module import to_host
+
+            self._coarse_weights_host = np.ascontiguousarray(to_host(coarse_weights), dtype=np.float64)
+            n_real = np.where(self.cell_is_prism, n_real_prism, n_real_tet)
+            self._real_slots = self.red.xp.asarray(np.arange(n_sps)[None, :] < n_real[:, None])
         self.disabled_reason = None
         from ..coarse import CoarsePreconditionerFactory
         self._coarse = CoarsePreconditionerFactory(max(n_real_prism, n_real_tet) > 1, global_coarse)
@@ -255,10 +283,15 @@ class BlockJacobiCache:
         """块 ILU 档：按 `_factored_dtau` 做的分解对当前 dtau 是否已过时（判据见 `preconditioner`）。"""
         if self._factored is None:
             return True
-        if not self._dtau_drifted(dtau_flat, self._factored_dtau):
+        return self._stale_against(dtau_flat, self._factored_dtau)
+
+    def _stale_against(self, dtau_flat, ref) -> bool:
+        """依赖 dtau 的构造（块 ILU 分解、单元级粗层近似逆）按 `ref` 做的是否对当前 dtau 已过时：几何平均比值
+        超过 `DTAU_REBUILD_RATIO`，除非伪时间项在两个时刻都已可忽略（`PTC_NEGLIGIBLE`）。"""
+        if not self._dtau_drifted(dtau_flat, ref):
             return False
         return not (self._ptc_relative(dtau_flat) < PTC_NEGLIGIBLE
-                    and self._ptc_relative(self._factored_dtau) < PTC_NEGLIGIBLE)
+                    and self._ptc_relative(ref) < PTC_NEGLIGIBLE)
 
     def stale_budget(self) -> Optional[int]:
         """复用中的 `J_cc`（`age > 0`）在本步的 GMRES 迭代预算：超过它就说明
@@ -295,10 +328,19 @@ class BlockJacobiCache:
         self._factored = None
         self._factored_dtau = None
         self._ptc_diag = None
+        self._coarse_matrix = None
+        self._coarse_solve = None
+        self._coarse_dtau = None
+        if self.cell_coarse and self.assembler is None:
+            raise RuntimeError("单元级粗校正档要解析装配器给出粗块（P>=1 才有这一档）")
         if self.assembler is not None:
             self.assembler.want_coupling = self.use_ilu
+            if self.cell_coarse:
+                self.assembler.coarse_weights = self._coarse_weights_host
             out = self.assembler(u0_flat, r0_flat)
             blocks_prism, blocks_tet = out[0], out[1]
+            if self.cell_coarse:
+                self._set_coarse_matrix(out[2])
             if self.use_ilu:
                 from .block_ilu import BlockCouplingStructure
                 n_real = np.where(self.cell_is_prism, self.n_real_prism, self.n_real_tet)
@@ -341,6 +383,29 @@ class BlockJacobiCache:
                        else f"差分装配 {self.jac.n_residual_evals} 次残差求值")
                     + f"，{time.time() - t0:.1f}s）")
 
+    def _set_coarse_matrix(self, coarse) -> None:
+        """装配给出的单元级粗块 -> 粗矩阵（稀疏结构与聚合层次首次构造后复用，单元对必须与首次一致）。"""
+        from ..coarse.cell_coarse import CellCoarseMatrix, CellCoarseTopology
+
+        if self._coarse_topology is None:
+            self._coarse_topology = CellCoarseTopology(self.cell_is_prism.size, coarse.rows, coarse.cols, self.n_var)
+        elif not self._coarse_topology.matches(coarse.rows, coarse.cols):
+            raise RuntimeError("单元级粗块的单元对与首次装配不一致（网格拓扑不应在缓存生命周期内变化）")
+        self._coarse_matrix = CellCoarseMatrix(self._coarse_topology, coarse.diag, coarse.blocks)
+
+    def _coarse_corrected(self, base, dtau_flat):
+        """块 Jacobi 叠加单元级粗校正；粗层近似逆按 `_factorization_stale` 的同一判据复用。"""
+        from ..coarse.cell_coarse import CellCoarseSolve, CoarseCorrectedPreconditioner
+
+        if self._coarse_solve is None or self._stale_against(dtau_flat, self._coarse_dtau):
+            self._coarse_solve = None    # 先释放旧的，不同时持有两份
+            mat = self._coarse_matrix
+            self._coarse_solve = CellCoarseSolve(mat, mat.ptc_diagonal(self._coarse_weights_host, dtau_flat,
+                                                                       self.n_sps))
+            self._coarse_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
+        return CoarseCorrectedPreconditioner(base, self._coarse_solve, self._coarse_weights, self._real_slots,
+                                             self.n_sps)
+
     def _fd_coupling_graph(self):
         """差分装配要不要同时截取耦合块：P0（每单元一个真实解点）、内存允许块 ILU、
         后端给了耦合图时返回 `CouplingGraph`，否则 None（只装配对角块）。"""
@@ -357,14 +422,22 @@ class BlockJacobiCache:
 
     @property
     def flexible_fraction(self) -> float:
-        """需要存预处理向量的列占比：单一缓存整体灵活或整体线性（`linear_solve.py::krylov_restart`）。"""
+        """需要存预处理向量的分量占比（`linear_solve.py::krylov_restart`）：多层 K 循环整体灵活为 1；单元级粗校正
+        只存粗层向量（每单元 `n_var` 个数，相对真实分量的占比）；线性为 0。"""
+        if self.disabled_reason is None and self._coarse_matrix is not None:
+            n_real = np.where(self.cell_is_prism, self.n_real_prism, self.n_real_tet)
+            return float(self.cell_is_prism.size / n_real.sum())
         return 1.0 if self.flexible else 0.0
 
     @property
     def flexible(self) -> bool:
-        """`preconditioner()` 给出的是否是非线性预处理（多层 K 循环），GMRES 据此走灵活模式。
-        `begin_step` 之后才有定论（耦合结构由首次装配给出）。"""
-        return self.disabled_reason is None and self.coupling is not None and self._coarse.flexible(self.coupling)
+        """`preconditioner()` 给出的是否是非线性预处理（多层 K 循环、单元级粗校正的粗层 K 循环），GMRES 据此走
+        灵活模式。`begin_step` 之后才有定论（耦合结构由首次装配给出）。"""
+        if self.disabled_reason is not None:
+            return False
+        if self._coarse_matrix is not None:
+            return True
+        return self.coupling is not None and self._coarse.flexible(self.coupling)
 
     def preconditioner(self, dtau_flat: np.ndarray, n_var: int):
         """给定 `dtau` 下的预处理子（`begin_step` 之后调用，可多次）。块 ILU 档交给
@@ -382,7 +455,8 @@ class BlockJacobiCache:
             raise RuntimeError("取预处理子之前须先装配单元块 Jacobian")
         dtau_flat = self._preconditioner_dtau(dtau_flat)
         if self.coupling is None:
-            return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
+            base = CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
+            return base if self._coarse_matrix is None else self._coarse_corrected(base, dtau_flat)
         if self._factorization_stale(dtau_flat):
             self._factored = None        # 先释放旧分解，不同时持有两份
             self._factored = self._coarse.make(self.jac, self.coupling, self.cross, dtau_flat)
