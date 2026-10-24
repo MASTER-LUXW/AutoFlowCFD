@@ -471,3 +471,20 @@ def test_restart_is_shortened_only_as_far_as_needed_to_fit_every_cache(monkeypat
     assert hopeless.restart_cap is None and (hopeless.mean is None or hopeless.turbulence is None)
     # 放得下时不缩
     assert plan(short_by + 2 ** 30).restart_cap is None
+
+
+def test_joint_planning_keeps_turbulence_ilu_over_a_mean_flow_upgrade():
+    """两档联合选取：湍流块 ILU 优先于平均流从单份升到两份（2026-10-24 实测：cube_demo 粗网格 SA P2 同一状态，
+    平均流两份 + 湍流两份每步 GMRES 59~71 次，平均流单份 + 湍流块 ILU 20~35 次；此前"平均流先取最好一档"在可用
+    预算 9.54 GiB 时选成前者）。平均流档位类别（块 ILU > 粗校正 > 块 Jacobi）仍排在湍流之前。"""
+    sizes = (90649, 195744, 18, 10)                    # cube_demo 粗网格 P2
+    gib = 2 ** 30
+    assert bb.plan_block_modes(sizes, 5, 1, int(9.54 * gib)) == ("single", "ilu")
+    assert bb.plan_block_modes(sizes, 5, 1, int(9.54 * gib), mean_coarse=True) == ("single+cc", "ilu")
+    # 两份 + 粗校正放得下但挤掉湍流块 ILU 时取单份 + 粗校正 + 湍流块 ILU
+    two_cc, turb_ilu = bb.block_mode_bytes("two+cc", *sizes, 5), bb.block_mode_bytes("ilu", *sizes, 1)
+    assert bb.plan_block_modes(sizes, 5, 1, two_cc + turb_ilu - 1, mean_coarse=True) == ("single+cc", "ilu")
+    assert bb.plan_block_modes(sizes, 5, 1, two_cc + turb_ilu, mean_coarse=True) == ("two+cc", "ilu")
+    # 平均流档位类别优先：块 ILU 放得下就用，哪怕湍流只能单份
+    mean_ilu, turb_single = bb.block_mode_bytes("ilu", *sizes, 5), bb.block_mode_bytes("single", *sizes, 1)
+    assert bb.plan_block_modes(sizes, 5, 1, mean_ilu + turb_single, mean_coarse=True) == ("ilu", "single")

@@ -32,8 +32,17 @@ cube_demo 粗网格（28.6 万单元：9.06 万棱柱 + 19.6 万四面体）SA P
 
 ## 两个缓存共享一个预算
 
-平均流优先：它在"给湍流留出单份"之后的预算里取最好的一档；湍流在平均流选定之后的剩余里取最好的
-一档（`plan_block_modes`，两个缓存由调用方一次规划）。湍流未知量个数由模型给出（SA 1 个、SST 2 个）。
+两个缓存的档位联合选取（`plan_block_modes`，两个缓存由调用方一次规划）：在预算内枚举全部组合，按下列次序
+逐项比较取最好的一组——
+
+1. 平均流有块预处理；2. 湍流有块预处理（给湍流留出单份优先于平均流升档）；
+3. 平均流档位类别：块 ILU > 单元级粗校正（`+cc`）> 块 Jacobi；
+4. 湍流是否块 ILU；5. 平均流两份 > 单份；6. 湍流两份 > 单份。
+
+第 4 条排在第 5 条之前是实测（2026-10-24，cube_demo 粗网格 SA P2 第 300 步状态、CFL 400 起 15 步）：此前
+"平均流先在留出湍流单份后的预算里取最好一档、湍流取剩余"，可用内存 20.7 GiB 时选成平均流两份（9.12 GiB）+
+湍流两份（0.36 GiB），每步 GMRES 59~71 次；平均流单份 + 湍流块 ILU（1.07 GiB，更省内存）同一状态 20~35 次。
+湍流块 ILU 的多层 K 循环远比平均流两份与单份（只差冻结 dtau）之间的差别大。湍流未知量个数由模型给出（SA 1 个、SST 2 个）。
 2026-10-15 以前这里按"湍流就是 2 个变量"写死，SA（1 个变量）的湍流缓存走"不在合计预算内"的分支、
 独占全部预算，平均流给它预留的又是 2 个变量的单份。
 """
@@ -128,26 +137,26 @@ def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_r
     return (two if base == "two" else two // 2) + extra
 
 
-def _best_mode(budget: int, sizes: BlockSizes, n_var: int, modes=BLOCK_MODES) -> Optional[str]:
-    for mode in modes:
-        if block_mode_bytes(mode, *sizes, n_var) <= budget:
-            return mode
-    return None
+def _plan_key(mean: Optional[str], turb: Optional[str]):
+    """组合的优劣（越小越好，次序见模块文档"两个缓存共享一个预算"）。"""
+    mean_class = (3 if mean is None else 0 if mean == "ilu" else 1 if mean.endswith(COARSE_SUFFIX) else 2)
+    return (mean is None, turb is None, mean_class, turb != "ilu",
+            mean is not None and mean.startswith("single"), turb is not None and turb.startswith("single"))
 
 
 def plan_block_modes(sizes: BlockSizes, n_mean: int, n_turb: int, budget: int,
                      mean_coarse: bool = False) -> Tuple[Optional[str], Optional[str]]:
     """在合计预算 `budget` 内为平均流（`n_mean` 个未知量）与湍流（`n_turb` 个，0 为没有湍流缓存）选档，
     返回 `(平均流档, 湍流档)`；None 表示一档也放不下（对角预处理）。`sizes = (n_prism, n_tet, n_real_prism,
-    n_real_tet)`。`mean_coarse`：平均流可用单元级粗校正档（模块文档）。"""
-    reserve = block_mode_bytes("single", *sizes, n_turb) if n_turb else 0
-    modes = MEAN_COARSE_MODES if mean_coarse else BLOCK_MODES
-    # 平均流优先：留出湍流单份后放不下时不再预留（湍流在剩余里取档，最坏退回对角预处理）
-    mean_mode = _best_mode(budget - reserve, sizes, n_mean, modes) or _best_mode(budget, sizes, n_mean, modes)
-    if not n_turb:
-        return mean_mode, None
-    used = 0 if mean_mode is None else block_mode_bytes(mean_mode, *sizes, n_mean)
-    return mean_mode, _best_mode(budget - used, sizes, n_turb)
+    n_real_tet)`。`mean_coarse`：平均流可用单元级粗校正档（模块文档）。两档联合选取（模块文档）。"""
+    mean_modes = list(MEAN_COARSE_MODES if mean_coarse else BLOCK_MODES) + [None]
+    turb_modes = list(BLOCK_MODES) + [None] if n_turb else [None]
+
+    def cost(mode, n_var):
+        return 0 if mode is None else block_mode_bytes(mode, *sizes, n_var)
+
+    fits = [(m, t) for m in mean_modes for t in turb_modes if cost(m, n_mean) + cost(t, n_turb) <= budget]
+    return min(fits, key=lambda mt: _plan_key(*mt))
 
 
 @dataclass(frozen=True)
