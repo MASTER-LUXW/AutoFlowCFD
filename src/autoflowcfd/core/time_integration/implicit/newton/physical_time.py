@@ -166,7 +166,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
         final = float(info["res_norm_new"])
         step_ok = newton_step_ok(info)
         if controller is not None:
-            controller.update(info["res_norm"], step_ok=step_ok)
+            controller.update(info["res_norm"], step_ok=step_ok, linear_converged=info["gmres_info"] == 0)
         # 每次内迭代一行：物理步的监控行要等内迭代全部结束才打印，大算例上一步可能是几十分钟
         logger.info("[dual-time] inner %d: |G| %.3e -> %.3e | GMRES %d (rel %.1e) | theta %.3g | dtau cuts %d | CFL %s"
                     " | %.1f s"

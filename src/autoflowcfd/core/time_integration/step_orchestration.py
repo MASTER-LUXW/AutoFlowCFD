@@ -197,7 +197,8 @@ def advance_step(solver, backend: StepBackend, dt: float) -> float:
             # 与"步没被完整接受"（收缩），见 adaptive_cfl/ser.py
             from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_step_ok
 
-            controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info))
+            controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info),
+                              linear_converged=nk_info["gmres_info"] == 0)
         else:
             controller.update(residual_norm)
     return residual_norm

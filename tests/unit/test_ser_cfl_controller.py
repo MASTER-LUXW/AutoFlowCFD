@@ -64,6 +64,21 @@ def test_accepted_steps_grow_at_least_min_growth_on_a_plateau():
     assert c.update(2.05e6 * RISE_HOLD * 1.01) == pytest.approx(before)
 
 
+def test_accepted_step_whose_linear_solve_missed_the_tolerance_holds():
+    """完整接受（线性残差 < 0.5）但 GMRES 没达到 forcing 容差：不放大（cube_demo P2 实测 CFL 8446 -> 10219 期间
+    GMRES 连续用满 200 次只到 0.15 / 0.11 / 0.45，照旧规则每步放大 10%，冲进每小时下降最慢的区间）；残差上升时
+    也只保持，收缩仍只由步没被完整接受触发。达到容差时照常放大。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import MIN_GROWTH
+
+    c = SERCFLController(cfl_start=8446.0, cfl_max=1e8, cfl_min=0.5)
+    c.update(0.4643)
+    assert c.update(0.4505, linear_converged=False) == pytest.approx(8446.0)       # 残差略降：保持
+    assert c.update(0.4603, linear_converged=False) == pytest.approx(8446.0)       # 小幅上升：保持
+    assert c.update(0.4200, linear_converged=True) == pytest.approx(8446.0 * max(0.4603 / 0.42, MIN_GROWTH))
+    # 步没被完整接受时与线性是否达到容差无关：照常收缩
+    assert c.update(0.5, step_ok=False, linear_converged=False) < 8446.0
+
+
 def test_growth_while_holding_does_not_compound():
     """冲击启动：残差连续上升、每步都被完整接受 -> CFL 一直保持在起点。"""
     c = SERCFLController(cfl_start=5.0, cfl_max=1e4, cfl_min=0.5)

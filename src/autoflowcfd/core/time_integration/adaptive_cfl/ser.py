@@ -90,6 +90,23 @@ Newton 都被完整接受（`theta = 1`、没有缩 dtau）。纯 SER 在这段�
 与 PETSc `TSPSEUDO` 的默认增量 1.1 同一量级。放大过头由没被完整接受的步收回（至少
 减半），控制器因此试探到接受边界附近，而不是停在进展本身的量级上。
 
+### 线性求解没到 forcing 容差的步不放大（2026-10-24）
+
+"完整接受"只要求线性残差降到 `LINEAR_SOLVE_MAX_REL_RESIDUAL`（0.5）以下；GMRES 用满迭代、停在 0.1~0.5
+之间的步仍算完整接受，照上面的规则会继续放大——CFL 于是冲进线性求解够不着的区间。cube_demo 粗网格 SA P2
+（平均流单元级粗校正、湍流块 ILU）第 300 步起续算，按 CFL 区间统计每小时的 Newton 范数下降：
+
+    CFL           每步耗时    每步 -ln(R_new/R)   每小时
+    < 1000          188 s         0.0067          0.129
+    1000~3000       348 s         0.0140          0.145
+    3000~6000       691 s         0.0347          0.181
+    6000~9000      1186 s         0.0529          0.160   （第 33 步起 GMRES 用满 200 次：0.15 / 0.11）
+    > 9000         1735 s         0.0536          0.111   （0.45 / 用满；R_new/R 1.063 / 0.855 / 1.056 交替）
+
+线性解不准时方向质量下降、Newton 一步过冲一步回拉，每步下降量不再增加，而每步耗时继续随 CFL 增长。所以
+完整接受、但线性求解没达到 forcing 容差（`linear_converged=False`）的步：**保持**，不放大也不收缩（收缩
+仍只由"没被完整接受"触发）。CFL 停在线性求解刚好够得着的那一档。
+
 步内的紧急处置（当场缩 dtau 重试）仍然由 `dtau_control.PtcDtauScale`
 负责，本控制器只调天花板，两层不重叠。
 
@@ -158,7 +175,7 @@ class SERCFLController:
     def _clamp(self, cfl: float) -> float:
         return min(self.cfl_max, max(self.cfl_min, cfl))
 
-    def update(self, current_residual: float, step_ok: bool = True) -> float:
+    def update(self, current_residual: float, step_ok: bool = True, linear_converged: bool = True) -> float:
         """按本步残差给出下一步的 CFL。首步只记录基准。
 
         Args:
@@ -167,6 +184,8 @@ class SERCFLController:
                 newton_step_ok`）。为 False 时至少按 `NOT_OK_SHRINK` 收缩；为
                 True 时至少按 `MIN_GROWTH` 放大，残差单步上升超过 `RISE_HOLD` 倍时保持
                 （见模块文档）。
+            linear_converged: 本步线性求解是否达到 forcing 容差（GMRES `info == 0`）。完整接受但为 False 时
+                保持（模块文档"线性求解没到 forcing 容差的步不放大"）。
         """
         r = float(current_residual)
         if not (math.isfinite(r) and r > 0.0):
@@ -181,6 +200,8 @@ class SERCFLController:
             factor = ratio ** self.exponent
             if not step_ok:
                 factor = min(factor, NOT_OK_SHRINK)
+            elif not linear_converged:
+                factor = min(factor, 1.0)
             elif ratio >= 1.0 / RISE_HOLD:
                 factor = max(factor, MIN_GROWTH)
             factor = min(self.growth_limit, max(self.shrink_limit, factor))
