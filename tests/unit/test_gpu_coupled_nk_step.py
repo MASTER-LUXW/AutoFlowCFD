@@ -213,3 +213,34 @@ def test_explicit_turbulence_update_matches_cpu(pair):
         pairs.append((gpu.turb_model_gpu.nu_t, cpu.turb_model.nu_t))
         for fg, fc in pairs:
             assert np.abs(fg - fc).max() <= 1e-10 * np.abs(fc).max(), np.abs(fg - fc).max() / np.abs(fc).max()
+
+
+def test_gpu_coupled_step_matches_cpu_in_the_cell_coarse_tier(pair, monkeypatch):
+    """平均流在块 Jacobi + 单元级粗校正档（`two+cc`，把块 ILU 的内存估计抬到放不下、固定可用内存）：GPU 侧的
+    限制 / 延拓与块 Jacobi 作用走数组模块分支（`coarse/cell_coarse.py`、`cell_block_inverse.py` 的 cupy 分支）。
+
+    判据与块 ILU 档（上一个用例，两侧在主机上执行同一份预处理代码）不同：块 Jacobi 的 cupy 分支按 float32 做
+    矩阵乘（向量降到 float32，省显存，见 `CellBlockJacobiPreconditioner.apply`），CPU 分支 float32 逆乘 float64
+    向量。预处理精度只影响方向、不影响解到 forcing 容差，两侧状态差在 float32 舍入 x 迭代的量级：实测不带粗
+    校正的纯 two 档 3 步内最大 3e-6（SA 槽道），带粗校正 1.8e-5——都远小于每步的更新量。所以判 GMRES 次数相同、
+    残差范数一致到 1e-5、状态差不超过更新量的 1e-3。"""
+    from autoflowcfd.core.gpu.solver.gpu_solver.step import _GPUSolverStepMixin
+    from autoflowcfd.core.time_integration.implicit.blocks import block_budget as bb
+    from autoflowcfd.core.utils import system_memory
+
+    monkeypatch.setattr(bb, "estimate_ilu_bytes", lambda *a, **k: 2 ** 60)
+    monkeypatch.setattr(system_memory, "available_bytes", lambda xp: 16 * 2 ** 30)
+    cpu, gpu = pair
+    U0 = cpu.state.U.copy()
+    for _ in range(3):
+        cpu.step(1e-3)
+        _GPUSolverStepMixin.step(gpu, 1e-3)
+        ic, ig = cpu._newton_last_info, gpu._newton_last_info
+        assert ig["gmres_iters"] == ic["gmres_iters"]
+        assert ig["res_norm"] == pytest.approx(ic["res_norm"], rel=1e-5)
+    update = np.abs(cpu.state.U - U0).max(axis=(0, 1))
+    diff = np.abs(gpu.U_gpu - cpu.state.U).max(axis=(0, 1))
+    assert np.all(diff <= 1e-3 * update + 1e-12 * np.abs(U0).max(axis=(0, 1))), (diff, update)
+    for s in (cpu, gpu):
+        cache = s._newton_block_precond
+        assert cache.plan.mean == "two+cc" and cache._coarse_matrix is not None
