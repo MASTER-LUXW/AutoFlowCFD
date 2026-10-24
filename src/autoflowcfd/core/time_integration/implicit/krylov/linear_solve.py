@@ -100,6 +100,71 @@ class _RealRows:
         return y[self.idx].reshape(-1)
 
 
+class _SolveSpaceSplit:
+    """预处理的"线性部分 + 紧凑非线性部分"在求解向量（真实行、加权）上的形式（`gmres.py::FlexibleSplit`）。
+
+    非线性部分有两种来源，可同时存在（预处理对象的属性，场空间 `(n_dof, n_var)`）：
+
+    * `nonlinear_columns`：逐列布尔，这些列整列非线性，`k` 里存它们在求解向量上的分量；
+    * `coarse_rows`：叠加性粗校正（`coarse/cell_coarse.py`），`(n_dof,)` 行所属的粗节点（零填充行为 -1），
+      `apply_split` 给出的粗层向量 `c`（`(n_nodes, n_coarse_cols)`）延拓为"该行前 `n_coarse_cols` 列加
+      `c[节点]`"，`k` 里存 `c`。
+
+    预处理对象此时提供 `apply_split(v) -> (z, c)`（`z` 含非线性列、不含粗校正）与 `apply_linear(v)`（两者都不含）。
+    做成类而不是闭包：在整个线性求解期间存活（项目规范）。
+    """
+
+    __slots__ = ("prec", "action", "to_field", "to_vector", "d", "mask", "n_mask", "node", "valid", "n_cc",
+                 "n_var", "xp")
+
+    def __init__(self, prec, action, to_field, to_vector, d, rows, n_dof, n_var, xp):
+        self.prec, self.action, self.to_field, self.to_vector, self.d = prec, action, to_field, to_vector, d
+        self.n_var, self.xp = int(n_var), xp
+        self.mask = None
+        self.n_mask = 0
+        if prec.nonlinear_columns is not None:
+            self.mask = to_vector(xp.broadcast_to(xp.asarray(prec.nonlinear_columns), (n_dof, n_var)).copy())
+            self.n_mask = int(self.mask.sum())
+        self.node = None
+        coarse_rows = getattr(prec, "coarse_rows", None)
+        if coarse_rows is not None:
+            node = xp.asarray(coarse_rows, dtype=xp.int64)
+            self.node = node if rows is None else node[rows.idx]
+            self.valid = self.node >= 0
+            self.n_cc = int(prec.n_coarse_cols)
+
+    def apply_split(self, y):
+        v = self.to_field(y if self.d is None else y / self.d)
+        if self.node is None:
+            z, c = self.to_vector(self.prec.apply(v)), None
+        else:
+            z_field, c = self.prec.apply_split(v)
+            z = self.to_vector(z_field)
+        parts = []
+        if self.mask is not None:
+            parts.append(z[self.mask])
+            z[self.mask] = 0.0
+        if c is not None:
+            parts.append(self.xp.ascontiguousarray(c, dtype=z.dtype).reshape(-1))
+        return z, parts[0] if len(parts) == 1 else self.xp.concatenate(parts)
+
+    def apply_linear(self, y):
+        return self.action(self.prec.apply_linear)(y)
+
+    def expand_add(self, z, k):
+        if self.mask is not None:
+            z[self.mask] += k[:self.n_mask]
+        if self.node is not None:
+            c = k[self.n_mask:].reshape(-1, self.n_cc)
+            zz = z.reshape(-1, self.n_var)
+            zz[self.valid, :self.n_cc] += c[self.node[self.valid]]
+
+
+def _flexible_split(prec, action, to_field, to_vector, d, rows, n_dof, n_var, xp) -> FlexibleSplit:
+    sp = _SolveSpaceSplit(prec, action, to_field, to_vector, d, rows, n_dof, n_var, xp)
+    return FlexibleSplit(sp.apply_split, sp.apply_linear, sp.expand_add)
+
+
 def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: float,
                      gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
                      rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None,
@@ -190,9 +255,8 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
     if d is not None:
         b = d * b
     split = None
-    if prec.flexible and prec.nonlinear_columns is not None:
-        mask = to_vector(xp.broadcast_to(xp.asarray(prec.nonlinear_columns), (n_dof, n_var)).copy())
-        split = FlexibleSplit(mask, preconditioner_action(prec.apply_linear))
+    if prec.flexible and (prec.nonlinear_columns is not None or getattr(prec, "coarse_rows", None) is not None):
+        split = _flexible_split(prec, preconditioner_action, to_field, to_vector, d, rows, n_dof, n_var, xp)
 
     du_1d, iters, info, rel = gmres_right(
         _apply_A, b, preconditioner_action(prec.apply), rtol=eta,

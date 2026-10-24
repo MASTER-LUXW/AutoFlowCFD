@@ -302,3 +302,79 @@ def test_newton_step_with_partial_flexible_matches_full_flexible():
     assert info_part["gmres_info"] == 0 and info_part["gmres_iters"] == info_full["gmres_iters"]
     np.testing.assert_allclose(u_part, u_full, rtol=1e-3, atol=1e-9)
     assert np.all(u_part[~real] == 0.0)
+
+
+class _CoarseCoupledLike(_CoupledLike):
+    """块缓存替身：前 2 列固定对角逆 + 叠加性粗校正（每 4 行一个粗节点、作用在前 2 列，粗层近似逆每次作用
+    乘不同因子），第 3 列每次作用都乘不同的因子。`split` 为真时给出粗校正的紧凑形式（`coarse_rows`）。"""
+
+    def __init__(self, split: bool, n_rows: int, real):
+        super().__init__(split)
+        self.n_rows, self.real = n_rows, real
+
+    def preconditioner(self, dtau, n_var):
+        split, n_rows, real = self.split, self.n_rows, self.real
+        node = np.where(real, np.arange(n_rows) // 4, -1)
+        n_nodes = int(node.max()) + 1
+
+        class _Prec:
+            flexible = True
+            nonlinear_columns = np.array([False, False, True]) if split else None
+            coarse_rows = node if split else None
+            n_coarse_cols = 2
+            calls = [0]
+
+            def _coarse(self, v):
+                self.calls[0] += 1
+                c = np.zeros((n_nodes, 2))
+                np.add.at(c, node[real], v[real, :2])
+                return c * (0.05 + 0.02 * np.cos(self.calls[0]))
+
+            def _lin(self, v):
+                out = v / 4.0
+                out[:, 2] = 0.0
+                return out
+
+            def apply_split(self, v):
+                out = self._lin(v)
+                out[:, 2] = v[:, 2] / 4.0 * (1.0 + 0.3 * np.sin(self.calls[0]))
+                return out, self._coarse(v)
+
+            def apply(self, v):
+                out, c = self.apply_split(v)
+                out[real, :2] += c[node[real]]
+                return out
+
+            def apply_linear(self, v):
+                return self._lin(v)
+
+        return _Prec()
+
+
+def test_newton_step_with_coarse_split_matches_full_flexible():
+    """经 `step_newton_krylov`（真实行压缩、零填充行、逐列加权范数）：叠加性粗校正只存粗层向量、非线性列只存
+    该列，与整份存储迭代数相同、Newton 方向一致，零填充行上方向为零。"""
+    rng = np.random.default_rng(21)
+    n_rows, nv = 48, 3
+    A = 4.0 * np.eye(n_rows * nv) + rng.normal(0.0, 1.0, (n_rows * nv,) * 2) / np.sqrt(n_rows * nv)
+    c = rng.normal(0.0, 1.0, (n_rows, nv))
+    real = np.ones(n_rows, dtype=bool)
+    real[::7] = False
+    c[~real] = 0.0
+    mask = np.repeat(real, nv)
+    A[~mask, :] = 0.0
+    A[:, ~mask] = 0.0
+
+    def res(u):
+        return (A @ u.reshape(-1)).reshape(n_rows, nv) + c
+
+    def step(split):
+        return step_newton_krylov(res, np.zeros((n_rows, nv)), np.full(n_rows, 1e12), np.array([1.0, 2.0, 0.5]),
+                                  block_precond=_CoarseCoupledLike(split, n_rows, real), real_rows=real,
+                                  norm_weights=np.where(real, 1.0 + np.arange(n_rows) / n_rows, 0.0),
+                                  tol_nonlinear=1e-14, physicality=lambda u, du, red: np.ones(u.shape[0]))
+
+    (u_full, info_full), (u_part, info_part) = step(False), step(True)
+    assert info_part["gmres_info"] == 0 and info_part["gmres_iters"] == info_full["gmres_iters"]
+    np.testing.assert_allclose(u_part, u_full, rtol=1e-3, atol=1e-9)
+    assert np.all(u_part[~real] == 0.0)

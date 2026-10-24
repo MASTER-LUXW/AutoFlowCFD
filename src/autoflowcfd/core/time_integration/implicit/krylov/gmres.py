@@ -33,11 +33,21 @@
 
 ## 部分灵活（2026-10-15）
 
-预处理是若干列块的块对角组合、只有一部分块非线性时（紧耦合 Newton 步里平均流用块 Jacobi、湍流用多层 K 循环），
-只为非线性列存 `z_j`（`FlexibleSplit.mask` 为真的分量）：线性列的 `z_j` 是固定线性算子 `M_lin^{-1}` 作用在
-`v_j` 上，`sum_j y_j z_j` 在那些列上等于 `M_lin^{-1}(sum_j y_j v_j)`，更新解时现算一次（`FlexibleSplit.apply_linear`）。
-Arnoldi 关系里 `A` 作用的 `z_j` 与更新解用的是同一组值：非线性列是存下来（可能舍入到单精度）的值，线性列是
-双精度的 `M_lin^{-1} v_j`。cube_demo 粗网格 SA P2（6 列里 1 列非线性）灵活模式那一份从 3.85 GiB 降到 0.64 GiB。
+预处理作用能写成"固定线性算子 + 低维非线性部分"时
+
+    z_j = M^{-1} v_j = M_lin^{-1} v_j + E k_j
+
+只存紧凑的 `k_j`（`FlexibleSplit`）：`sum_j y_j z_j = M_lin^{-1}(sum_j y_j v_j) + E (sum_j y_j k_j)`，线性部分在更新
+解时现算一次。两种来源（`linear_solve.py` 组合）：
+
+* 块对角组合里只有一部分列块非线性（紧耦合 Newton 步里平均流用块 Jacobi、湍流用多层 K 循环）：`k_j` 是 `z_j`
+  在那些列上的分量，`E` 是放回原位；cube_demo 粗网格 SA P2（6 列里 1 列非线性）灵活模式那一份从 3.85 GiB 降到
+  0.64 GiB；
+* 线性预处理叠加性粗校正（`coarse/cell_coarse.py`）：粗层用 K 循环（非线性），它的输出落在延拓算子 `P` 的值域
+  里——`k_j` 是每单元 5 个数的粗层向量，`E` 就是 `P`。平均流列若因此整体存 `z_j`，同一算例那一份回到 3.85 GiB。
+
+Arnoldi 关系里 `A` 作用的 `z_j` 与更新解用的是同一组值：非线性部分是存下来（可能舍入到单精度）的 `k_j`，线性
+部分是双精度的 `M_lin^{-1} v_j`。
 
 ## 基向量单精度存储（2026-10-12）
 
@@ -90,13 +100,18 @@ def basis_itemsize(rtol: float) -> int:
 
 
 class FlexibleSplit:
-    """部分灵活（模块文档）：`mask` 是与求解向量同形状的布尔数组，真为预处理作用非线性的分量；`apply_linear(y)`
-    给出线性部分的作用（`mask` 为假的分量有效）。"""
+    """部分灵活（模块文档）：`z = apply_linear(v) + E k`。
 
-    __slots__ = ("mask", "apply_linear")
+    * `apply_split(v) -> (z_lin, k)`：一次预处理作用，线性部分（新数组，调用方可原地改写）与紧凑的非线性部分
+      `k`（一维）；
+    * `apply_linear(v)`：只有线性部分的作用；
+    * `expand_add(z, k)`：原地 `z += E k`（`k` 是若干个 `apply_split` 给出的 `k` 的线性组合）。
+    """
 
-    def __init__(self, mask, apply_linear):
-        self.mask, self.apply_linear = mask, apply_linear
+    __slots__ = ("apply_split", "apply_linear", "expand_add")
+
+    def __init__(self, apply_split, apply_linear, expand_add):
+        self.apply_split, self.apply_linear, self.expand_add = apply_split, apply_linear, expand_add
 
 
 #: 复核点外推剩余迭代数用的回看窗口（迭代数）。
@@ -144,8 +159,8 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     时它说明方向还有多少可信度——自适应 CFL 据此判断线性求解是否失败
     （`adaptive_cfl/ser.py`）。
 
-    `flexible`：灵活模式（见模块文档），`M^{-1}` 可以每次作用都不同。`split`：灵活模式下只有一部分分量的作用
-    非线性时给出（模块文档"部分灵活"），只为那些分量存 `z_j`。
+    `flexible`：灵活模式（见模块文档），`M^{-1}` 可以每次作用都不同。`split`：灵活模式下预处理作用可分成线性
+    部分与紧凑的非线性部分时给出（模块文档"部分灵活"），只存非线性部分；此时 `apply_Minv` 不被调用。
 
     `review_at`：迭代到这个次数仍未达到容差时复核一次（模块文档"复核点"）：按残差曲线外推，剩余迭代数
     超过 `review_at` 就按"未达到"返回（`info > 0`），否则继续到 `max_iter`。
@@ -169,7 +184,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     # 重启 30 就是 4.8 GB，而块 Jacobi 下实际只迭代 13 次——未用到的一半多把第 2 个
     # Newton 步挤到 OOM。
     V: list = []
-    Z: list = []    # 灵活模式下的 M^{-1} v_j（预处理作用本来就返回新数组，直接持有它）
+    Z: list = []    # 灵活模式下的 M^{-1} v_j（部分灵活时是它的非线性部分 k_j；预处理作用返回新数组，直接持有它）
     single = basis_itemsize(rtol) == 4 and b.dtype == xp.float64
     store = xp.float32 if single else b.dtype
 
@@ -185,10 +200,12 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     partial = flexible and split is not None
 
     def precond(j):
-        z = apply_Minv(working(V[j]))
-        if not flexible:
-            return z
-        kept = z[split.mask] if partial else z
+        if partial:
+            z, kept = split.apply_split(working(V[j]))
+        else:
+            z = kept = apply_Minv(working(V[j]))
+            if not flexible:
+                return z
         if single:
             kept = kept.astype(store)
         if j == len(Z):
@@ -197,7 +214,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             Z[j] = kept
         if not partial:
             return working(kept)    # A 作用在存下来的 z_j 上（模块文档"基向量单精度存储"）
-        z[split.mask] = working(kept)
+        split.expand_add(z, working(kept))
         return z
 
     def _combine(W, y, k_used):
@@ -207,13 +224,13 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         return out
 
     def _update(y, k_used):
-        """解的增量 `M^{-1}(V y)`（灵活模式 `Z y`；部分灵活时非线性分量 `Z y`、线性分量现算）。"""
+        """解的增量 `M^{-1}(V y)`（灵活模式 `Z y`；部分灵活时线性部分现算、加上 `E (K y)`）。"""
         if not flexible:
             return apply_Minv(_combine(V, y, k_used))
         if not partial:
             return _combine(Z, y, k_used)
         upd = split.apply_linear(_combine(V, y, k_used))
-        upd[split.mask] = _combine(Z, y, k_used)
+        split.expand_add(upd, _combine(Z, y, k_used))
         return upd
 
     while True:

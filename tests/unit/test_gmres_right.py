@@ -257,23 +257,96 @@ class _HalfFlexible:
         z[: self.n_lin] = v[: self.n_lin] / self.d[: self.n_lin]
         return z
 
+    def split(self):
+        """非线性分量就是 `mask` 为真的那些分量（块对角组合那一种部分灵活）。"""
+        from autoflowcfd.core.time_integration.implicit.krylov.gmres import FlexibleSplit
+
+        mask = self.mask
+
+        def apply_split(v):
+            z = self(v)
+            k = z[mask]
+            z[mask] = 0.0
+            return z, k
+
+        def expand_add(z, k):
+            z[mask] += k
+
+        return FlexibleSplit(apply_split, self.apply_linear, expand_add)
+
+
+class _CoarseCorrected:
+    """固定对角逆 + 叠加性粗校正：粗空间是 `n_agg` 个聚合体上的分片常数（`P`），粗层近似逆每次作用都不同
+    （`(1 + 0.3 sin k)` 倍的精确粗解）——"线性块 Jacobi + K 循环粗层"的最小模型。非线性部分落在 `P` 的值域里，
+    `k` 只有 `n_agg` 个数。"""
+
+    def __init__(self, A, n_agg):
+        n = A.shape[0]
+        self.d = np.diag(A).copy()
+        self.agg = np.arange(n) * n_agg // n
+        self.P = np.zeros((n, n_agg))
+        self.P[np.arange(n), self.agg] = 1.0
+        self.Ac = self.P.T @ A @ self.P
+        self.k = 0
+
+    def coarse(self, v):
+        self.k += 1
+        return (1.0 + 0.3 * np.sin(self.k)) * np.linalg.solve(self.Ac, self.P.T @ v)
+
+    def __call__(self, v):
+        return v / self.d + self.P @ self.coarse(v)
+
+    def apply_linear(self, v):
+        return v / self.d
+
+    def split(self):
+        from autoflowcfd.core.time_integration.implicit.krylov.gmres import FlexibleSplit
+
+        def apply_split(v):
+            return v / self.d, self.coarse(v)
+
+        def expand_add(z, k):
+            z += self.P @ k
+
+        return FlexibleSplit(apply_split, self.apply_linear, expand_add)
+
 
 @pytest.mark.parametrize("rtol, restart", [(1e-10, 200), (1e-10, 15), (1e-2, 200)])
 def test_partial_flexible_matches_full_flexible(rtol, restart):
     """只为非线性分量存预处理向量（线性分量在更新解时现算）与整份存储是同一个 FGMRES：迭代数相同、解一致
     （双精度基到舍入、单精度基到真实残差满足容差），返回的残差是真实残差。"""
-    from autoflowcfd.core.time_integration.implicit.krylov.gmres import FlexibleSplit
-
     A, b, _ = _system(80, 11, spread=3.0)
     full = gmres_right(lambda v: A @ v, b, _HalfFlexible(A, 50, 3), rtol=rtol, restart=restart, max_iter=2000,
                        flexible=True)
     prec = _HalfFlexible(A, 50, 3)
     part = gmres_right(lambda v: A @ v, b, prec, rtol=rtol, restart=restart, max_iter=2000, flexible=True,
-                       split=FlexibleSplit(prec.mask, prec.apply_linear))
+                       split=prec.split())
     assert full[2] == 0 and part[2] == 0 and part[1] == full[1]
     true_rel = np.linalg.norm(b - A @ part[0]) / np.linalg.norm(b)
     assert true_rel <= rtol * 1.0001 and abs(true_rel - part[3]) <= 1e-6 * max(rtol, 1e-10)
     np.testing.assert_allclose(part[0], full[0], rtol=1e-8 if rtol < 1e-5 else 1e-3, atol=1e-12)
+
+
+@pytest.mark.parametrize("rtol, restart", [(1e-10, 200), (1e-10, 15), (1e-2, 200)])
+def test_coarse_corrected_split_matches_full_flexible(rtol, restart):
+    """叠加性粗校正只存粗层向量（每次 `n_agg` 个数）与整份存 `z_j` 是同一个 FGMRES：迭代数相同、解一致，
+    返回的残差是真实残差；粗校正确实在起作用（一维对流扩散算子的光滑慢模态，迭代数少于只用对角逆）。"""
+    n = 120
+    A = (2.0 + 1e-3) * np.eye(n) - 1.3 * np.eye(n, k=-1) - 0.7 * np.eye(n, k=1)
+    b = np.random.default_rng(5).standard_normal(n)
+    full = gmres_right(lambda v: A @ v, b, _CoarseCorrected(A, 12), rtol=rtol, restart=restart, max_iter=2000,
+                       flexible=True)
+    prec = _CoarseCorrected(A, 12)
+    part = gmres_right(lambda v: A @ v, b, prec, rtol=rtol, restart=restart, max_iter=2000, flexible=True,
+                       split=prec.split())
+    assert full[2] == 0 and part[2] == 0 and part[1] == full[1]
+    true_rel = np.linalg.norm(b - A @ part[0]) / np.linalg.norm(b)
+    # 条件数约 1e4（一维对流扩散），Givens 递推值与真实残差的舍入差按 eps x 条件数，门限取容差的 1e-4
+    assert true_rel <= rtol * 1.0001 and abs(true_rel - part[3]) <= 1e-4 * rtol
+    np.testing.assert_allclose(part[0], full[0], rtol=1e-8 if rtol < 1e-5 else 1e-3, atol=1e-12)
+    d = np.diag(A).copy()
+    jacobi = gmres_right(lambda v: A @ v, b, lambda v: v / d, rtol=rtol, restart=restart, max_iter=2000)
+    assert jacobi[1] > part[1]
 
 
 def test_restart_length_follows_the_flexible_fraction():
