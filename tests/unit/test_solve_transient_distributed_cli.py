@@ -50,3 +50,15 @@ def test_multi_gpu_with_explicit_scheme_is_time_accurate(tmp_path):
 def test_physical_time_sets_the_step_count(tmp_path):
     run = _invoke(tmp_path, "--dt", "1e-3", "--physical-time", "0.01")
     assert run.max_iter == 10 and run.dt == 1e-3
+
+
+def test_laminar_transient_is_accepted_and_shares_the_model_list_with_steady(tmp_path):
+    """`solve transient -m none`（层流非定常，如低雷诺数圆柱涡脱落）：此前瞬态命令单独写死一份不含 none 的湍流模型
+    选项表，层流非定常算例无法从命令行运行（缺省落到 DDES）；现在两个命令同一份选项表。"""
+    from autoflowcfd.cli.solve.steady.command import _TURBULENCE_CHOICES
+
+    run = _invoke(tmp_path, "-m", "none", "--time-method", "dual-time")
+    assert run.turbulence_model == "none" and run.time_scheme is TimeIntegrationScheme.DUAL_TIME
+    transient_choices = next(p for p in cli.commands["solve"].commands["transient"].params
+                             if p.name == "turbulence_model").type.choices
+    assert list(transient_choices) == list(_TURBULENCE_CHOICES) and "none" in transient_choices

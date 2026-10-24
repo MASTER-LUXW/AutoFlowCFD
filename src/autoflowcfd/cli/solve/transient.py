@@ -10,6 +10,7 @@ from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.solve.shared_options import config_default, shared_solve_options
+from autoflowcfd.cli.solve.steady.command import _TURBULENCE_CHOICES
 from autoflowcfd.config.solver_config import TransientConfig
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
@@ -26,10 +27,11 @@ _TIME_METHOD_CHOICES = ["dual-time", "rk3"]
                    "若干子步，子步长取全场显式稳定步长（--cfl-start）的最小值、最后一个子步恰好落在 t+dt；CFL 固定、"
                    "低马赫预处理关闭（core/time_integration/time_accurate.py）。")
 @click.option("--turbulence-model", "-m",
-              type=click.Choice(["sst", "sa", "ddes", "iddes", "wmles", "les"]),
+              type=click.Choice(_TURBULENCE_CHOICES),
               default=config_default(TransientConfig, "turbulence"), show_default=True,
-              help="湍流模型。sa 为 SA-neg URANS（core/turbulence/sa）；ddes/iddes 为 SST-DDES/IDDES（Gritskevich et al. "
-                   "2012，core/turbulence/des/）。ddes/iddes/les/wmles 在 VELOCITY_INLET 边界启用合成湍流入口")
+              help="湍流模型。none 为层流（Navier-Stokes，不带湍流模型，如低雷诺数圆柱涡脱落）；sa 为 SA-neg URANS"
+                   "（core/turbulence/sa）；ddes/iddes 为 SST-DDES/IDDES（Gritskevich et al. 2012，core/turbulence/des/）。"
+                   "ddes/iddes/les/wmles 在 VELOCITY_INLET 边界启用合成湍流入口")
 @click.option("--max-iter", "-n", type=int, default=config_default(TransientConfig, "max_iter"), show_default=True,
               help="物理时间步数（给了 --physical-time 时按 physical_time/dt 换算，忽略本选项）")
 @click.option("--dt", type=float, default=config_default(TransientConfig, "dt"), show_default=True,
