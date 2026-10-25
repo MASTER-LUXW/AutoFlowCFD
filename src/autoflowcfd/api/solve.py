@@ -54,12 +54,12 @@ class _APISolveMixin:
         return result
 
     def _build_solver(self, volume_mesh: VolumeMeshData, run):
-        """质量门 + 高阶网格 + 求解器（CPU / 单 GPU）+ 初场 + 参考面积 + 探针，构造参数与 CLI 单机分支同一份
-        （`cli/solve/run.py::single_node_solver_kwargs`）。"""
+        """质量门 + 高阶网格 + 求解器（CPU / 单 GPU）+ 初场 + 参考面积 + 探针 / 逐步气动力历史，构造参数与 CLI
+        单机分支同一份（`cli/solve/run.py::single_node_solver_kwargs`）。"""
         from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
         from autoflowcfd.cli.solve.run import single_node_solver_kwargs
         from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
-        from autoflowcfd.core.probes import attach_probes
+        from autoflowcfd.core.probes import attach_force_history, attach_probes
         from autoflowcfd.grid.validation.solve_gate import high_order_mesh_for_solver
 
         mesh = high_order_mesh_for_solver(volume_mesh, run.order, skip_quality_check=run.skip_quality_check)
@@ -72,6 +72,8 @@ class _APISolveMixin:
         # 参考面积（未给时沿来流方向自动估算）：每步日志的 Cd/Cl/Cs 读它，与 CLI 同一个函数
         resolve_reference_area(solver, volume_mesh, run.reference_area)
         attach_probes(solver, run.probes, run.output_dir)
+        if run.force_history:
+            attach_force_history(solver, solver._reference_area, run.output_dir)
         self.volume_mesh = volume_mesh
         self.solver = solver
         return solver
@@ -120,13 +122,16 @@ class _APISolveMixin:
 
     def run_transient(self, volume_mesh: VolumeMeshData, config: Optional[TransientConfig] = None, *,
                       aoa_deg: float = 0.0, aos_deg: float = 0.0, reference_area: Optional[float] = None,
-                      skip_quality_check: bool = False, probes=None, **fields) -> Any:
+                      skip_quality_check: bool = False, probes=None, force_history: bool = False,
+                      **fields) -> Any:
         """瞬态求解（双时间步或显式时间精确推进），参数同 `run_steady`；配置类为 `TransientConfig`。
 
         步数为 `config.n_steps`（给了 total_time 时按 total_time/dt 换算，否则 max_iter）；给了
         `init_from_checkpoint` 时以该 checkpoint 的场为初场（阶数可低于 order，精确延拓）。瞬态不以残差为停止
         条件，跑满全部物理步。`probes`：探针位置 `(k, 3)`（米，同 CLI `--probe`），每个物理步采样写进
-        `output_dir/probes.csv`（`core/probes`）。
+        `output_dir/probes.csv`（`core/probes`）。`force_history`：每个物理步把总气动力系数（压力 + 粘性）及其压力
+        部分写进 `output_dir/forces.csv`（同 CLI `--force-history`，`core/probes/forces.py`；参考面积未给时沿来流方向
+        自动估算）。
         """
         from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
@@ -140,7 +145,7 @@ class _APISolveMixin:
             time_accurate=config.time_scheme != TimeIntegrationScheme.DUAL_TIME,
             # 低马赫伪时间预处理的请求值：dual-time 不用它，显式时间精确推进强制关闭
             low_mach_precond=True, max_iter=config.n_steps, dt=config.dt, tol=0.0,
-            init_checkpoint=config.init_from_checkpoint, probes=probes)
+            init_checkpoint=config.init_from_checkpoint, probes=probes, force_history=force_history)
         logger.info(f"Transient simulation complete: {result.iterations} steps")
         return result
 
@@ -164,6 +169,7 @@ class _APISolveMixin:
         low_mach_precond: Optional[bool] = None,
         phase_max_iter: Optional[int] = None,
         residual_drop_threshold: float = field_default(SteadyConfig, "residual_drop_threshold"),
+        force_history: bool = False,
     ) -> Any:
         """从 checkpoint 重建求解器并（可选）继续求解，与 CLI `solve resume` 单机分支同一套重建、续算与落盘
         （结果与中间 checkpoint 写在 checkpoint 所在算例目录，`checkpoint_io/resume_run.py`）。
@@ -174,6 +180,7 @@ class _APISolveMixin:
                 返回未收敛的结果
             dt: 时间步长覆盖；None 沿用 checkpoint 记录（瞬态为物理时间步长，`checkpoint_time.resume_time_step`）
             tol: 相对收敛容差（时间精确的续算跑满全部步，`run_tolerance`）
+            force_history: 从本次续算起写逐步气动力历史（checkpoint 已记录时自动接着写，同 CLI `--force-history`）
             其余: 同 CLI `solve resume` 同名选项（time_scheme 只在稳态格式之间切换；low_mach_precond 为 None 时沿用
                 checkpoint 记录）
 
@@ -204,4 +211,4 @@ class _APISolveMixin:
         return continue_single_node(
             solver, iteration, metadata, checkpoint_file, max_iter=max_iter, dt=resume_time_step(dt, metadata, solver),
             tol=tol, checkpoint_interval=checkpoint_interval, phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold)
+            residual_drop_threshold=residual_drop_threshold, force_history=force_history)

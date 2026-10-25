@@ -76,7 +76,7 @@ def physics_from_options(rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, mu_molecular
 def solve_run_from_config(config, *, input_file: str, aoa_deg: float, aos_deg: float,
                           reference_area: Optional[float], skip_quality_check: bool, time_accurate: bool,
                           low_mach_precond: bool, max_iter: int, dt: float, tol: float,
-                          init_checkpoint: Optional[str] = None, probes=()) -> SolveRun:
+                          init_checkpoint: Optional[str] = None, probes=(), force_history: bool = False) -> SolveRun:
     """配置对象（`SteadyConfig` / `TransientConfig`，Python API 的参数）-> `SolveRun`：单机运行。"""
     from autoflowcfd.config.turbulence_names import turbulence_solver_name
     from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
@@ -96,7 +96,7 @@ def solve_run_from_config(config, *, input_file: str, aoa_deg: float, aos_deg: f
                                      config.wall_treatment),
         sem_num_eddies=_SEM_DEFAULT_NUM_EDDIES, reference_area=reference_area, init_checkpoint=init_checkpoint,
         probes=tuple(probes or ()), max_iter=max_iter, dt=dt, tol=tol, phase_max_iter=config.phase_max_iter,
-        residual_drop_threshold=config.residual_drop_threshold)
+        residual_drop_threshold=config.residual_drop_threshold, force_history=bool(force_history))
 
 
 def single_node_solver_kwargs(run: SolveRun) -> dict:

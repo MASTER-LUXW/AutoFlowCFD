@@ -176,6 +176,20 @@ class TestRunTransient:
         assert factory.call_args.kwargs["time_accurate"] is True
         start.assert_called_once_with(solver, "steady.h5")
 
+    def test_force_history_is_attached_with_the_resolved_reference_area(self):
+        """`force_history=True`（同 CLI `--force-history`）：按求解器上已确定的参考面积挂逐步气动力历史，写进输出
+        目录；不给时不挂。"""
+        for flag in (True, False):
+            solver = _solver()
+            solver._reference_area = 0.2
+            with patch(_GATE), patch(_FACTORY, return_value=solver), \
+                 patch("autoflowcfd.core.probes.attach_force_history") as attach:
+                create_api().run_transient(MagicMock(), max_iter=3, output_dir="case_f", force_history=flag)
+            if flag:
+                attach.assert_called_once_with(solver, 0.2, "case_f")
+            else:
+                attach.assert_not_called()
+
 
 class TestWritesResults:
     """修复前 API 从不落盘：配置的 output_dir / checkpoint_interval 被静默忽略，中断即丢失、结果不能续算。"""
@@ -234,6 +248,11 @@ class TestResume:
         assert cb.args[1] == str(tmp_path) and cb.kwargs["iteration_offset"] == 150
         final = writers["resume_final"].call_args
         assert final.args[2] == 150 + 7
+
+    def test_force_history_request_reaches_the_resumed_run(self, tmp_path, writers):
+        with patch("autoflowcfd.cli.solve.checkpoint_io.continue_single_node") as cont:
+            self._resume(tmp_path, S.DUAL_TIME, {"dt": 2.5e-4}, max_iter=4, force_history=True)
+        assert cont.call_args.kwargs["force_history"] is True
 
     def test_steady_resume_options_reach_the_rebuild(self, tmp_path, writers):
         _, solver, rebuild, _ = self._resume(tmp_path, S.NEWTON_KRYLOV, {}, max_iter=5, time_scheme="rk3",
