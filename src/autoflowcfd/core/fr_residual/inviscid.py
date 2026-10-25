@@ -74,12 +74,15 @@ class MeanFlowPrimitives(NamedTuple):
     Q_ghost: np.ndarray    # (n_faces, n_fp, 5)，只有边界面的行有意义
 
 
-def mean_flow_primitives(U: np.ndarray, flat, ghost_provider) -> MeanFlowPrimitives:
-    """`U` 上的原始变量与边界幽灵态，各算一次供无粘、粘性两项共用
-    （`FRSolver.compute_mean_flow_residual`）。两项此前各自从 `U` 重算这两样，结果逐位相同。"""
+def mean_flow_primitives(Q: np.ndarray, flat, ghost_provider) -> MeanFlowPrimitives:
+    """原始变量 `Q` 与其上的边界幽灵态，各算一次供无粘、粘性两项共用（`FRSolver.compute_mean_flow_residual`）。
+
+    `Q` 由调用方给出，必须与本次残差的 `U` 同步：求解器传刚由 `_refresh_primitives` 同步的 `state.Q`（与
+    `conserved_to_primitive(U)` 同一个核、逐位相同）。2026-10-25 以前这里再从 `U` 重算一份新数组——每次残差多一次
+    整场换算与一份全场新分配（cube_demo 粗网格 P2 上 206 MB）。
+    """
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 
-    Q = conserved_to_primitive(U[..., :5])
     provider = require_ghost_provider(ghost_provider, "mean_flow_primitives")
     return MeanFlowPrimitives(Q, compute_boundary_ghost_states(flat, Q, provider))
 

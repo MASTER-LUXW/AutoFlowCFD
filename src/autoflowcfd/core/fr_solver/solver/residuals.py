@@ -61,7 +61,7 @@ class _SolverResidualMixin:
         self._refresh_primitives()
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-        primitives = mean_flow_primitives(self.state.U, get_flat_face_geometry(self.mesh, self.ops),
+        primitives = mean_flow_primitives(self.state.Q, get_flat_face_geometry(self.mesh, self.ops),
                                           self.boundary_ghost_provider)
         res = self.compute_viscous_residual(mu_t_turb=mu_t_turb, nu_av=nu_av, primitives=primitives)
         res += self._inviscid_residual(primitives)

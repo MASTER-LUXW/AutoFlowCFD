@@ -45,3 +45,19 @@ def test_matches_separately_computed_terms_and_refreshes_primitives(order):
     assert np.array_equal(got, -visc)
     # `state.Q` 与 `state.U` 同步（低马赫预处理与湍流读它）
     assert np.array_equal(Q_after, solver.state.Q)
+
+
+def test_shared_primitives_are_the_synced_state_without_reconverting(monkeypatch):
+    """两项共用的原始变量就是刚同步的 `state.Q`：一次平均流残差里 U -> Q 只换算一次（`state._update_primitives`），
+    不再另算一份新数组（cube_demo 粗网格 P2 上每次 206 MB 新分配加一次整场换算）。"""
+    import autoflowcfd.core.fr_residual.inviscid as inviscid_mod
+
+    solver = _solver(1)
+    seen = []
+    orig = inviscid_mod.mean_flow_primitives
+    monkeypatch.setattr("autoflowcfd.core.fr_solver.solver.residuals.mean_flow_primitives",
+                        lambda Q, *a: seen.append(Q) or orig(Q, *a))
+    monkeypatch.setattr(inviscid_mod, "conserved_to_primitive",
+                        lambda U: pytest.fail("平均流残差不应再从 U 重算原始变量"))
+    solver.compute_mean_flow_residual(mu_t_turb=np.zeros(solver.state.U.shape[:2]))
+    assert len(seen) == 1 and seen[0] is solver.state.Q
