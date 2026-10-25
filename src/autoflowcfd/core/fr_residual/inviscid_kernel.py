@@ -26,11 +26,22 @@ from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_p
 def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     """外插矩阵乘法：field_cell (n_sps, k), E (n_fp, n_sps) -> (n_fp, k)。
 
-    Python 边界幽灵态预处理（本文件外）和这里的主 kernel 共用同一个
-    函数，不允许出现两份需要永远保持一致的独立实现
-    （不调 BLAS：并行核里逐面调用 BLAS 线程越多越慢，见 small_dense.py）
+    界面核、边界幽灵态的本侧迹（`_extrapolate_owner_traces`）与壁面力后处理共用这一个函数，不允许出现两份
+    需要永远保持一致的独立实现（不调 BLAS：并行核里逐面调用 BLAS 线程越多越慢，见 small_dense.py）
     """
     return matmul_small(E, field_cell)
+
+
+@njit(cache=True, parallel=True)
+def _extrapolate_owner_traces(Q, boundary_extrap_native, ops, owners, out):
+    """`out[j] = boundary_extrap_native[ops[j]] @ Q[owners[j]]`（各面本侧状态在通量点上的迹，就地）。
+
+    逐面直接按算子索引外插，不复制每面的外插矩阵与单元状态：2026-10-25 以前用
+    `einsum('fps,fsv->fpv', E[ops], Q[owners])`，先 gather 出 (n_face, n_fp, n_sps) 的矩阵副本再走非 BLAS 的
+    einsum，方柱 SA P2 薄片（4.95 万个幽灵面）一次 96 ms、本核 3.5 ms，结果逐位相同（同一求和顺序）。
+    """
+    for j in prange(owners.shape[0]):
+        out[j] = _extrap_matmul(Q[owners[j]], boundary_extrap_native[ops[j]])
 
 
 @njit(cache=True, parallel=True)
@@ -193,7 +204,8 @@ def compute_boundary_ghost_states(flat, Q, ghost_provider):
 
     CPU 与 GPU 共用（`flat` 为主机 `FlatFaceGeometry` 或设备 `GPUFlatFaceGeometry`，`Q` 在同一端）：GPU 的外插与
     常规边界条件都在设备上算。2026-10-19（I-119）以前 GPU 残差（无粘、粘性、源项梯度提升）每次求值都把整份 Q
-    拷回主机、在主机上算、再把全部面大小的数组传回设备——隐式下每次 J v 两次全场 PCIe 往返。
+    拷回主机、在主机上算、再把全部面大小的数组传回设备——隐式下每次 J v 两次全场 PCIe 往返。本侧迹在主机上走
+    界面核的同一个外插函数（`_extrapolate_owner_traces`），设备上用 einsum。
 
     Returns:
         Q_ghost: (n_faces, n_fp, 5)，只有活跃边界面的行有意义（与 `Q` 同一数组模块）。
@@ -206,8 +218,14 @@ def compute_boundary_ghost_states(flat, Q, ghost_provider):
     faces = boundary_ghost_faces(flat)
     if faces.size == 0:
         return Q_ghost
-    idx = faces if xp is np else xp.asarray(faces)
-    E_o = flat.boundary_extrap_native[flat.owner_face_op[idx]]
-    Q_o = xp.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[idx]])
+    if xp is np:
+        idx = faces
+        Q_o = np.empty((faces.size, n_fp, 5))
+        _extrapolate_owner_traces(Q, flat.boundary_extrap_native, flat.owner_face_op[faces], flat.owner_cell[faces],
+                                  Q_o)
+    else:
+        idx = xp.asarray(faces)
+        E_o = flat.boundary_extrap_native[flat.owner_face_op[idx]]
+        Q_o = xp.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[idx]])
     Q_ghost[idx] = ghost_provider.ghost_states(faces, Q_o, flat.true_normal[idx])
     return Q_ghost
