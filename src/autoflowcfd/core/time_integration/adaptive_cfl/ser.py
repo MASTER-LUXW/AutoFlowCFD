@@ -104,8 +104,14 @@ Newton 都被完整接受（`theta = 1`、没有缩 dtau）。纯 SER 在这段�
     > 9000         1735 s         0.0536          0.111   （0.45 / 用满；R_new/R 1.063 / 0.855 / 1.056 交替）
 
 线性解不准时方向质量下降、Newton 一步过冲一步回拉，每步下降量不再增加，而每步耗时继续随 CFL 增长。所以
-完整接受、但线性求解没达到 forcing 容差（`linear_converged=False`）的步：**保持**，不放大也不收缩（收缩
-仍只由"没被完整接受"触发）。CFL 停在线性求解刚好够得着的那一档。
+完整接受、但线性求解没达到 forcing 容差（`linear_converged=False`）的步：**保持**，不放大。CFL 停在线性求解
+刚好够得着的那一档。
+
+只保持不够：线性解得不准、而这一步自己的残差还上升了（`step_ratio = R_new/R > 1`），说明方向已不可信、当前
+CFL 偏高——按"没被完整接受"同样至少减半。同一算例按上条规则续算（2026-10-25）：CFL 7980 在 GMRES 解得到容差
+后照常放大到 9656，随即 R_new/R 1.330 / 0.693 / 1.033 交替（线性 0.16 / 达到 / 0.28），CFL 保持在每小时下降
+最慢的那一档不退。`step_ratio` 取本步 Newton 报告的值（SER 的残差比是相邻两步起点之比、滞后一步）；线性
+解到容差时的平台起伏不受影响。
 
 步内的紧急处置（当场缩 dtau 重试）仍然由 `dtau_control.PtcDtauScale`
 负责，本控制器只调天花板，两层不重叠。
@@ -175,7 +181,8 @@ class SERCFLController:
     def _clamp(self, cfl: float) -> float:
         return min(self.cfl_max, max(self.cfl_min, cfl))
 
-    def update(self, current_residual: float, step_ok: bool = True, linear_converged: bool = True) -> float:
+    def update(self, current_residual: float, step_ok: bool = True, linear_converged: bool = True,
+               step_ratio: Optional[float] = None) -> float:
         """按本步残差给出下一步的 CFL。首步只记录基准。
 
         Args:
@@ -186,6 +193,7 @@ class SERCFLController:
                 （见模块文档）。
             linear_converged: 本步线性求解是否达到 forcing 容差（GMRES `info == 0`）。完整接受但为 False 时
                 保持（模块文档"线性求解没到 forcing 容差的步不放大"）。
+            step_ratio: 本步 Newton 的 `R_new / R`；线性没到容差且它 > 1 时按未完整接受收缩（同一节）。
         """
         r = float(current_residual)
         if not (math.isfinite(r) and r > 0.0):
@@ -198,14 +206,15 @@ class SERCFLController:
         if self._prev_residual is not None:
             ratio = self._prev_residual / r
             factor = ratio ** self.exponent
-            if not step_ok:
+            untrusted = not linear_converged and step_ratio is not None and step_ratio > 1.0
+            if not step_ok or untrusted:
                 factor = min(factor, NOT_OK_SHRINK)
             elif not linear_converged:
                 factor = min(factor, 1.0)
             elif ratio >= 1.0 / RISE_HOLD:
                 factor = max(factor, MIN_GROWTH)
             factor = min(self.growth_limit, max(self.shrink_limit, factor))
-            if factor >= 1.0 or not step_ok:
+            if factor >= 1.0 or not step_ok or untrusted:
                 self.cfl_number = self._clamp(self.cfl_number * factor)
         self._prev_residual = r
         return self.cfl_number

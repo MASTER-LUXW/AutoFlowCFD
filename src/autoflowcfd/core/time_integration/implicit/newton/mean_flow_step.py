@@ -50,6 +50,11 @@ def newton_step_ok(info: dict) -> bool:
             and info["linear_rel_residual"] <= LINEAR_SOLVE_MAX_REL_RESIDUAL)
 
 
+def newton_step_ratio(info: dict) -> float:
+    """本步 Newton 的非线性残差比 `R_new / R`（接受判据的同一范数；SER 据此识别方向不可信的步，`adaptive_cfl/ser.py`）。"""
+    return float(info["res_norm_new"]) / max(float(info["res_norm"]), 1e-300)
+
+
 def reset_newton_state(solver) -> None:
     """把隐式步的全部跨步状态置初值（模块文档"跨步状态"那几项 + 紧耦合步的湍流块缓存
     `_newton_turb_state`，见 `coupled_step.py`）。全部后端在构造时与换阶后调用这一个函数。

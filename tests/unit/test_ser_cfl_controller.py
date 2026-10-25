@@ -79,6 +79,25 @@ def test_accepted_step_whose_linear_solve_missed_the_tolerance_holds():
     assert c.update(0.5, step_ok=False, linear_converged=False) < 8446.0
 
 
+def test_untrusted_step_whose_residual_rose_shrinks():
+    """线性没到容差、且本步 R_new/R > 1（方向不可信、CFL 偏高）：按未完整接受至少减半。cube_demo P2 续算实测 CFL 9656
+    上 R_new/R 1.330 / 0.693 / 1.033 交替（线性 0.16 / 达到 / 0.28），只保持时 CFL 留在效率最低的一档不退。本步残差
+    下降时仍只保持；线性解到容差时本步残差上升属平台起伏，照常处理。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import MIN_GROWTH, NOT_OK_SHRINK
+
+    c = SERCFLController(cfl_start=9656.0, cfl_max=1e8, cfl_min=0.5)
+    c.update(0.3754)
+    assert c.update(0.3634, linear_converged=False, step_ratio=1.3296) <= 9656.0 * NOT_OK_SHRINK
+    after = c.cfl_number
+    assert c.update(0.36, linear_converged=False, step_ratio=0.95) == pytest.approx(after)      # 本步下降：保持
+    grown = after * max(0.36 / 0.35, MIN_GROWTH)
+    assert c.update(0.35, linear_converged=True, step_ratio=1.05) == pytest.approx(grown)
+    # 不给本步比值时与此前相同（只保持）
+    d = SERCFLController(cfl_start=100.0, cfl_max=1e8, cfl_min=0.5)
+    d.update(1.0)
+    assert d.update(0.99, linear_converged=False) == pytest.approx(100.0)
+
+
 def test_growth_while_holding_does_not_compound():
     """冲击启动：残差连续上升、每步都被完整接受 -> CFL 一直保持在起点。"""
     c = SERCFLController(cfl_start=5.0, cfl_max=1e4, cfl_min=0.5)

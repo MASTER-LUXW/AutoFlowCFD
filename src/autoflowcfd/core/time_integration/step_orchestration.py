@@ -195,10 +195,12 @@ def advance_step(solver, backend: StepBackend, dt: float) -> float:
         if nk_info is not None:
             # SER 看 Newton 实际在解的系统的残差 ||Gamma R||，并区分"残差上升但步被完整接受"（物理暂态，保持）
             # 与"步没被完整接受"（收缩），见 adaptive_cfl/ser.py
-            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import newton_step_ok
+            from autoflowcfd.core.time_integration.implicit.newton.mean_flow_step import (
+                newton_step_ok, newton_step_ratio,
+            )
 
             controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info),
-                              linear_converged=nk_info["gmres_info"] == 0)
+                              linear_converged=nk_info["gmres_info"] == 0, step_ratio=newton_step_ratio(nk_info))
         else:
             controller.update(residual_norm)
     return residual_norm

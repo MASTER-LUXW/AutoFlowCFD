@@ -138,7 +138,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
         `{"iterations", "initial", "final", "converged"}`（也记在 `solver._dual_time_inner`）。
     """
     from ...base import DUAL_TIME_UPDATE_FLOOR
-    from .mean_flow_step import LINEAR_SOLVE_MAX_REL_RESIDUAL, newton_step_ok
+    from .mean_flow_step import LINEAR_SOLVE_MAX_REL_RESIDUAL, newton_step_ok, newton_step_ratio
 
     max_inner = int(solver.time_integrator.dual_time_steps)
     tolerance = float(solver.time_integrator.dual_time_tolerance)
@@ -166,7 +166,8 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
         final = float(info["res_norm_new"])
         step_ok = newton_step_ok(info)
         if controller is not None:
-            controller.update(info["res_norm"], step_ok=step_ok, linear_converged=info["gmres_info"] == 0)
+            controller.update(info["res_norm"], step_ok=step_ok, linear_converged=info["gmres_info"] == 0,
+                              step_ratio=newton_step_ratio(info))
         # 每次内迭代一行：物理步的监控行要等内迭代全部结束才打印，大算例上一步可能是几十分钟
         logger.info("[dual-time] inner %d: |G| %.3e -> %.3e | GMRES %d (rel %.1e) | theta %.3g | dtau cuts %d | CFL %s"
                     " | %.1f s"
