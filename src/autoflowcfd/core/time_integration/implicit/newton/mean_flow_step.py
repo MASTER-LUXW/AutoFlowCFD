@@ -26,7 +26,7 @@ from loguru import logger
 
 from ..blocks.block_budget import plan_block_memory
 from ..blocks.block_jacobi import BlockJacobiCache
-from ..coarse.cell_coarse import mean_coarse_available, mean_coarse_weights
+from ..coarse.cell_coarse import mean_coarse_available, positivity_restriction_weights
 from .forcing import EisenstatWalkerForcing
 from .jfnk import step_newton_krylov
 from ..reductions import LocalReductions
@@ -206,7 +206,7 @@ def step_mean_flow_newton(
             n_sps=n_sps, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=N_MEAN_FLOW_VARS, red=red, coupling_graph=coupling_graph,
             global_coarse=global_coarse,
-            coarse_weights=mean_coarse_weights(positivity) if mean_coarse else None)
+            coarse_weights=positivity_restriction_weights(positivity) if max(n_real_prism, n_real_tet) > 1 else None)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(

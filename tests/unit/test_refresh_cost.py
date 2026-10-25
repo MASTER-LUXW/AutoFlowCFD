@@ -44,7 +44,8 @@ def test_cache_threshold_uses_the_table_after_a_build():
     cip = np.ones(4, dtype=bool)
     cache = BlockJacobiCache(cell_is_prism=cip, colors=np.zeros(4, dtype=np.int64),
                              plan=plan_for_budget(cip, 6, 4, 5, 2, 2 ** 50),
-                             n_sps=8, n_real_prism=6, n_real_tet=4, n_var=5, with_turbulence=True)
+                             n_sps=8, n_real_prism=6, n_real_tet=4, n_var=5, with_turbulence=True,
+                             coarse_weights=np.ones((4, 8)))
     blocks = np.tile(np.eye(30, dtype=np.float32), (4, 1, 1))
 
     class _Assembler:

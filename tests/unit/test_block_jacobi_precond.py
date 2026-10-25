@@ -173,7 +173,8 @@ def _cache(n_cells=6, n_prism=3, budget=2 ** 50):
     owner, nb, is_prism = _chain_mesh(n_cells, n_prism)
     return BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
                             plan=bb.plan_for_budget(is_prism, N_REAL_P, N_REAL_T, NV, 0, budget),
-                            n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
+                            n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV,
+                            coarse_weights=np.ones((n_cells, N_SPS)))
 
 
 def _begin(cache, rng):
@@ -290,7 +291,8 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
     _, info_d = step_newton_krylov(R, u0, dtau, np.ones(NV))
     cache = BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
                              plan=bb.plan_for_budget(is_prism, N_REAL_P, N_REAL_T, NV, 0, 2 ** 50),
-                             n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
+                             n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV,
+                             coarse_weights=np.ones((n_cells, N_SPS)))
     _, info_b = step_newton_krylov(R, u0, dtau, np.ones(NV), block_precond=cache)
     # 对角预处理在这个系统上用满迭代数也解不到容差：线性残差没减半的方向不走出去（theta=0，
     # `globalization.LINEAR_SOLVE_MAX_REL_RESIDUAL`），块预处理一次解到容差

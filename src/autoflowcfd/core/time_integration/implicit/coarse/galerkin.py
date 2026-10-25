@@ -5,12 +5,15 @@
     A = blockdiag(J_cc + I/dtau) + {J_cy}
 
 粗空间：每个聚合体 a、每个守恒变量 v 一个基向量，在 a 内全部单元的全部**真实**
-解点上该变量取 1（零填充槽位不在粗空间里）。于是
+解点上该变量取 1（零填充槽位不在粗空间里）。限制按逐行权重 `w[c, s]` 加权求和：
 
-    (P^T r)[a, v] = sum_{c in a} sum_{s 真实} r[c, s, v]
+    (R r)[a, v] = sum_{c in a} sum_{s 真实} w[c, s] r[c, s, v]
     (P z)[c, s, v] = z[agg(c), v]              （零填充槽位取 0）
-    A_c = P^T A P：每个对角块/耦合块按 (行变量, 列变量) 求和，累加到
-          (agg(行单元), agg(列单元)) 上；对角上再加真实解点的 1/dtau 之和。
+    A_c = R A P：每个对角块/耦合块的行乘该行解点的权重后按 (行变量, 列变量) 求和，累加到
+          (agg(行单元), agg(列单元)) 上；对角上再加真实解点的 w/dtau 之和。
+
+细层是解点层时 `w` 是限制权重（`cell_coarse.py::restriction_weights`，理由见 `multilevel.py` 模块文档
+"p 层的限制权重"），细层已是节点层（每节点 1 个解点）时 `w = 1`，即 `R = P^T`。
 
 块内行序与块预处理相同：`i = 解点 * n_var + 变量`。
 """
@@ -20,7 +23,7 @@ from numba import njit, prange
 
 
 @njit(cache=True, parallel=True)
-def _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, agg, n_sps, n_var, rows, cols, vals):
+def _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, row_w, agg, n_sps, n_var, rows, cols, vals):
     n_cells = row_dof.shape[0]
     nv2 = n_var * n_var
     for c in prange(n_cells):
@@ -29,9 +32,10 @@ def _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, agg, n_sps, n_var, ro
         S = np.zeros((n_var, n_var))
         for i in range(m):
             vi = i % n_var
+            w = row_w[c, i // n_var]
             for j in range(m):
-                S[vi, j % n_var] += diag_data[base + i * m + j]
-            S[vi, vi] += inv_dtau[c * n_sps + i // n_var]
+                S[vi, j % n_var] += w * diag_data[base + i * m + j]
+            S[vi, vi] += w * inv_dtau[c * n_sps + i // n_var]
         a = agg[c]
         o = c * nv2
         for v in range(n_var):
@@ -42,9 +46,10 @@ def _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, agg, n_sps, n_var, ro
 
 
 @njit(cache=True, parallel=True)
-def coupling_triplets(indptr, cols_c, offset, data, row_dof, col_dof, agg_row, agg_col, n_var, rows, cols, vals):
-    """耦合块按 (行变量, 列变量) 求和，记到 `(agg_row[行单元], agg_col[列单元])`。行列分开给出
-    自由度数与粗节点映射：rank 内耦合两者相同，跨 rank 耦合的列是 halo 单元（`global_coarse.py`）。"""
+def coupling_triplets(indptr, cols_c, offset, data, row_dof, col_dof, row_w, agg_row, agg_col, n_var, rows, cols,
+                      vals):
+    """耦合块的行乘行权重 `row_w[行单元, 解点]` 后按 (行变量, 列变量) 求和，记到 `(agg_row[行单元], agg_col[列单元])`。
+    行列分开给出自由度数与粗节点映射：rank 内耦合两者相同，跨 rank 耦合的列是 halo 单元（`global_coarse.py`）。"""
     n_cells = indptr.shape[0] - 1
     nv2 = n_var * n_var
     for c in prange(n_cells):
@@ -56,8 +61,9 @@ def coupling_triplets(indptr, cols_c, offset, data, row_dof, col_dof, agg_row, a
             S = np.zeros((n_var, n_var))
             for i in range(m):
                 vi = i % n_var
+                w = row_w[c, i // n_var]
                 for j in range(my):
-                    S[vi, j % n_var] += data[o + i * my + j]
+                    S[vi, j % n_var] += w * data[o + i * my + j]
             t = k * nv2
             for v in range(n_var):
                 for w in range(n_var):
@@ -67,15 +73,26 @@ def coupling_triplets(indptr, cols_c, offset, data, row_dof, col_dof, agg_row, a
 
 
 @njit(cache=True)
-def restrict(r, row_dof, agg, n_agg, n_sps, n_var):
-    """`P^T r`，`r` 是扁平 `(n_cells * n_sps * n_var,)`。"""
+def _restrict_kernel(r, row_dof, agg, n_agg, n_sps, n_var, row_w):
     out = np.zeros(n_agg * n_var)
     for c in range(row_dof.shape[0]):
         base = c * n_sps * n_var
         a = agg[c] * n_var
         for i in range(row_dof[c]):
-            out[a + i % n_var] += r[base + i]
+            out[a + i % n_var] += row_w[c, i // n_var] * r[base + i]
     return out
+
+
+def unit_row_weights(n_cells: int, n_sps: int) -> np.ndarray:
+    """`R = P^T` 的行权重（全 1）。"""
+    return np.ones((int(n_cells), int(n_sps)))
+
+
+def restrict(r, row_dof, agg, n_agg, n_sps, n_var, row_w=None):
+    """`R r`，`r` 是扁平 `(n_cells * n_sps * n_var,)`；`row_w` `(n_cells, n_sps)`，None 为全 1（`R = P^T`）。"""
+    if row_w is None:
+        row_w = unit_row_weights(row_dof.shape[0], n_sps)
+    return _restrict_kernel(r, row_dof, agg, n_agg, n_sps, n_var, row_w)
 
 
 @njit(cache=True, parallel=True)
@@ -116,9 +133,11 @@ def assembled_matvec(x, diag_data, diag_off, row_dof, inv_dtau, indptr, cols, of
                 out[base + i] += acc
 
 
-def coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps: int, n_var: int):
-    """`P^T A P` 的未合并三元组 `(rows, cols, vals)`（粗节点编号即 `agg` 的值）。`struct` 为
-    None 时只有对角块。"""
+def coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps: int, n_var: int, row_w=None):
+    """`R A P` 的未合并三元组 `(rows, cols, vals)`（粗节点编号即 `agg` 的值）。`struct` 为
+    None 时只有对角块；`row_w` 见 `restrict`。"""
+    if row_w is None:
+        row_w = unit_row_weights(row_dof.shape[0], n_sps)
     n_cells = row_dof.shape[0]
     nv2 = n_var * n_var
     n_diag = n_cells * nv2
@@ -126,19 +145,19 @@ def coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps: 
     rows = np.empty(n_diag + n_coup, dtype=np.int64)
     cols = np.empty(n_diag + n_coup, dtype=np.int64)
     vals = np.empty(n_diag + n_coup, dtype=np.float64)
-    _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, agg, n_sps, n_var,
+    _diag_triplets(diag_data, diag_off, row_dof, inv_dtau, row_w, agg, n_sps, n_var,
                    rows[:n_diag], cols[:n_diag], vals[:n_diag])
     if n_coup:
-        coupling_triplets(struct.indptr, struct.cols, struct.offset, struct.data, row_dof, row_dof, agg, agg,
+        coupling_triplets(struct.indptr, struct.cols, struct.offset, struct.data, row_dof, row_dof, row_w, agg, agg,
                           n_var, rows[n_diag:], cols[n_diag:], vals[n_diag:])
     return rows, cols, vals
 
 
 def galerkin_coarse_matrix(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_agg: int,
-                           n_sps: int, n_var: int):
-    """`A_c = P^T A P`（scipy CSC，`(n_agg*n_var)^2`）。`struct` 为 None 时只有对角块。"""
+                           n_sps: int, n_var: int, row_w=None):
+    """`A_c = R A P`（scipy CSC，`(n_agg*n_var)^2`）。`struct` 为 None 时只有对角块；`row_w` 见 `restrict`。"""
     import scipy.sparse as sp
 
-    rows, cols, vals = coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps, n_var)
+    rows, cols, vals = coarse_triplets(diag_data, diag_off, row_dof, inv_dtau, struct, agg, n_sps, n_var, row_w)
     n = n_agg * n_var
     return sp.csc_matrix((vals, (rows, cols)), shape=(n, n))

@@ -155,8 +155,9 @@ class BlockJacobiCache:
         `global_coarse`（`coarse.CoarseCommContext`，分布式后端给出）：块 ILU 档在本 rank 的
         预处理之外再叠全局粗校正（`coarse/global_coarse.py`），装配器须同时给出跨 rank 耦合块。
 
-        `coarse_weights`：`(n_cells, n_sps)` 单元级粗校正的限制权重（`coarse/cell_coarse.py::restriction_weights`，
-        与状态同一数组模块）；档位带 `+cc` 时必须给出。
+        `coarse_weights`：`(n_cells, n_sps)` 解点层的限制权重（`coarse/cell_coarse.py::restriction_weights`，与状态
+        同一数组模块），单元级粗校正与块 ILU 档的多层 p 层 / 全局粗校正共用；P>=1 且档位用到它们（带 `+cc` 或块
+        ILU 档）时必须给出。
         """
         self.red = red if red is not None else LocalReductions()
         self.n_var = int(n_var)
@@ -188,6 +189,10 @@ class BlockJacobiCache:
         self.use_ilu = mode == "ilu"
         self.single_copy = mode is not None and mode.startswith("single")
         self.cell_coarse = mode is not None and mode.endswith(COARSE_SUFFIX)
+        high_order = max(n_real_prism, n_real_tet) > 1
+        needs_weights = high_order and (self.cell_coarse or self.use_ilu)
+        if needs_weights and coarse_weights is None:
+            raise ValueError("P>=1 的单元级粗校正 / 块 ILU 档多层预处理需要解点层的限制权重（coarse_weights）")
         self._coarse_weights = coarse_weights if self.cell_coarse else None
         self._coarse_weights_host = None
         self._real_slots = None
@@ -195,17 +200,16 @@ class BlockJacobiCache:
         self._coarse_matrix: Any = None         # 本次装配的 `CellCoarseMatrix`
         self._coarse_solve: Any = None          # 按 `_coarse_dtau` 构造的 `CellCoarseSolve`
         self._coarse_dtau = None
-        if self.cell_coarse:
-            if coarse_weights is None:
-                raise ValueError("单元级粗校正档需要限制权重（coarse_weights）")
+        if needs_weights:
             from autoflowcfd.core.utils.array_module import to_host
 
             self._coarse_weights_host = np.ascontiguousarray(to_host(coarse_weights), dtype=np.float64)
+        if self.cell_coarse:
             n_real = np.where(self.cell_is_prism, n_real_prism, n_real_tet)
             self._real_slots = self.red.xp.asarray(np.arange(n_sps)[None, :] < n_real[:, None])
         self.disabled_reason = None
         from ..coarse import CoarsePreconditionerFactory
-        self._coarse = CoarsePreconditionerFactory(max(n_real_prism, n_real_tet) > 1, global_coarse)
+        self._coarse = CoarsePreconditionerFactory(high_order, global_coarse, self._coarse_weights_host)
         self.colors = np.asarray(colors, dtype=np.int64)
         if mode is None:
             self.disabled_reason = (

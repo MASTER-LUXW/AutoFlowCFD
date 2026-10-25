@@ -12,7 +12,8 @@
 * 各 rank 在本地单元图上聚合（与本 rank 多层预处理同一组确定性聚合，继续粗化到不超过
   `COARSEST_DOF / n_var / n_ranks` 个节点；聚合体不跨 rank），按 rank 顺序编号成全局粗节点
   （`allgather` 各 rank 的节点数得到偏移）；
-* `A_g = P_g^T A P_g`：本 rank 的对角块、rank 内耦合块与**跨 rank 耦合块**（行单元在本
+* `A_g = R_g A P_g`（`R_g = P_g^T diag(w)`，细层为解点层时 `w` 是与本地多层 p 层同一组限制权重，
+  `multilevel.py` 模块文档"p 层的限制权重"）：本 rank 的对角块、rank 内耦合块与**跨 rank 耦合块**（行单元在本
   rank、列单元是 halo，装配时保留，见 `select_rows` / `cell_blocks.py`）按
   (全局粗行, 全局粗列, 行变量, 列变量) 求和成三元组；halo 单元的全局粗编号经与残差同一次
   halo 交换取得（`CoarseCommContext.compact_cell_values`）。三元组 `allgather` 后各 rank 拼出
@@ -20,7 +21,7 @@
 
 ## 作用（乘性，粗校正在前）
 
-    z1 = P_g A_g^{-1} P_g^T r          P_g^T r：本 rank 那一段 + allreduce 求和
+    z1 = P_g A_g^{-1} R_g r            R_g r：本 rank 那一段 + allreduce 求和
     z  = z1 + M_loc (r - A z1)
 
 `A z1` 里跨 rank 耦合块乘的是 halo 单元上的 `z1`，它就是全局粗解的对应分量——每个 rank
@@ -118,8 +119,9 @@ class GlobalCoarseCorrection(PseudoTransientDiagonal):
     __slots__ = ("_space", "_local", "_fine", "_cross", "_lu", "_n_var", "_xp")
 
     def __init__(self, space: GlobalCoarseSpace, local_factory: Callable, diag, off, struct,
-                 cross: CrossRankCoupling, dtau_flat, n_sps: int):
-        """`local_factory(dtau_host)`：按主机端 dtau 构造本 rank 的块 ILU / 多层预处理。"""
+                 cross: CrossRankCoupling, dtau_flat, n_sps: int, row_weights=None):
+        """`local_factory(dtau_host)`：按主机端 dtau 构造本 rank 的块 ILU / 多层预处理；`row_weights`：细层
+        `(n_cells, n_sps)` 限制权重，None 为不加权（细层已是节点层）。"""
         from scipy.sparse import coo_matrix
         from scipy.sparse.linalg import splu
 
@@ -132,14 +134,15 @@ class GlobalCoarseCorrection(PseudoTransientDiagonal):
         nv = self._n_var = struct.n_var
         self._space, self._cross = space, cross
         self._local = local_factory(dtau_host)
-        self._fine = _Level(diag, off, struct, 1.0 / dtau_host, n_sps, factor=False)
+        self._fine = _Level(diag, off, struct, 1.0 / dtau_host, n_sps, factor=False, row_w=row_weights)
+        row_w = self._fine.row_w
         rows, cols, vals = coarse_triplets(diag, off, struct.row_dof, 1.0 / dtau_host, struct, space.gid_local,
-                                           n_sps, nv)
+                                           n_sps, nv, row_w)
         n_x = cross.cols.size * nv * nv
         xr, xc, xv = np.empty(n_x, np.int64), np.empty(n_x, np.int64), np.empty(n_x)
         if n_x:
             coupling_triplets(cross.indptr, cross.cols, cross.offset, cross.data, struct.row_dof, cross.col_dof,
-                              space.gid_local, space.gid_compact, nv, xr, xc, xv)
+                              row_w, space.gid_local, space.gid_compact, nv, xr, xc, xv)
         n = space.n_global * nv
         # 先在本 rank 合并重复项，只交换合并后的三元组
         mine = coo_matrix((np.concatenate([vals, xv]), (np.concatenate([rows, xr]), np.concatenate([cols, xc]))),
@@ -161,7 +164,7 @@ class GlobalCoarseCorrection(PseudoTransientDiagonal):
         n_sps = self._fine.n_sps
         lo, hi = sp.offset * nv, (sp.offset + sp.n_mine) * nv
         rc = np.zeros(sp.n_global * nv)
-        rc[lo:hi] = restrict(x, s.row_dof, sp.gid_local - sp.offset, sp.n_mine, n_sps, nv)
+        rc[lo:hi] = restrict(x, s.row_dof, sp.gid_local - sp.offset, sp.n_mine, n_sps, nv, self._fine.row_w)
         zc = self._lu.solve(np.asarray(sp.ctx.allreduce_sum(rc), dtype=np.float64))
         z1 = np.empty_like(x)
         prolong(zc[lo:hi], s.row_dof, sp.gid_local - sp.offset, n_sps, nv, z1)

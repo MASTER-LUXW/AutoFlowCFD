@@ -1,8 +1,9 @@
 """多层预处理（`implicit/coarse/`）：
 
 1. 组成部分（装配矩阵乘、转移算子、Galerkin 粗算子、粗层块稀疏存储、聚合层次）与按定义
-   稠密构造的矩阵逐项对照（通道 P1 四面体的真实解析块）；
-2. 两层作用 `z = P A_c^{-1} P^T r + M_ILU^{-1}(r - A z1)` 与稠密公式一致；
+   稠密构造的矩阵逐项对照（通道 P1 四面体的真实解析块），限制含不加权（`R = P^T`）与按解点加权
+   （`R = P^T diag(w)`，p 层的限制权重）两种；
+2. 两层作用 `z = P A_c^{-1} R r + M_ILU^{-1}(r - A z1)` 与稠密公式一致；
 3. 有效：大 CFL、真实右端项 `-R` 下，灵活 GMRES 的迭代数少于块 ILU。"""
 
 import numpy as np
@@ -81,6 +82,46 @@ def test_transfer_and_galerkin_match_dense():
     Ac = galerkin_coarse_matrix(diag, off, struct.row_dof, 1.0 / dtau, struct, agg, n_agg, ns, NV).toarray()
     ref = P.T @ A @ P
     np.testing.assert_allclose(Ac, ref, rtol=1e-9, atol=1e-9 * np.abs(ref).max())
+
+
+def test_weighted_restriction_and_galerkin_match_dense():
+    """按解点加权的限制 `R = P^T diag(w)` 与 `A_c = R A P`（p 层的限制权重，`multilevel.py` 模块文档）。"""
+    nc, ns, n_real, diag, off, dtau, struct = _system()
+    (agg, n_agg), = build_hierarchy(struct.indptr, struct.cols, nc, nc - 1)
+    A = _dense_A(nc, ns, n_real, diag, off, dtau, struct)
+    P = _dense_P(nc, ns, n_real, agg, n_agg)
+    rng = np.random.default_rng(6)
+    w = rng.uniform(0.5, 2.0, (nc, ns))
+    R = P.T * np.repeat(w.ravel(), NV)[None, :]
+    r = rng.standard_normal(A.shape[0])
+    np.testing.assert_allclose(restrict(r, struct.row_dof, agg, n_agg, ns, NV, w), R @ r, rtol=1e-12, atol=1e-12)
+    Ac = galerkin_coarse_matrix(diag, off, struct.row_dof, 1.0 / dtau, struct, agg, n_agg, ns, NV, w).toarray()
+    ref = R @ A @ P
+    np.testing.assert_allclose(Ac, ref, rtol=1e-9, atol=1e-9 * np.abs(ref).max())
+    # 全 1 权重与不加权逐位相同
+    ones = np.ones((nc, ns))
+    np.testing.assert_array_equal(restrict(r, struct.row_dof, agg, n_agg, ns, NV, ones),
+                                  restrict(r, struct.row_dof, agg, n_agg, ns, NV))
+    assert (galerkin_coarse_matrix(diag, off, struct.row_dof, 1.0 / dtau, struct, agg, n_agg, ns, NV, ones)
+            != galerkin_coarse_matrix(diag, off, struct.row_dof, 1.0 / dtau, struct, agg, n_agg, ns, NV)).nnz == 0
+
+
+def test_weighted_two_level_action_matches_dense_formula():
+    """p 层按解点加权时两层作用 `z = P (R A P)^{-1} R r + M_ILU^{-1}(r - A z1)`。"""
+    nc, ns, n_real, diag, off, dtau, struct = _system()
+    hier = preconditioner_hierarchy(struct, high_order=True)
+    agg, n_agg = hier[0]
+    A = _dense_A(nc, ns, n_real, diag, off, dtau, struct)
+    P = _dense_P(nc, ns, n_real, agg, n_agg)
+    w = np.random.default_rng(7).uniform(0.5, 2.0, (nc, ns))
+    R = P.T * np.repeat(w.ravel(), NV)[None, :]
+    ilu = BlockILUPreconditioner(diag, off, struct, dtau, ns)
+    prec = MultilevelPreconditioner(diag, off, struct, hier, dtau, ns, w)
+    r = np.random.default_rng(8).standard_normal(A.shape[0])
+    z1 = P @ np.linalg.solve(R @ A @ P, R @ r)
+    ref = z1 + ilu.apply((r - A @ z1).reshape(-1, NV)).reshape(-1)
+    z = prec.apply(r.reshape(-1, NV)).reshape(-1)
+    np.testing.assert_allclose(z, ref, rtol=1e-6, atol=1e-8 * np.abs(ref).max())
 
 
 def test_hierarchy_covers_every_node_with_connected_aggregates():

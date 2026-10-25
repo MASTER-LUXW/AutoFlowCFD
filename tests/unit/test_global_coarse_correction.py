@@ -16,7 +16,10 @@ from autoflowcfd.core.fr_residual.jacobian.backend import select_rows
 from autoflowcfd.core.time_integration.implicit.blocks.block_ilu import BlockCouplingStructure
 from autoflowcfd.core.time_integration.implicit.blocks.cell_blocks import CellBlockJacobian
 from autoflowcfd.core.time_integration.implicit.coarse import CoarseCommContext, CoarsePreconditionerFactory
+from autoflowcfd.core.time_integration.implicit.coarse.cell_coarse import restriction_weights
 from autoflowcfd.core.time_integration.implicit.coarse.galerkin import galerkin_coarse_matrix
+from autoflowcfd.core.time_integration.positivity.limiter import build_positivity_limiter
+from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.time_integration.implicit.krylov.gmres import gmres_right
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from tests.unit._thread_comm import ThreadComm
@@ -43,9 +46,16 @@ def _context(comm, rank, local_ids, n_compact):
                              allreduce_sum=allreduce_sum, compact_cell_values=compact_cell_values)
 
 
-def _partitioned(dtau_value, with_global: bool):
+def _partitioned(dtau_value, with_global: bool, physical_weights: bool):
+    """各 rank 的多层预处理（+ 全局粗校正）。P>=1 时两者都按 `R = P^T diag(w)` 限制：`physical_weights` 时 `w` 取
+    生产用的限制权重（正性限制器的积分 / 均匀权重），否则取随机正值（只核对公式）。"""
     mesh, res, U, r0, bp, bt, cp, n_real, colors, diag, off = _setup("tet", 1, smooth=True)
     nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+    if physical_weights:
+        lim = build_positivity_limiter(mesh, generate_fr_operators(1), order=1)
+        weights = restriction_weights(np.asarray(lim.W), np.asarray(lim.norm_weights))
+    else:
+        weights = np.random.default_rng(9).uniform(0.5, 2.0, (nc, ns))
     assert mesh.n_prism_cells == 0          # 紧凑空间 = 全局单元编号（全是四面体）
     dtau = np.full(nc * ns, dtau_value)
     parts = np.array_split(np.arange(nc), N_RANKS)
@@ -60,13 +70,13 @@ def _partitioned(dtau_value, with_global: bool):
         jac = CellBlockJacobian.from_blocks(bp_l, bt_l, n_sps=ns, n_var=NV, cell_is_prism=np.zeros(ids.size, bool),
                                             n_real_prism=npr, n_real_tet=nte)
         ctx = _context(comm, r, ids, nc) if with_global else None
-        fac = CoarsePreconditionerFactory(True, ctx)
+        fac = CoarsePreconditionerFactory(True, ctx, weights[ids])
         rows = (ids[:, None] * ns + np.arange(ns)[None, :]).ravel()
         prec = fac.make(jac, struct, fac.cross_coupling(cross, struct), dtau[rows])
         return dict(ids=ids, rows=rows, prec=prec, fac=fac, struct=struct, jac=jac)
 
     ranks = comm.run(build)
-    return mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm
+    return mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm, weights
 
 
 def _apply_all(ranks, comm, v_global, ns):
@@ -83,7 +93,7 @@ def _apply_all(ranks, comm, v_global, ns):
 
 
 def test_action_matches_dense_definition():
-    mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm = _partitioned(1e-1, True)
+    mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm, weights = _partitioned(1e-1, True, False)
     struct_all = BlockCouplingStructure(cp, nc, n_real)
     A = _dense_A(nc, ns, n_real, diag, off, dtau, struct_all)
     # 全局粗节点（各 rank 的空间拼起来）
@@ -93,10 +103,12 @@ def test_action_matches_dense_definition():
         gid[rk["ids"]] = sp.gid_local
     n_g = ranks[0]["prec"]._space.n_global
     Pg = _dense_P(nc, ns, n_real, gid, n_g)
-    Ag = galerkin_coarse_matrix(diag, off, struct_all.row_dof, 1.0 / dtau, struct_all, gid, n_g, ns, NV).toarray()
-    np.testing.assert_allclose(Ag, Pg.T @ A @ Pg, rtol=1e-9, atol=1e-9 * np.abs(Ag).max())
+    Rg = Pg.T * np.repeat(weights.ravel(), NV)[None, :]
+    Ag = galerkin_coarse_matrix(diag, off, struct_all.row_dof, 1.0 / dtau, struct_all, gid, n_g, ns, NV,
+                                weights).toarray()
+    np.testing.assert_allclose(Ag, Rg @ A @ Pg, rtol=1e-9, atol=1e-9 * np.abs(Ag).max())
     r = np.random.default_rng(5).standard_normal(A.shape[0])
-    z1 = Pg @ np.linalg.solve(Ag, Pg.T @ r)
+    z1 = Pg @ np.linalg.solve(Ag, Rg @ r)
     resid = r - A @ z1
     ref = z1.copy()
     for rk in ranks:
@@ -110,7 +122,7 @@ def test_action_matches_dense_definition():
 def test_global_coarse_reduces_iterations_over_rank_local_preconditioning():
     iters = {}
     for tag, with_global in (("local", False), ("global", True)):
-        mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm = _partitioned(1e-1, with_global)
+        mesh, nc, ns, n_real, diag, off, dtau, r0, cp, ranks, comm, _ = _partitioned(1e-1, with_global, True)
         struct_all = BlockCouplingStructure(cp, nc, n_real)
         A = _dense_A(nc, ns, n_real, diag, off, dtau, struct_all)
         b = -np.asarray(r0, dtype=np.float64).reshape(-1)

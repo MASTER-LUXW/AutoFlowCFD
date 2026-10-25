@@ -23,6 +23,24 @@ P>=1 先做一层 p 粗化（每单元一个节点：单元内全部真实解点
 `A_{k+1} = P_k^T A_k P_k`（Galerkin，`galerkin.py`），粗层每节点 `n_var` 个未知量、PTC 项
 已并进对角块。各层矩阵依赖 `dtau`，每个 `dtau` 档重新构造与分解；层次只依赖拓扑。
 
+## p 层的限制权重
+
+细层的行是逐解点残差（单位体积上的量），p 层把一个单元的全部真实解点限制成一个节点：不加权求和（`P^T`）让
+各解点等权，与单元积分不相称。p 层改用单元级粗校正的同一组限制权重（`cell_coarse.py::restriction_weights`：
+单元积分权重全部非负时用它，否则用合计为单元体积的均匀权重）`R = P^T diag(w)`、`A_1 = R A_0 P`，粗层方程即
+单元积分（有限体积）形式；之后的聚合层是节点层，`R = P^T`。
+
+2026-10-25 方柱 SA P2 薄片（2.46 万棱柱，平均流与湍流都是本档），从同一状态出发的稳态 Newton 首步（同一线性
+系统）GMRES 次数：
+
+    CFL       不加权   加权
+    2000         9       9
+    5e4         44      34
+    5e5        102      58（第二步：313 次停在 0.12 / 263 次达到容差）
+
+小 CFL 下两者相同，大 CFL 下全局慢模态主导时加权明显更好。细层上没有 p 层（P0、或单元级粗矩阵本身就是细层）
+时不加权。
+
 ## 作用：K 循环（Notay & Vassilevski 2008）
 
     第 k 层两层作用    T_k(r) = z1 + M_k^{-1}(r - A_k z1)，  z1 = P_k W_{k+1}(P_k^T r)
@@ -49,7 +67,7 @@ import numpy as np
 from ..blocks.block_ilu import BlockCouplingStructure, BlockILUPreconditioner, factor_block_ilu, solve_block_ilu
 from ..krylov.gmres import gmres_right
 from ..blocks.preconditioner import PseudoTransientDiagonal
-from .galerkin import assembled_matvec, galerkin_coarse_matrix, prolong, restrict
+from .galerkin import assembled_matvec, galerkin_coarse_matrix, prolong, restrict, unit_row_weights
 
 #: 最粗层未知量上限：不超过它就做稀疏直接解（plate_demo P0 实测 8e3 量级的 LU 分解
 #: 与回代都在 0.1 s 以内；聚合层次的最粗节点数按它除以 n_var 取）。
@@ -78,14 +96,17 @@ def preconditioner_hierarchy(struct: BlockCouplingStructure, high_order: bool, c
 
 
 class _Level:
-    """一层块稀疏矩阵（对角块扁平存储 + 耦合块 CSR）及其 ILU 分解。"""
+    """一层块稀疏矩阵（对角块扁平存储 + 耦合块 CSR）、限制到下一层的行权重（`galerkin.restrict`，None 为全 1）及其
+    ILU 分解。"""
 
-    __slots__ = ("diag", "off", "struct", "inv_dtau", "n_sps", "inv")
+    __slots__ = ("diag", "off", "struct", "inv_dtau", "n_sps", "row_w", "inv")
 
-    def __init__(self, diag, off, struct, inv_dtau, n_sps, factor: bool):
+    def __init__(self, diag, off, struct, inv_dtau, n_sps, factor: bool, row_w=None):
         self.diag, self.off, self.struct = diag, off, struct
         self.inv_dtau = inv_dtau
         self.n_sps = int(n_sps)
+        self.row_w = (unit_row_weights(struct.row_dof.shape[0], self.n_sps) if row_w is None
+                      else np.ascontiguousarray(row_w, dtype=np.float64).reshape(struct.row_dof.shape[0], self.n_sps))
         self.inv = factor_block_ilu(diag, off, struct, inv_dtau, self.n_sps) if factor else None
 
     def matvec(self, x):
@@ -98,7 +119,7 @@ class _Level:
     def coarse_matrix(self, agg, n_agg):
         s = self.struct
         return galerkin_coarse_matrix(self.diag, self.off, s.row_dof, self.inv_dtau, s, agg, n_agg,
-                                      self.n_sps, s.n_var)
+                                      self.n_sps, s.n_var, self.row_w)
 
 
 def _level_from_scipy(A, n_var: int) -> _Level:
@@ -132,9 +153,11 @@ class MultilevelPreconditioner(PseudoTransientDiagonal):
         """K 循环的粗层内层 Krylov 让作用随右端项变化。"""
         return True
 
-    def __init__(self, diag, off, struct: BlockCouplingStructure, hierarchy, dtau_flat, n_sps: int):
+    def __init__(self, diag, off, struct: BlockCouplingStructure, hierarchy, dtau_flat, n_sps: int,
+                 row_weights=None):
         """`diag/off`：细层对角块（`block_ilu.flatten_cell_blocks`）；`hierarchy`：
-        `preconditioner_hierarchy` 的结果（至少一层）。"""
+        `preconditioner_hierarchy` 的结果（至少一层）；`row_weights`：细层 `(n_cells, n_sps)` 限制权重（模块文档
+        "p 层的限制权重"），None 为不加权（细层已是节点层）。"""
         from scipy.sparse.linalg import splu
 
         from autoflowcfd.core.utils.array_module import array_module
@@ -146,7 +169,7 @@ class MultilevelPreconditioner(PseudoTransientDiagonal):
         dtau_host = np.asarray(dtau_flat.get() if hasattr(dtau_flat, "get") else dtau_flat,
                                dtype=np.float64).ravel()
         self._n_var = struct.n_var
-        self._fine = _Level(diag, off, struct, 1.0 / dtau_host, n_sps, factor=False)
+        self._fine = _Level(diag, off, struct, 1.0 / dtau_host, n_sps, factor=False, row_w=row_weights)
         # 细层光滑沿用块 ILU 预处理子（它处理零填充槽位：dtau * v）
         self._smoother = BlockILUPreconditioner(diag, off, struct, dtau_host, n_sps)
         self._hierarchy = hierarchy
@@ -169,7 +192,7 @@ class MultilevelPreconditioner(PseudoTransientDiagonal):
         """第 k 层的一次两层作用：粗校正在前、一次 ILU 后光滑（见模块文档）。"""
         agg, n_agg = self._hierarchy[k]
         s = level.struct
-        rc = restrict(r, s.row_dof, agg, n_agg, level.n_sps, s.n_var)
+        rc = restrict(r, s.row_dof, agg, n_agg, level.n_sps, s.n_var, level.row_w)
         z = np.empty_like(r)
         prolong(self._solve_level(k + 1, rc), s.row_dof, agg, level.n_sps, s.n_var, z)
         return z + self._smooth(k, level, r - level.matvec(z))

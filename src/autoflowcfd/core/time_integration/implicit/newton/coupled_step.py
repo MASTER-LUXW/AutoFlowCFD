@@ -61,7 +61,7 @@ from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from ..blocks.block_budget import plan_block_memory
 from ..blocks.block_jacobi import BlockJacobiCache
-from ..coarse.cell_coarse import mean_coarse_available, mean_coarse_weights
+from ..coarse.cell_coarse import mean_coarse_available, positivity_restriction_weights
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
 from .jfnk import step_newton_krylov
@@ -303,16 +303,17 @@ def _caches(solver, backend):
         mean_coarse = mean_coarse_available(n_real_prism, n_real_tet)
         plan = plan_block_memory(backend.red, cell_is_prism, backend.n_sps, n_real_prism, n_real_tet,
                                  N_MEAN_FLOW_VARS, n_turb, mean_coarse=mean_coarse)
+        high_order = max(n_real_prism, n_real_tet) > 1
         common = dict(cell_is_prism=cell_is_prism, n_sps=backend.n_sps, plan=plan,
                       n_real_prism=n_real_prism, n_real_tet=n_real_tet, red=backend.red,
-                      colors=backend.cell_colors(), global_coarse=backend.coarse_context())
+                      colors=backend.cell_colors(), global_coarse=backend.coarse_context(),
+                      coarse_weights=positivity_restriction_weights(backend.positivity) if high_order else None)
         if need_turb:
             solver._newton_turb_state = {
                 "block": BlockJacobiCache(n_var=n_turb, **common)}
         if need_mean:
             solver._newton_block_precond = BlockJacobiCache(
-                n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True,
-                coarse_weights=mean_coarse_weights(backend.positivity) if mean_coarse else None, **common)
+                n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True, **common)
     return solver._newton_block_precond, solver._newton_turb_state["block"]
 
 
