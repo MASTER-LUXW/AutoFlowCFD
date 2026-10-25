@@ -205,6 +205,25 @@ def convection_jump_point(m, ps, po):
 
 
 @njit(cache=True, parallel=True)
+def convection_face_jumps_kernel(m, phi_self, phi_other, inflow, freestream):
+    """某一侧坐标系下全部通量点的对流跳变量 `convection_jump_point(m, phi_self, phi_other)`，(n_faces, n_fp)。
+
+    `inflow`（同形状 bool，或 (0, 0) 表示没有开放边界）为真的点另一侧取来流值 `freestream`
+    （`faces.py::inflow_points`）。残差与湍流解析 Jacobian 用同一个点函数；2026-10-25 以前残差在整面数组上写成
+    `m * (where(m >= 0, phi, phi_other) - phi)` 加一次来流 `where`（每个坐标系约四次整面大小的单线程运算），
+    有限值上逐位相同，出流点上本侧迹非有限时此前给出非有限跳变量、现在与点函数一致为 0。
+    """
+    n_faces, n_fp = m.shape
+    has_inflow = inflow.shape[0] > 0
+    out = np.empty((n_faces, n_fp))
+    for f in prange(n_faces):
+        for i in range(n_fp):
+            po = freestream if has_inflow and inflow[f, i] else phi_other[f, i]
+            out[f, i] = convection_jump_point(m[f, i], phi_self[f, i], po)
+    return out
+
+
+@njit(cache=True, parallel=True)
 def diffusion_face_jumps_kernel(
     phi, gamma, grad_phi,
     self_cell, self_face_op, boundary_extrap_native,

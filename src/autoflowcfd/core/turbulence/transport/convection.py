@@ -45,6 +45,10 @@ from .faces import (
     inflow_points,
     precompute_scalar_convection_geometry,
 )
+from .face_frames import convection_face_jumps_kernel
+
+#: 没有开放边界时传给 `convection_face_jumps_kernel` 的来流点掩码。
+_NO_INFLOW = np.zeros((0, 0), dtype=np.bool_)
 
 
 #: k/omega 输运体积项恒走过积分（去混叠）：对流通量 `adj(J) rho u phi` 是非线性乘积，真实多项式次数约
@@ -193,24 +197,23 @@ def compute_scalar_convection_residual(
     del div_F
 
     # === 界面项（两侧各自坐标系）===
+    # 逐点规则即 face_frames.convection_jump_point（湍流解析 Jacobian 用同一个点函数）
+    if open_boundary_face is not None and freestream_value is None:
+        raise ValueError("给出开放边界面（open_boundary_face）时必须同时给出来流值 freestream_value")
     masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
+    fs = 0.0 if freestream_value is None else float(freestream_value)
     phi_o, phi_o_other = _extrapolate_scalar_to_faces(scalar_field, flat, ops, mesh, *masks)
     m_o = conv_geom.mass_flux
-    if open_boundary_face is not None:
-        if freestream_value is None:
-            raise ValueError("给出开放边界面（open_boundary_face）时必须同时给出来流值 freestream_value")
-        phi_o_other = np.where(inflow_points(np, flat, "owner", open_boundary_face, m_o), freestream_value, phi_o_other)
-    # 与 face_frames.convection_jump_point 同一规则（湍流解析 Jacobian 用那个点函数）
-    jump_o = m_o * (np.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
-    del phi_o, phi_o_other
+    inflow_o = _NO_INFLOW if open_boundary_face is None else inflow_points(np, flat, "owner", open_boundary_face, m_o)
+    jump_o = convection_face_jumps_kernel(m_o, phi_o, phi_o_other, inflow_o, fs)
+    del phi_o, phi_o_other, inflow_o
 
     phi_n, phi_n_other = _extrapolate_scalar_to_faces_neighbor_frame(scalar_field, flat, *masks)
     m_n = conv_geom.mass_flux_neighbor
-    if open_boundary_face is not None and freestream_value is not None:   # 两者同时给出（上面已检查）
-        phi_n_other = np.where(inflow_points(np, flat, "neighbor", open_boundary_face, m_n), freestream_value,
-                               phi_n_other)
-    jump_n = m_n * (np.where(m_n >= 0, phi_n, phi_n_other) - phi_n)
-    del phi_n, phi_n_other
+    inflow_n = (_NO_INFLOW if open_boundary_face is None
+                else inflow_points(np, flat, "neighbor", open_boundary_face, m_n))
+    jump_n = convection_face_jumps_kernel(m_n, phi_n, phi_n_other, inflow_n, fs)
+    del phi_n, phi_n_other, inflow_n
 
     with np.errstate(over='ignore', invalid='ignore'):
         return residual + _lift_side_jumps(jump_o, jump_n, -1.0, flat, mesh)

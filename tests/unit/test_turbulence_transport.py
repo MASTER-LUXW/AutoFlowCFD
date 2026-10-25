@@ -19,7 +19,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from autoflowcfd.core.turbulence.transport.face_frames import extrapolate_scalar_pair_kernel
+from autoflowcfd.core.turbulence.transport.face_frames import (
+    convection_face_jumps_kernel, extrapolate_scalar_pair_kernel,
+)
 from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -387,3 +389,23 @@ class TestComputeOmegaWallTarget:
 
         assert not np.any(has_value)
         np.testing.assert_array_equal(omega_wall_value_face, 0.0)
+
+
+def test_convection_face_jumps_follow_the_point_rule():
+    """整面对流跳变量核：有限值上与 `m (where(m >= 0, phi, phi_other) - phi)` 逐位相同，来流点另一侧取来流值，
+    出流点上本侧迹非有限时为 0（与解析 Jacobian 用的点函数 `convection_jump_point` 一致）。"""
+    rng = np.random.default_rng(11)
+    m = rng.standard_normal((40, 7))
+    phi = rng.random((40, 7))
+    other = rng.random((40, 7))
+    no_inflow = np.zeros((0, 0), dtype=bool)
+    np.testing.assert_array_equal(convection_face_jumps_kernel(m, phi, other, no_inflow, 0.0),
+                                  m * (np.where(m >= 0, phi, other) - phi))
+    inflow = (rng.random((40, 7)) < 0.3) & (m < 0)
+    np.testing.assert_array_equal(convection_face_jumps_kernel(m, phi, other, inflow, 2.5),
+                                  m * (np.where(m >= 0, phi, np.where(inflow, 2.5, other)) - phi))
+    phi_bad = phi.copy()
+    phi_bad[m >= 0] = np.nan
+    j = convection_face_jumps_kernel(m, phi_bad, other, no_inflow, 0.0)
+    assert np.all(j[m >= 0] == 0.0)
+    np.testing.assert_array_equal(j[m < 0], (m * (other - phi))[m < 0])
