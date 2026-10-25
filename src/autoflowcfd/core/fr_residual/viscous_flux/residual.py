@@ -31,49 +31,21 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         ops: FROperators
         mu: 分子动力粘度（标量）
         Pr: 分子普朗特数
-        mu_t_field: 湍流涡粘度场，形状 (n_cells, n_sps) 或 None（层流/未激活
-            湍流模型时视为全零）。这是 T-01/T-04/T-06 湍流-平均流耦合的
-            接入点——调用方（core/fr_solver/）负责把 SST/DDES/WALE 算出
-            的 nu_t 乘以密度后传入，见该模块修复说明。
+        mu_t_field: 湍流动力涡粘 `rho*nu_t`，形状 (n_cells, n_sps)；None（层流 / 未启用湍流模型）视为全零。
+            湍流模型与平均流的耦合点：调用方（`core/fr_solver/`）把模型给出的涡粘传进来，进入应力张量与热传导。
         Pr_t: 湍流普朗特数
-        boundary_ghost_provider: 边界面幽灵态提供者，与无粘残差
-            （core/fr_residual/inviscid.py）共用同一个实例/同一套 WALL/INLET/
-            OUTLET/FARFIELD/SYMMETRY 逻辑（见 boundary/fr_ghost_state.py），
-            签名 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp。
-            必须显式给出（`require_ghost_provider`；零梯度外插须显式传 DefaultGhostProvider()）。
+        boundary_ghost_provider: 边界面幽灵态提供者，与无粘残差（`core/fr_residual/inviscid.py`）共用同一个实例、
+            同一套 WALL / INLET / OUTLET / FARFIELD / SYMMETRY 逻辑（`boundary/fr_ghost_state.py`），签名
+            `(face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp`。必须显式给出（`require_ghost_provider`；零梯度外插须
+            显式传 `DefaultGhostProvider()`）。边界面上 BR1 平均态取幽灵态（例如无滑移壁的平均速度为零），没有它
+            粘性方程在边界上不施加任何条件。
 
-            此前这里完全不使用该参数、边界面统一取 Q_n=Q_o（内部值原样
-            镜像），导致 BR1 平均 Q_avg 恒等于 Q_o、跳跃项 jump_owner 恒为
-            零——即固壁上不存在任何由粘性方程施加的边界约束，无滑移
-            剪应力不存在（真实数值验证：真实网格上 WALL 面的粘性校正项
-            逐面精确为 0，与是否退化/网格质量无关，是恒等式）。现在真正
-            调用 boundary_ghost_provider 取得反映边界条件的幽灵原始变量
-            （例如 WALL 用速度镜像取反构造 Q_avg 速度=0，真正的无滑移）。
-
-            **边界"另一侧"梯度与罚项按粘性边界种类分派（2026-09-30）**：
-            无滑移壁速度梯度取本侧（壁面切向速度的法向导数就是壁面剪应力，
-            **不能**镜像掉）、∇T 法向镜像（绝热）；对称面/滑移壁取镜像场的
-            梯度（切向牵引与法向热通量恰为零）；远场与入口流入点按 Dirichlet
-            加速度与温度罚项；出口取充分发展条件。此前除绝热类
-            镜像 ∇T 外一律"本侧梯度、只罚速度"，延拓分量上扩散算子没有任何
-            边界条件、失去强制性，完整论证与实测见
-            core/fr_operators/flux_kernels/viscous_bc.py 模块文档。非
-            `BoundaryGhostStateProvider` 的 provider（DefaultGhostProvider、
-            测试 stub）没有 BC 语义、幽灵态即本侧延拓，按零法向粘性通量处理。
-
-            **修复前的实测量级，以及为什么那个数字不能再被引用**：
-            79 万单元 cube_demo P1 iter=300 检查点上，温度场全域变化
-            5.086 K 但**胞内** |∇T| 只有 mean=5.9e-12 / p99=6.4e-11 /
-            max=3.7e-10 K/m，据此虚假壁面热通量密度
-            |q_n| = k|∇T| ≈ 6.1e-14 W/m^2，相对来流焓通量密度
-            rho*U*cp*T = 1.18e7 W/m^2 约 5e-21。**这个 5e-21 是被另一个
-            缺陷压出来的**：legacy 模态滤波器每个 RK stage 清掉一整阶模态
-            （该滤波子系统已于 2026-10-18 删除），P1 的解实际退化成分片常数，
-            胞内梯度当然是机器零。滤波器一旦放开，实测胞内 |∇u|/(U/h) 从
-            7.7e-16 跳到 O(1)，这一项的真实影响必须重新测量。
-            （校验说明：上述 |∇T| 数字所用的 `compute_physical_gradient`
-            调用方式已在已知线性场 T=x / T=3y 上验证到机器精度
-            7.6e-16，不是算子用错导致的虚低。）
+            **边界"另一侧"梯度与罚项按粘性边界种类分派**：无滑移壁速度梯度取本侧（壁面切向速度的法向导数就是
+            壁面剪应力，不能镜像掉）、∇T 法向镜像（绝热）；对称面 / 滑移壁取镜像场的梯度（切向牵引与法向热通量
+            恰为零）；远场与入口流入点按 Dirichlet 加速度与温度罚项；出口取充分发展条件。延拓分量上若不施加边界
+            条件，扩散算子失去强制性，论证与实测见 `core/fr_operators/flux_kernels/viscous_bc.py` 模块文档。非
+            `BoundaryGhostStateProvider` 的 provider（`DefaultGhostProvider`、测试 stub）没有 BC 语义、幽灵态即本侧
+            延拓，按零法向粘性通量处理。
 
         flat_face_override: 分布式路径预先按 local+halo 压缩索引空间构造的面几何（见
             `fr_residual/inviscid.py::compute_inviscid_residual_fr` 同名参数）。
