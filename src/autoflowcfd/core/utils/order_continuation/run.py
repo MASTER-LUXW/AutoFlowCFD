@@ -95,19 +95,24 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             # `--phase-max-iter` 大于剩余步数时非最终阶段照跑满它——plate_demo `solve resume --max-iter 8
             # --phase-max-iter 100` 在 P1 跑了 30 步（被手动停下），目标阶数分到的剩余步数为负、一步不跑
             stage_iter_budget = max_iter - total_iter
-            if not is_final_stage:
-                stage_iter_budget = min(stage_iter_budget, effective_phase_max_iter)
             phase_tol = tol * (10 ** (original_order - target_p))
             required_drop = 1.0 / max(phase_tol, 1e-30)
 
             initial_residual = None
+            # 本阶段已走的步数：resume 恢复出的第一个阶段从 checkpoint 记录的步数接着数（checkpoint_state.py 模块
+            # 文档），步数上限、提前升阶的最少步数与日志步号都按阶段内的真实步数
+            done = int(getattr(solver, "_phase_iterations", 0)) if resumed and target_p == starting_order else 0
+            if not is_final_stage:
+                stage_iter_budget = min(stage_iter_budget, max(effective_phase_max_iter - done, 0))
+            solver._phase_iterations = done
             if resumed and target_p == starting_order:
                 # resume 恢复出的第一个阶段：用 checkpoint 里存的阶段起始残差做种子，升阶判据按真实阶段起点算
                 persisted = getattr(solver, "_phase_initial_residual", None)
                 if persisted is not None:
                     initial_residual = persisted
                     if report:
-                        print(f"[INFO] P{target_p} resume：用 checkpoint 里保存的阶段起始残差 ({persisted:.6e}) 做种子")
+                        print(f"[INFO] P{target_p} resume：用 checkpoint 里保存的阶段起始残差 ({persisted:.6e}) 做种子，"
+                              f"本阶段已走 {done} 步")
                 elif report:
                     print(f"[WARN] P{target_p} 从没有阶段起始残差记录的 checkpoint resume：升阶判据从这次 resume 的"
                           f"第一步重新起算，可能提前触发")
@@ -118,7 +123,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             # 本模块被 core.utils 包导入期加载，time_integration 在那时尚未初始化完，局部导入
             from autoflowcfd.core.time_integration.time_accurate import advance
 
-            for i in range(stage_iter_budget):
+            for i in range(done, done + stage_iter_budget):
                 t_start = _time.time()
                 res = advance(solver, dt)
                 elapsed = _time.time() - t_start
@@ -133,6 +138,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 initial_residual = update_phase_baseline(solver, res, initial_residual, report,
                                                          f"P{target_p} Iter {i + 1}")
                 solver._phase_initial_residual = initial_residual     # 写入 checkpoint，供 resume 续接
+                solver._phase_iterations = i + 1
                 if report:
                     print(format_step_line(solver, target_p, i + 1, res, initial_residual, elapsed, total_iter))
                 if checkpoint_callback is not None:

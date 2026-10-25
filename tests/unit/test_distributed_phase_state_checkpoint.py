@@ -41,12 +41,13 @@ def test_checkpoint_carries_the_phase_initial_residual(mesh_and_ops, tmp_path):
             mu_molecular=MU_MOLECULAR)
     solver = _solver()
     solver._phase_initial_residual = 4321.5
+    solver._phase_iterations = 7                     # 两个求解循环总是与基准同时设置（checkpoint_state.py）
     path = distributed_save_checkpoint(solver, str(tmp_path), 3, "dummy_input.nas", mesh.order, "none", "cpu")
     restored = _solver()
     _U, metadata, _it = distributed_load_checkpoint(path, restored)
     assert metadata["phase_initial_residual"] == pytest.approx(4321.5)
     restore_phase_state(restored, metadata)
-    assert restored._phase_initial_residual == pytest.approx(4321.5)
+    assert restored._phase_initial_residual == pytest.approx(4321.5) and restored._phase_iterations == 7
     # 第一次 step() 之前写出的 checkpoint 不带这个键（h5py attrs 不接受 None）
     fresh = _solver()
     path0 = distributed_save_checkpoint(fresh, str(tmp_path / "p0"), 0, "dummy_input.nas", mesh.order, "none",

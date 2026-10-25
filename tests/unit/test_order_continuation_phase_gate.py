@@ -164,7 +164,7 @@ def test_phase_baseline_from_an_older_residual_definition_is_not_reused():
         phase_state_metadata, restore_phase_state,
     )
 
-    meta = phase_state_metadata(SimpleNamespace(_phase_initial_residual=3.5))
+    meta = phase_state_metadata(SimpleNamespace(_phase_initial_residual=3.5, _phase_iterations=4))
     assert meta["residual_norm_version"] == RESIDUAL_NORM_VERSION
     fresh = SimpleNamespace()
     restore_phase_state(fresh, meta)

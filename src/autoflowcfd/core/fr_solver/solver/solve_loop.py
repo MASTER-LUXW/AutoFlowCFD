@@ -271,8 +271,12 @@ class SolveLoopMixin:
         # 持久化，`order_continuation/checkpoint_state.py`）。续算时用恢复出的基准做种子——此前定阶循环不写它，
         # 定阶运行（例如 --init-from 起步的瞬态）的 checkpoint 续算时被报成"没有阶段起始残差记录"，相对收敛
         # 判据也从续算的第一步重新起算。
-        initial_res = (getattr(self, "_phase_initial_residual", None)
-                       if getattr(self, "_resumed_from_checkpoint", False) else None)
+        resumed = getattr(self, "_resumed_from_checkpoint", False)
+        initial_res = getattr(self, "_phase_initial_residual", None) if resumed else None
+        # 阶段已走的步数（同样随 checkpoint 持久化）：日志步号与"至少两步"判据按阶段内的真实步数；checkpoint 回调与
+        # 伪时间预算按本次调用的步数 k + 1（续算的回调自己加 checkpoint 迭代数偏移）
+        done = int(getattr(self, "_phase_iterations", 0)) if resumed else 0
+        self._phase_iterations = done
 
         # BLAS 线程数只在求解循环期间限制为 1（性能：求解阶段实测快
         # 9~11%；作用域必须是"循环期间"而不是"构造时一次"，理由见
@@ -281,7 +285,8 @@ class SolveLoopMixin:
         # 收敛判据与 Order Continuation 同一个（湍流斜坡、隐式湍流残差、舍入平台，order_continuation/policy.py）
         phase_gate = PhaseGate()
         with blas_threads_limited(1):
-            for i in range(max_iter):
+            for k in range(max_iter):
+                i = done + k
                 t_start = time.time()
                 res = advance(self, dt)
                 t_end = time.time()
@@ -302,6 +307,7 @@ class SolveLoopMixin:
                 phase_gate.observe(self, res)
                 initial_res = update_phase_baseline(self, res, initial_res, report, f"P{self.order} Iter {i + 1}")
                 self._phase_initial_residual = initial_res
+                self._phase_iterations = i + 1
 
                 # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
                 # 指出"P0/P1直接运算和P2 order continuation打印的信息应该
@@ -315,11 +321,11 @@ class SolveLoopMixin:
                 # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
                 # 气动力系数打印。
                 if report:
-                    print(format_step_line(self, self.order, i + 1, res, initial_res, t_end - t_start, i + 1))
+                    print(format_step_line(self, self.order, i + 1, res, initial_res, t_end - t_start, k + 1))
 
                 # 中间 checkpoint 保存
                 if checkpoint_callback is not None:
-                    checkpoint_callback(self, i + 1)
+                    checkpoint_callback(self, k + 1)
 
                 # 相对收敛判据：残差相对阶段基准下降 1/tol 倍（tol=1e-6 即 6 个量级），湍流一起到位；
                 # tol<=0 为纯定步数迭代（瞬态命令传 0.0），不启用判据
@@ -338,10 +344,10 @@ class SolveLoopMixin:
 
         # 收尾摘要：把"物理场到底走了多远"完整报一次（残差是否收敛与物理场是否建立是两件事）
         if report:
-            report_pseudo_time_summary(self, i + 1)
+            report_pseudo_time_summary(self, k + 1)
 
         self.solve_status = solve_status(converged, tol)
-        return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
+        return SolverResult(converged=converged, iterations=k + 1, final_residual=final_residual)
 
 
 class DistributedSolveLoopMixin(SolveLoopMixin):
