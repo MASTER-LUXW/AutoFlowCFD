@@ -76,20 +76,40 @@ def _extrapolate_scalar_to_faces_neighbor_frame(
     )
 
 
-def frame_boundary_points(xp, flat, frame):
+def frame_boundary_points(xp, flat, frame, rows=None):
     """某一侧坐标系下的边界点 `(true_boundary (n_faces,), partner (n_faces,), in_mixed (n_faces, n_fp))`。
 
     边界点有两类：owner 坐标系下的真边界面（没有任何 neighbor 来源）全部通量点；混合拆分面（B-8）配对边界半区的
     通量点（两个坐标系各自的 `mixed_*_mask`），它们的边界条件取配对边界面 `partner`（非混合面为 0，只在
     `in_mixed` 处有意义）。扩散边界目标、对流来流覆盖与湍流解析 Jacobian 的 ghost 规则都按这一份分类。
+
+    `rows` 给出时只在这些面上求值（各输出的第一维为 `len(rows)`），见 `frame_boundary_rows`。
     """
+    sel = slice(None) if rows is None else rows
     if frame == "owner":
-        true_bnd = (flat.neighbor_src0_cell < 0) & (flat.neighbor_src1_idx < 0)
-        partner, mask = flat.mixed_nb_partner, flat.mixed_nb_mask
+        true_bnd = (flat.neighbor_src0_cell[sel] < 0) & (flat.neighbor_src1_idx[sel] < 0)
+        partner, mask = flat.mixed_nb_partner[sel], flat.mixed_nb_mask[sel]
     else:
-        true_bnd = xp.zeros(flat.mixed_ow_partner.shape[0], dtype=bool)
-        partner, mask = flat.mixed_ow_partner, flat.mixed_ow_mask
+        partner, mask = flat.mixed_ow_partner[sel], flat.mixed_ow_mask[sel]
+        true_bnd = xp.zeros(partner.shape[0], dtype=bool)
     return true_bnd, xp.maximum(partner, 0), (partner >= 0)[:, None] & mask
+
+
+def frame_boundary_rows(xp, flat, frame):
+    """某一侧坐标系下含边界点的面（`frame_boundary_points` 里真边界面或 `in_mixed` 有通量点为真的面），按面几何
+    对象缓存（面表构造后不变）。
+
+    逐点分类只在这些面上求值、再散射回整面数组：其余面上分类恒为假，整面求值是每次残差求值十几次整面大小的单线程
+    数组运算——方柱 SA P2 薄片（12.3 万面记录 x 9 通量点）上扩散目标与来流点合计每次残差约 35 ms。
+    """
+    key = "_boundary_rows_" + frame
+    cached = getattr(flat, key, None)
+    if cached is not None:
+        return cached
+    true_bnd, _, in_mixed = frame_boundary_points(xp, flat, frame)
+    rows = xp.flatnonzero(true_bnd | in_mixed.any(axis=1))
+    setattr(flat, key, rows)
+    return rows
 
 
 def inflow_points(xp, flat, frame, open_code_face, m_side):
@@ -100,10 +120,13 @@ def inflow_points(xp, flat, frame, open_code_face, m_side):
     未匹配组的面按缺省配置），这里与边界点求与。2026-10-19（I-66）以前只覆盖 owner 坐标系的真边界面：混合拆分面
     的边界半区若配对面是开放边界，ghost 取零梯度而平均流取配对面的来流幽灵态。
     """
-    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame)
+    rows = frame_boundary_rows(xp, flat, frame)
+    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame, rows)
     open_code_face = xp.asarray(open_code_face, dtype=bool)
-    is_open = xp.where(in_mixed, open_code_face[mp][:, None], (true_bnd & open_code_face)[:, None])
-    return is_open & (m_side < 0)
+    is_open = xp.where(in_mixed, open_code_face[mp][:, None], (true_bnd & open_code_face[rows])[:, None])
+    out = xp.zeros(m_side.shape, dtype=bool)
+    out[rows] = is_open & (m_side[rows] < 0)
+    return out
 
 
 def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
@@ -113,7 +136,8 @@ def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
 
     边界点见 `frame_boundary_points`。类型取该边界面（混合面取配对边界面）的壁面掩码：
     `wall_dirichlet_zero_face` 为 Dirichlet 目标 0（k），`has_wall_dirichlet_value` 为逐通量点目标值（omega
-    壁面解析值），其余为齐次 Neumann。
+    壁面解析值），其余为齐次 Neumann。只在含边界点的面（`frame_boundary_rows`）上求值，其余面三者为假 / 0
+    （`target` 只在 `is_dirichlet` 处被读取）。
     """
     n_faces, n_fp = flat.owner_adj_row_exact.shape[:2]
     wz = (xp.zeros(n_faces, dtype=bool) if wall_dirichlet_zero_face is None
@@ -122,12 +146,18 @@ def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
           else xp.asarray(has_wall_dirichlet_value, dtype=bool))
     wv = (xp.zeros((n_faces, n_fp)) if wall_dirichlet_value_face is None
           else xp.asarray(wall_dirichlet_value_face))
-    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame)
-    is_bnd = true_bnd[:, None] | in_mixed
-    zero = xp.where(in_mixed, wz[mp][:, None], wz[:, None])
-    value = xp.where(in_mixed, hv[mp][:, None], hv[:, None]) & ~zero
-    target = xp.where(value, xp.where(in_mixed, wv[mp], wv), 0.0)
-    return is_bnd, is_bnd & (zero | value), target
+    rows = frame_boundary_rows(xp, flat, frame)
+    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame, rows)
+    is_bnd_r = true_bnd[:, None] | in_mixed
+    zero = xp.where(in_mixed, wz[mp][:, None], wz[rows][:, None])
+    value = xp.where(in_mixed, hv[mp][:, None], hv[rows][:, None]) & ~zero
+    is_bnd = xp.zeros((n_faces, n_fp), dtype=bool)
+    is_dir = xp.zeros((n_faces, n_fp), dtype=bool)
+    target = xp.zeros((n_faces, n_fp))
+    is_bnd[rows] = is_bnd_r
+    is_dir[rows] = is_bnd_r & (zero | value)
+    target[rows] = xp.where(value, xp.where(in_mixed, wv[mp], wv[rows]), 0.0)
+    return is_bnd, is_dir, target
 
 
 class ScalarConvectionGeometry(NamedTuple):

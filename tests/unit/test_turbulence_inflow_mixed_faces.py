@@ -107,3 +107,37 @@ def test_gpu_residual_matches_cpu_on_mixed_inflow(monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("frame", ["owner", "neighbor"])
+def test_boundary_row_subset_matches_whole_face_rule(frame):
+    """分类只在含边界点的面上求值（`frame_boundary_rows`）：与整面求值同一规则逐位一致，掩码在内部面也为真时
+    其余面仍全为假（`target` 只在 `is_dirichlet` 处有意义）。"""
+    from autoflowcfd.core.turbulence.transport.faces import (
+        boundary_diffusion_targets, frame_boundary_points, frame_boundary_rows,
+    )
+
+    m, ops, flat, rho, vel, open_code = _case()
+    rng = np.random.default_rng(3)
+    nf, nfp = flat.owner_adj_row_exact.shape[:2]
+    wz = rng.random(nf) < 0.4
+    hv = (rng.random(nf) < 0.4) & ~wz
+    wv = rng.random((nf, nfp))
+    m_side = rng.standard_normal((nf, nfp))
+    rows = frame_boundary_rows(np, flat, frame)
+    assert frame_boundary_rows(np, flat, frame) is rows          # 按面几何缓存
+    assert (rows.size > 0) == (frame == "owner")                # 本网格的混合面只在 owner 坐标系有配对边界面
+
+    true_bnd, mp, in_mixed = frame_boundary_points(np, flat, frame)
+    is_bnd = true_bnd[:, None] | in_mixed
+    zero = np.where(in_mixed, wz[mp][:, None], wz[:, None])
+    value = np.where(in_mixed, hv[mp][:, None], hv[:, None]) & ~zero
+    want_dir = is_bnd & (zero | value)
+    want_target = np.where(value, np.where(in_mixed, wv[mp], wv), 0.0)
+    want_inflow = np.where(in_mixed, open_code[mp][:, None], (true_bnd & open_code)[:, None]) & (m_side < 0)
+
+    b, d, t = boundary_diffusion_targets(np, flat, frame, wz, wv, hv)
+    np.testing.assert_array_equal(b, is_bnd)
+    np.testing.assert_array_equal(d, want_dir)
+    np.testing.assert_array_equal(np.where(d, t, 0.0), np.where(want_dir, want_target, 0.0))
+    np.testing.assert_array_equal(inflow_points(np, flat, frame, open_code, m_side), want_inflow)
