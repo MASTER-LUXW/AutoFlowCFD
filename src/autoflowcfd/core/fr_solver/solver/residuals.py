@@ -131,7 +131,7 @@ class _SolverResidualMixin:
                 np, self.mesh, get_flat_face_geometry(self.mesh, self.ops), self.boundary_ghost_provider,
                 self.state.U, self.mu_molecular)
             if wall_stress_correction is not None:
-                res = res + wall_stress_correction[..., : res.shape[-1]]
+                res += wall_stress_correction[..., : res.shape[-1]]     # 原地（res 是本次新建的数组）
 
         # 问题单元人工粘性：全部守恒变量的拉普拉斯（施加形式与判据见
         # `fr_operators/artificial_viscosity/entropy_viscosity.py`）。不走 mu_t
@@ -141,7 +141,7 @@ class _SolverResidualMixin:
         if nu_av is None:
             nu_av = self.compute_artificial_diffusivity_field()
         if nu_av is not None:
-            res = res + self._artificial_diffusion_residual(nu_av)[..., : res.shape[-1]]
+            res += self._artificial_diffusion_residual(nu_av)[..., : res.shape[-1]]
 
         return res
 
