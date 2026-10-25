@@ -238,6 +238,7 @@ class TestPhaseInitialResidualPersistence:
     def test_written_and_restored_exactly(self, tmp_path):
         solver = _fake_solver(n_cells=2, n_sps=1)
         solver._phase_initial_residual = 12345.6789
+        solver._phase_iterations = 41               # 两个求解循环总是与基准同时设置（checkpoint_state.py）
         write_checkpoint(
             solver, str(tmp_path), 3000, "volume.nas",
             order=0, turbulence_model="sst", backend="cpu", quiet=True,
@@ -247,9 +248,10 @@ class TestPhaseInitialResidualPersistence:
         import h5py
         with h5py.File(ckpt, "r") as f:
             assert f["metadata"].attrs["phase_initial_residual"] == pytest.approx(12345.6789)
+            assert f["metadata"].attrs["phase_iterations"] == 41
 
         restored, _, _ = self._rebuild(ckpt)
-        assert restored._phase_initial_residual == pytest.approx(12345.6789)
+        assert restored._phase_initial_residual == pytest.approx(12345.6789) and restored._phase_iterations == 41
 
     def test_not_yet_set_is_skipped_not_written_as_none(self, tmp_path):
         """h5py 的 attrs 不接受 None——一步都没走过的求解器（该属性从未赋值）
